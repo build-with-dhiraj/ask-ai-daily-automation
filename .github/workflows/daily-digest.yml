@@ -24,3 +24,5 @@ jobs:
           EVAL_SUMMARY_PATH: /tmp/daily_eval_yesterday_summary.json
           METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
           METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
+          # Fallback if secret was saved as METABASE_BEHAVIOR_REPHRASE_CARD (no _ID)
+          METABASE_BEHAVIOR_REPHRASE_CARD: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD }}

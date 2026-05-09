@@ -46,7 +46,8 @@ This powers the **Silent-failure proxies** block in the 09:30 IST digest ([`dail
 2. **Repeat** for [sql/behavior_rephrase_keywords.sql](sql/behavior_rephrase_keywords.sql) → e.g. `Ask AI — rephrase keywords by chapter`.
 3. **GitHub** → repo **ask-ai-daily-automation** → **Settings → Secrets and variables → Actions** → **New repository secret**:
    - Name: `METABASE_BEHAVIOR_FOLLOWUP_CARD_ID` → value: **digits only** (e.g. `33201`).
-   - Name: `METABASE_BEHAVIOR_REPHRASE_CARD_ID` → value: **digits only** (e.g. `33202`).
+   - Name: `METABASE_BEHAVIOR_REPHRASE_CARD_ID` → value: **digits only** (e.g. `33202`).  
+     _(If you already saved it as `METABASE_BEHAVIOR_REPHRASE_CARD`, that still works — the digest workflow reads both.)_
 4. Next **Daily Digest** run (schedule or **Actions → Daily Digest → Run workflow**) will fetch both cards. No code change needed.
 
 The digest also reads **`EVAL_SUMMARY_PATH`** (`/tmp/daily_eval_yesterday_summary.json` on the runner). For the **Confirmed regression signal** line, the **Daily Eval** job should succeed on that machine **before** digest so the snapshot file exists.
