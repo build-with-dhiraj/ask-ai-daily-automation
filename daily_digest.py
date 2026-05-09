@@ -457,11 +457,16 @@ def build_blocks(
 
     divider: dict = {"type": "divider"}
 
+    # Order: system health + student voice first (stakeholder onboarding); then context blocks.
     return [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": f"\U0001f4ca Ask AI Daily Digest — {today_str}", "emoji": True},
         },
+        divider,
+        section(f":rotating_light: *Langfuse Errors (last 24h)*\n{errors_block}"),
+        divider,
+        section(f":speech_balloon: *User Comments on Downvotes (Langfuse, last 24h)*\n{scores_block}"),
         divider,
         section(f":thumbsdown: *Downvote Reasons — Academic (rolling 21d)*\n{academic_block}"),
         divider,
@@ -475,10 +480,6 @@ def build_blocks(
             f"*Rephrase / shorter / language-switch keyword rate:*\n{rephrase_txt}\n\n"
             f"{reg_txt}"
         ),
-        divider,
-        section(f":speech_balloon: *User Comments on Downvotes (Langfuse, last 24h)*\n{scores_block}"),
-        divider,
-        section(f":rotating_light: *Langfuse Errors (last 24h)*\n{errors_block}"),
         divider,
         {
             "type": "context",
