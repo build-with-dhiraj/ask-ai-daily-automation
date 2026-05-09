@@ -15,7 +15,7 @@ Required env vars:
 
 Metabase /api/card/.../query/json calls use no HTTP timeout (wait until the server
 returns). Langfuse and Slack keep short timeouts. The GitHub Actions job still has
-workflow `timeout-minutes` as the outer cap.
+workflow `timeout-minutes` in `.github/workflows/daily-digest.yml` as the outer cap.
 
 Usage:
   python3 daily_digest.py           # fetch + post to Slack
