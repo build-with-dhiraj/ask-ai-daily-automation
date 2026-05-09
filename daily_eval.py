@@ -34,6 +34,8 @@ Required env (set in Cowork SKILL.md or shell before invoking):
                               # OR same channel — your call)
   JUDGE_HTTP_TIMEOUT_SEC      # optional — per LLM call HTTP timeout (default 240s;
                               # prevents one hung Azure request from stalling the whole run)
+  METABASE_QUERY_TIMEOUT_SEC  # optional — Metabase card query HTTP timeout (default 600s;
+                              # prevents socket timeout if stratified sample query is slow)
 
 Usage:
   # Full daily run (Metabase pull → judge → Slack post)
@@ -51,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 from datetime import date, datetime, timezone
@@ -74,8 +77,10 @@ from judge_runner import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def metabase_session_token(base_url: str, username: str, password: str,
-                            timeout: float = 15.0) -> str:
+                            timeout: float | None = None) -> str:
     import urllib.request
+    if timeout is None:
+        timeout = float(os.environ.get("METABASE_SESSION_TIMEOUT_SEC", "30.0"))
     body = json.dumps({"username": username, "password": password}).encode("utf-8")
     req = urllib.request.Request(
         urljoin(base_url, "/api/session"),
@@ -91,20 +96,39 @@ def metabase_session_token(base_url: str, username: str, password: str,
 
 
 def metabase_run_card(base_url: str, card_id: int, auth_header: dict,
-                       timeout: float = 120.0) -> list[dict]:
-    """Run a saved Metabase question and return rows as list[dict]."""
+                       timeout: float | None = None,
+                       max_retries: int = 2) -> list[dict]:
+    """Run a saved Metabase question and return rows as list[dict].
+    
+    Retries up to max_retries times on socket timeout with exponential backoff.
+    timeout defaults to METABASE_QUERY_TIMEOUT_SEC env var (default 600s).
+    """
     import urllib.request
-    req = urllib.request.Request(
-        urljoin(base_url, f"/api/card/{card_id}/query/json"),
-        data=b"",
-        headers={"Content-Type": "application/json", **auth_header},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        rows = json.loads(resp.read().decode("utf-8"))
-    if not isinstance(rows, list):
-        raise RuntimeError(f"Metabase card {card_id}: unexpected response shape: {type(rows)}")
-    return rows
+    import urllib.error
+    
+    if timeout is None:
+        timeout = float(os.environ.get("METABASE_QUERY_TIMEOUT_SEC", "600.0"))
+    
+    for attempt in range(max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                urljoin(base_url, f"/api/card/{card_id}/query/json"),
+                data=b"",
+                headers={"Content-Type": "application/json", **auth_header},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                rows = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(rows, list):
+                raise RuntimeError(f"Metabase card {card_id}: unexpected response shape: {type(rows)}")
+            return rows
+        except (socket.timeout, urllib.error.URLError) as e:
+            if attempt < max_retries:
+                wait_time = 2 ** attempt  # exponential backoff: 1s, 2s, 4s, ...
+                print(f"⚠️  Metabase card query timeout (attempt {attempt + 1}/{max_retries + 1}, will retry in {wait_time}s): {e}")
+                time.sleep(wait_time)
+            else:
+                raise
 
 
 def normalize_metabase_rows(rows: list[dict]) -> list[dict]:
