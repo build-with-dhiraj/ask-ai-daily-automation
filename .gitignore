@@ -1,0 +1,9 @@
+.env
+results.json
+samples.json
+test_cases.json
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.log

@@ -1,0 +1,31 @@
+name: Daily Eval
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 08:30 IST every day
+  workflow_dispatch:        # manual trigger for testing
+
+jobs:
+  eval:
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip3 install openai langfuse
+
+      - name: Run daily eval
+        run: python3 daily_eval.py
+        env:
+          AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
+          AZURE_API_KEY: ${{ secrets.AZURE_API_KEY }}
+          AZURE_API_VERSION: ${{ secrets.AZURE_API_VERSION }}
+          DEPLOYMENT_NAME: ${{ secrets.DEPLOYMENT_NAME }}
+          METABASE_URL: ${{ secrets.METABASE_URL }}
+          METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
+          METABASE_QUESTION_ID: ${{ secrets.METABASE_QUESTION_ID }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
