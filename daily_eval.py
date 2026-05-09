@@ -12,12 +12,9 @@ Pipeline:
   4. Render the dual-track Slack block + per-stratum split
   5. Post to Slack channel via webhook (or dry-run to stdout)
 
-Sampling strategy (cost-optimised):
-  • ALL of yesterday's downvoted-academic queries          (rating=0)
-  • 10% random sample of yesterday's upvoted-academic       (rating=6)
-  • 10% random sample of yesterday's no-vote academic       (rating IS NULL)
-  • Hard caps: 1000 downvotes / 500 upvotes / 500 no-votes
-  • Worst-case daily cost @ $0.005/call: ~$10/day = ~$3.6K/year
+Sampling strategy (see `sql/daily_stratified_sample.sql` + Metabase Q33193):
+  • Chapter-stratified downvotes / upvotes / no-votes + outlier_long; caps in SQL
+  • Runner pulls the saved Metabase question as JSON
 
 Required env (set in Cowork SKILL.md or shell before invoking):
   AZURE_ENDPOINT
