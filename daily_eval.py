@@ -32,6 +32,8 @@ Required env (set in Cowork SKILL.md or shell before invoking):
   SLACK_WEBHOOK_URL           # the incoming-webhook for the eval channel
                               # (separate from the existing digest channel,
                               # OR same channel — your call)
+  JUDGE_HTTP_TIMEOUT_SEC      # optional — per LLM call HTTP timeout (default 240s;
+                              # prevents one hung Azure request from stalling the whole run)
 
 Usage:
   # Full daily run (Metabase pull → judge → Slack post)

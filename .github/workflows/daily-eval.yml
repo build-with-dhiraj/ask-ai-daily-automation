@@ -29,3 +29,5 @@ jobs:
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # Per-request LLM HTTP timeout (seconds); after this, sample is logged ERROR and run continues
+          JUDGE_HTTP_TIMEOUT_SEC: "300"

@@ -295,6 +295,20 @@ def _is_azure() -> bool:
     return bool(os.environ.get("AZURE_ENDPOINT") or os.environ.get("AZURE_OPENAI_ENDPOINT"))
 
 
+def judge_http_timeout_seconds() -> float:
+    """Per-request HTTP timeout for chat.completions (read-heavy judge calls).
+
+    Without this, a single hung Azure/OpenAI connection can stall the entire eval
+    with no log lines for many minutes. Override via JUDGE_HTTP_TIMEOUT_SEC.
+    """
+    raw = os.environ.get("JUDGE_HTTP_TIMEOUT_SEC", "240")
+    try:
+        v = float(raw)
+    except ValueError:
+        return 240.0
+    return max(30.0, min(v, 900.0))
+
+
 def get_openai_client():
     use_langfuse = (
         os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")
@@ -320,6 +334,7 @@ def get_openai_client():
                     azure_endpoint=endpoint,
                     api_key=api_key,
                     api_version=api_version,
+                    timeout=judge_http_timeout_seconds(),
                 )
             except ImportError:
                 print("(note: langfuse not installed; running Azure without tracing)")
@@ -328,6 +343,7 @@ def get_openai_client():
             azure_endpoint=endpoint,
             api_key=api_key,
             api_version=api_version,
+            timeout=judge_http_timeout_seconds(),
         )
 
     # Direct OpenAI path
@@ -346,11 +362,11 @@ def get_openai_client():
     if use_langfuse:
         try:
             from langfuse.openai import OpenAI as TracedOpenAI
-            return TracedOpenAI()
+            return TracedOpenAI(timeout=judge_http_timeout_seconds())
         except ImportError:
             print("(note: langfuse not installed; running without tracing)")
     from openai import OpenAI
-    return OpenAI()
+    return OpenAI(timeout=judge_http_timeout_seconds())
 
 
 def _resolve_model_param(requested_model: str) -> str:
@@ -517,6 +533,7 @@ def call_judge(client, sample: dict, model: str = DEFAULT_MODEL) -> tuple[dict, 
     provider = "azure" if _is_azure() else "openai"
 
     t0 = time.monotonic()
+    to = judge_http_timeout_seconds()
 
     resp = client.chat.completions.create(
         model=effective_model,
@@ -526,6 +543,7 @@ def call_judge(client, sample: dict, model: str = DEFAULT_MODEL) -> tuple[dict, 
         ],
         temperature=0,
         response_format={"type": "json_object"},
+        timeout=to,
     )
     raw_content = resp.choices[0].message.content
     usage = getattr(resp, "usage", None)
