@@ -17,11 +17,20 @@ Required env vars:
   LANGFUSE_SECRET_KEY
   LANGFUSE_HOST        (default: https://cloud.langfuse.com)
   SLACK_WEBHOOK_URL
-  METABASE_STREAM_LOGS_CARD_ID  optional — Metabase question for
+
+Optional tuning:
+  METABASE_CARD_RETRIES (default 3) — all Metabase card queries
+  LANGFUSE_OBSERVATION_PAGE_SIZE (default 500)
+  LANGFUSE_ERROR_MAX_ITEMS / LANGFUSE_SCORE_MAX_ITEMS (default 500000)
+  LANGFUSE_ERROR_MAX_PAGES / LANGFUSE_SCORE_MAX_PAGES (0 = unlimited pages)
+  DIGEST_MIN_SCORE_ROWS_FOR_RATE (default 500) — sparse Langfuse scores: hide misleading rate vs all traces
+
+Optional card id env vars (digits only):
+  METABASE_STREAM_LOGS_CARD_ID — Metabase question for
       sql/vcp_stream_logs_digest_summary.sql (E2E API health vs Langfuse 24h block).
       Prod PW: question 33285
       https://metabase-prod.penpencil.co/question/33285-metabase-stream-logs-card
-  METABASE_BEHAVIOR_FOLLOWUP_CARD_ID / METABASE_BEHAVIOR_REPHRASE_CARD_ID  optional.
+  METABASE_BEHAVIOR_FOLLOWUP_CARD_ID / METABASE_BEHAVIOR_REPHRASE_CARD_ID
       Prod PW: 33282 follow-up, 33283 rephrase
       https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card
       https://metabase-prod.penpencil.co/question/33283-metabase-behavior-rephrase-card
@@ -40,6 +49,7 @@ import os
 import sys
 import time
 import base64
+import urllib.error
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -65,10 +75,29 @@ BEHAVIOR_FOLLOWUP_CARD_ID = os.environ.get("METABASE_BEHAVIOR_FOLLOWUP_CARD_ID",
 BEHAVIOR_REPHRASE_CARD_ID = os.environ.get("METABASE_BEHAVIOR_REPHRASE_CARD_ID", "").strip()
 STREAM_LOGS_CARD_ID = os.environ.get("METABASE_STREAM_LOGS_CARD_ID", "").strip()
 
-# Langfuse public API: paginate scores/observations (limit per request).
-LANGFUSE_LIST_PAGE_SIZE = 500
-LANGFUSE_SCORE_MAX_PAGES = 50
-LANGFUSE_ERROR_MAX_PAGES = 40
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# Metabase: retry all saved-question fetches (stream_logs uses the same count).
+METABASE_CARD_RETRIES = max(1, _env_int("METABASE_CARD_RETRIES", 3))
+
+# Langfuse public API — page until empty or caps. LANGFUSE_*_MAX_PAGES=0 means no page cap.
+LANGFUSE_PAGE_SIZE = max(1, min(1000, _env_int("LANGFUSE_OBSERVATION_PAGE_SIZE", 500)))
+LANGFUSE_ERROR_MAX_ITEMS = max(1000, _env_int("LANGFUSE_ERROR_MAX_ITEMS", 500_000))
+LANGFUSE_SCORE_MAX_ITEMS = max(1000, _env_int("LANGFUSE_SCORE_MAX_ITEMS", 500_000))
+LANGFUSE_ERROR_MAX_PAGES = _env_int("LANGFUSE_ERROR_MAX_PAGES", 0)
+LANGFUSE_SCORE_MAX_PAGES = _env_int("LANGFUSE_SCORE_MAX_PAGES", 0)
+
+# Downvotes: hide misleading "rate vs all traces" when Langfuse score rows are sparse.
+DIGEST_MIN_SCORE_ROWS_FOR_RATE = max(0, _env_int("DIGEST_MIN_SCORE_ROWS_FOR_RATE", 500))
 
 # If true, workflow fails when METABASE_STREAM_LOGS_CARD_ID is set but Metabase fetch fails.
 DIGEST_STRICT_STREAM_LOGS = os.environ.get("DIGEST_STRICT_STREAM_LOGS", "").strip().lower() in (
@@ -108,10 +137,28 @@ from_24h  = (now_utc - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
 # HTTP helpers (stdlib only)
 # ---------------------------------------------------------------------------
 
-def _http_get(url: str, headers: dict, timeout: int = 30) -> dict:
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+def _langfuse_auth_header() -> str:
+    token = base64.b64encode(f"{LANGFUSE_PK}:{LANGFUSE_SK}".encode()).decode()
+    return f"Basic {token}"
+
+
+def _http_get_langfuse(url: str, headers: dict, timeout: int = 90) -> dict:
+    """GET with backoff on rate-limit / transient server errors."""
+    last_err: Optional[BaseException] = None
+    for attempt in range(5):
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            last_err = exc
+            if exc.code in (429, 502, 503) and attempt < 4:
+                time.sleep(min(30.0, 2.0**attempt))
+                continue
+            raise
+    if last_err:
+        raise last_err
+    raise RuntimeError("Langfuse GET exhausted retries")  # pragma: no cover
 
 
 def _http_post_json(
@@ -125,11 +172,6 @@ def _http_post_json(
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
-
-
-def _langfuse_auth_header() -> str:
-    token = base64.b64encode(f"{LANGFUSE_PK}:{LANGFUSE_SK}".encode()).decode()
-    return f"Basic {token}"
 
 
 def _slack_escape(text: str) -> str:
@@ -276,53 +318,88 @@ def _dedupe_by_id(rows: List[dict]) -> List[dict]:
     return out
 
 
-def fetch_langfuse_scores() -> Tuple[List, int, bool]:
-    """Paginate GET /api/public/scores. Returns (all score rows, count value==0 in that set, success)."""
+def fetch_langfuse_scores() -> Tuple[List, int, bool, bool]:
+    """Paginate GET /api/public/scores. Returns (rows, dv_count_in_rows, ok, hit_item_cap)."""
     auth = {"Authorization": _langfuse_auth_header()}
     all_items: List = []
     ok = False
+    hit_cap = False
+    page = 0
     try:
-        for page in range(1, LANGFUSE_SCORE_MAX_PAGES + 1):
+        while True:
+            page += 1
+            if LANGFUSE_SCORE_MAX_PAGES > 0 and page > LANGFUSE_SCORE_MAX_PAGES:
+                print(
+                    f"[info] Langfuse scores: stopped at LANGFUSE_SCORE_MAX_PAGES={LANGFUSE_SCORE_MAX_PAGES}",
+                    file=sys.stderr,
+                )
+                break
             url = (
                 f"{LANGFUSE_HOST}/api/public/scores"
                 f"?fromTimestamp={urllib.parse.quote(from_24h)}"
-                f"&limit={LANGFUSE_LIST_PAGE_SIZE}&page={page}"
+                f"&limit={LANGFUSE_PAGE_SIZE}&page={page}"
             )
-            data = _http_get(url, auth)
+            data = _http_get_langfuse(url, auth)
             batch = data.get("data", [])
             if not batch:
                 break
             all_items.extend(batch)
-            if len(batch) < LANGFUSE_LIST_PAGE_SIZE:
+            if len(all_items) >= LANGFUSE_SCORE_MAX_ITEMS:
+                all_items = all_items[:LANGFUSE_SCORE_MAX_ITEMS]
+                hit_cap = True
+                print(
+                    f"[warn] Langfuse scores: hit LANGFUSE_SCORE_MAX_ITEMS={LANGFUSE_SCORE_MAX_ITEMS}",
+                    file=sys.stderr,
+                )
+                break
+            if len(batch) < LANGFUSE_PAGE_SIZE:
                 break
         ok = True
     except Exception as exc:
         print(f"[warn] Langfuse scores failed: {repr(exc)}", file=sys.stderr)
     all_items = _dedupe_by_id(all_items)
     dv_count = sum(1 for s in all_items if s.get("value") == 0)
-    return all_items, dv_count, ok
+    return all_items, dv_count, ok, hit_cap
 
 
-def fetch_langfuse_errors() -> Tuple[List, int, bool]:
-    """Paginate error observations. meta.totalItems from first page."""
+def fetch_langfuse_errors() -> Tuple[List, int, bool, bool]:
+    """Paginate error observations. Returns (observations, reported totalItems, ok, hit_item_cap)."""
+    auth = {"Authorization": _langfuse_auth_header()}
     all_obs: List = []
     total_items = 0
     ok = False
+    hit_cap = False
+    page = 0
     try:
-        for page in range(1, LANGFUSE_ERROR_MAX_PAGES + 1):
+        while True:
+            page += 1
+            if LANGFUSE_ERROR_MAX_PAGES > 0 and page > LANGFUSE_ERROR_MAX_PAGES:
+                print(
+                    f"[info] Langfuse errors: stopped at LANGFUSE_ERROR_MAX_PAGES={LANGFUSE_ERROR_MAX_PAGES}",
+                    file=sys.stderr,
+                )
+                break
             url = (
                 f"{LANGFUSE_HOST}/api/public/observations"
                 f"?fromTimestamp={urllib.parse.quote(from_24h)}"
-                f"&limit={LANGFUSE_LIST_PAGE_SIZE}&page={page}&level=ERROR"
+                f"&limit={LANGFUSE_PAGE_SIZE}&page={page}&level=ERROR"
             )
-            data = _http_get(url, {"Authorization": _langfuse_auth_header()})
+            data = _http_get_langfuse(url, auth)
             if page == 1:
                 total_items = int(data.get("meta", {}).get("totalItems") or 0)
             batch = data.get("data", [])
             if not batch:
                 break
             all_obs.extend(batch)
-            if len(batch) < LANGFUSE_LIST_PAGE_SIZE:
+            if len(all_obs) >= LANGFUSE_ERROR_MAX_ITEMS:
+                all_obs = all_obs[:LANGFUSE_ERROR_MAX_ITEMS]
+                hit_cap = True
+                print(
+                    f"[warn] Langfuse errors: hit LANGFUSE_ERROR_MAX_ITEMS={LANGFUSE_ERROR_MAX_ITEMS}",
+                    file=sys.stderr,
+                )
+                break
+            if len(batch) < LANGFUSE_PAGE_SIZE:
                 break
         ok = True
     except Exception as exc:
@@ -330,7 +407,7 @@ def fetch_langfuse_errors() -> Tuple[List, int, bool]:
     all_obs = _dedupe_by_id(all_obs)
     if total_items == 0 and all_obs:
         total_items = len(all_obs)
-    return all_obs, total_items, ok
+    return all_obs, total_items, ok, hit_cap
 
 
 def fetch_langfuse_traces_total() -> Tuple[int, bool]:
@@ -339,7 +416,7 @@ def fetch_langfuse_traces_total() -> Tuple[int, bool]:
         f"?fromTimestamp={urllib.parse.quote(from_24h)}&limit=1"
     )
     try:
-        data = _http_get(url, {"Authorization": _langfuse_auth_header()})
+        data = _http_get_langfuse(url, {"Authorization": _langfuse_auth_header()})
         n = int(data.get("meta", {}).get("totalItems") or 0)
         return n, True
     except Exception as exc:
@@ -397,7 +474,7 @@ def _categorise_error(msg: str) -> str:
     return "Other"
 
 
-def fmt_errors(error_obs: List, total_errors: int) -> str:
+def fmt_errors(error_obs: List, total_errors: int, *, hit_item_cap: bool = False) -> str:
     if total_errors == 0 and not error_obs:
         return "  No error observations in the last 24h."
 
@@ -429,12 +506,20 @@ def fmt_errors(error_obs: List, total_errors: int) -> str:
     else:
         dominant = f":warning: Dominant error: {top_cat}"
 
+    cap_note = ""
+    if hit_item_cap:
+        cap_note = (
+            f"\n\n_Stopped at {n_sample:,} observations (LANGFUSE_ERROR_MAX_ITEMS cap); "
+            "percentages above are for this set._"
+        )
+
     return (
         f"Error observations (reported total in project): {total_errors:,}\n"
         f"Breakdown uses {n_sample:,} observations retrieved from the API (paginated); "
         f"{unique_traces:,} unique trace ids in that set.\n\n"
-        f"Error type breakdown (from retrieved sample, sorted by count):\n{cat_block}\n\n"
+        f"Error type breakdown (from retrieved set, sorted by count):\n{cat_block}\n\n"
         f"{dominant}"
+        f"{cap_note}"
     )
 
 
@@ -500,17 +585,40 @@ def fmt_stream_logs_summary(
     return "\n".join(lines)
 
 
-def fmt_scores(score_items: list, dv_in_sample: int, total_traces: int) -> str:
-    """dv_in_sample = count of csat=0 within all score rows fetched from Langfuse (paginated)."""
-    rate_str = "n/a"
-    if total_traces > 0:
-        rate = dv_in_sample / total_traces * 100
-        rate_str = f"{rate:.2f}"
+def fmt_scores(
+    score_items: list,
+    dv_in_sample: int,
+    total_traces: int,
+    *,
+    hit_score_cap: bool = False,
+) -> str:
+    """dv_in_sample = count of csat=0 within fetched score rows."""
+    n_scores = len(score_items)
+    downvote_line = (
+        f"Downvotes (csat=0) in Langfuse score fetch: *{dv_in_sample:,}* "
+        f"(from *{n_scores:,}* score rows retrieved, last 24h)"
+    )
 
-    # Pull free-text comments from the sample (value==0 scores with a comment)
+    if n_scores >= DIGEST_MIN_SCORE_ROWS_FOR_RATE and total_traces > 0:
+        rate = dv_in_sample / total_traces * 100
+        rate_block = (
+            f"\nTotal traces (last 24h, Langfuse): *{total_traces:,}*  |  "
+            f"Downvotes per trace (using retrieved scores only): *{rate:.2f}%*\n\n"
+        )
+    elif total_traces > 0:
+        rate_block = (
+            f"\nTotal traces (last 24h, Langfuse): *{total_traces:,}*\n"
+            f"_Rate vs all traces not shown — fewer than *{DIGEST_MIN_SCORE_ROWS_FOR_RATE}* score rows "
+            f"in this API pull (*{n_scores:,}* retrieved). CSAT scores are sparse; "
+            "see Metabase downvote sections for volume._\n\n"
+        )
+    else:
+        rate_block = "\n_Total traces (last 24h) unavailable from Langfuse._\n\n"
+
     downvote_sample = [s for s in score_items if s.get("value") == 0]
     comments = [
-        s.get("comment") for s in downvote_sample
+        s.get("comment")
+        for s in downvote_sample
         if s.get("comment") and str(s.get("comment")).strip()
     ][:10]
 
@@ -521,12 +629,28 @@ def fmt_scores(score_items: list, dv_in_sample: int, total_traces: int) -> str:
     else:
         comment_lines = "  _(no free-text comments)_"
 
+    cap_note = ""
+    if hit_score_cap:
+        cap_note = (
+            f"\n\n_Stopped at {n_scores:,} score rows (LANGFUSE_SCORE_MAX_ITEMS cap)._"
+        )
+
+    if (
+        dv_in_sample == 0
+        and not comments
+        and n_scores < DIGEST_MIN_SCORE_ROWS_FOR_RATE
+    ):
+        return (
+            f"{downvote_line}{rate_block}"
+            f"_No csat=0 scores with comments in this pull. Langfuse score coverage is thin; "
+            f"use Metabase downvote blocks for volume._"
+            f"{cap_note}"
+        )
+
     return (
-        f"Downvotes (csat=0) in Langfuse score fetch: *{dv_in_sample:,}* "
-        f"(from *{len(score_items):,}* score rows retrieved, last 24h)\n"
-        f"Total traces (last 24h, Langfuse): *{total_traces:,}*  |  "
-        f"Downvotes per trace (using retrieved scores only): *{rate_str}%*\n\n"
+        f"{downvote_line}{rate_block}"
         f"Sample free-text comments (verbatim):\n{comment_lines}"
+        f"{cap_note}"
     )
 
 
@@ -731,12 +855,16 @@ def build_blocks(
     stream_logs_error_hint: Optional[str] = None,
     follow_card_configured: bool = False,
     rephrase_card_configured: bool = False,
+    errors_hit_cap: bool = False,
+    scores_hit_cap: bool = False,
 ) -> list:
     academic_block    = fmt_academic(academic_rows)
     nonacademic_block = fmt_nonacademic(nonacademic_rows)
     dump_block        = fmt_downvote_dump(dump_rows)
-    scores_block      = fmt_scores(score_items, dv_in_sample, total_traces)
-    errors_block      = fmt_errors(error_obs, total_errors)
+    scores_block      = fmt_scores(
+        score_items, dv_in_sample, total_traces, hit_score_cap=scores_hit_cap
+    )
+    errors_block      = fmt_errors(error_obs, total_errors, hit_item_cap=errors_hit_cap)
     sl_cfg = bool(stream_logs_card_id and stream_logs_card_id.isdigit())
     stream_logs_block = fmt_stream_logs_summary(
         stream_logs_rows,
@@ -860,21 +988,25 @@ def main() -> int:
                 file=sys.stderr,
             )
 
-    academic_rows = fetch_metabase_card(24973)
-    nonacademic_rows = fetch_metabase_card(24974)
-    dump_rows = fetch_metabase_card(23036)
+    academic_rows = fetch_metabase_card(24973, retries=METABASE_CARD_RETRIES)
+    nonacademic_rows = fetch_metabase_card(24974, retries=METABASE_CARD_RETRIES)
+    dump_rows = fetch_metabase_card(23036, retries=METABASE_CARD_RETRIES)
 
-    score_items, dv_in_sample, scores_ok = fetch_langfuse_scores()
-    error_obs, total_errors, errors_ok = fetch_langfuse_errors()
+    score_items, dv_in_sample, scores_ok, scores_hit_cap = fetch_langfuse_scores()
+    error_obs, total_errors, errors_ok, errors_hit_cap = fetch_langfuse_errors()
     total_traces, traces_ok = fetch_langfuse_traces_total()
 
     follow_cfg = BEHAVIOR_FOLLOWUP_CARD_ID.isdigit()
     follow_rows = (
-        fetch_metabase_card(int(BEHAVIOR_FOLLOWUP_CARD_ID)) if follow_cfg else None
+        fetch_metabase_card(int(BEHAVIOR_FOLLOWUP_CARD_ID), retries=METABASE_CARD_RETRIES)
+        if follow_cfg
+        else None
     )
     rephrase_cfg = BEHAVIOR_REPHRASE_CARD_ID.isdigit()
     rephrase_rows = (
-        fetch_metabase_card(int(BEHAVIOR_REPHRASE_CARD_ID)) if rephrase_cfg else None
+        fetch_metabase_card(int(BEHAVIOR_REPHRASE_CARD_ID), retries=METABASE_CARD_RETRIES)
+        if rephrase_cfg
+        else None
     )
     eval_summary = load_eval_summary(EVAL_SUMMARY_PATH)
 
@@ -883,7 +1015,7 @@ def main() -> int:
     stream_logs_err: Optional[str] = None
     if sl_cfg:
         stream_logs_rows, stream_logs_err = fetch_metabase_card_detailed(
-            int(STREAM_LOGS_CARD_ID), retries=3
+            int(STREAM_LOGS_CARD_ID), retries=METABASE_CARD_RETRIES
         )
 
     mb_academic_ok = academic_rows is not None
@@ -930,6 +1062,8 @@ def main() -> int:
         stream_logs_error_hint=stream_logs_err,
         follow_card_configured=follow_cfg,
         rephrase_card_configured=rephrase_cfg,
+        errors_hit_cap=errors_hit_cap,
+        scores_hit_cap=scores_hit_cap,
     )
     print(f"[info] {fallback_text.splitlines()[0]}\n[{len(blocks)} blocks]", file=sys.stderr)
 

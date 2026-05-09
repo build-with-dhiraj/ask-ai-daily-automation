@@ -1,9 +1,8 @@
 name: Daily Eval
 
 on:
-  schedule:
-    - cron: '0 3 * * *'   # 08:30 IST every day
-  workflow_dispatch:        # manual trigger for testing
+  # Schedule moved to daily-automation.yml (eval → digest + artifact). Use workflow_dispatch for ad-hoc runs.
+  workflow_dispatch:
 
 jobs:
   eval:

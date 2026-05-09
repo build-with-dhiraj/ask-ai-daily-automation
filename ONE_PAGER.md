@@ -82,6 +82,7 @@ If a workflow stays **queued** for a long time, another job may be holding the s
 
 ### GitHub / runner
 
+- **Scheduled prod chain:** [`.github/workflows/daily-automation.yml`](.github/workflows/daily-automation.yml) runs **Daily Eval** then **Daily Digest** on one cron; the eval snapshot JSON is passed as an **artifact** so digest always sees `formatting_hotspot_chapters` even across multiple runners. [`daily-eval.yml`](.github/workflows/daily-eval.yml) and [`daily-digest.yml`](.github/workflows/daily-digest.yml) keep **`workflow_dispatch` only** for ad-hoc runs.
 - Workflows require **`runs-on: self-hosted`** so the runner can reach **Metabase** on the internal network.
 - If jobs queue forever, re-check runner registration (online + not busy blocking other jobs).
 

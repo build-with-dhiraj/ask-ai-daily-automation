@@ -14,14 +14,13 @@
 name: Daily Digest
 
 on:
-  schedule:
-    - cron: '0 4 * * *'   # 09:30 IST every day
+  # Schedule moved to daily-automation.yml. Use workflow_dispatch for ad-hoc runs.
   workflow_dispatch:
 
 jobs:
   digest:
     runs-on: self-hosted
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       PYTHONUNBUFFERED: "1"
       METABASE_URL: ${{ secrets.METABASE_URL }}
