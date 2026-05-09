@@ -190,7 +190,8 @@ def fetch_samples_from_metabase() -> list[dict]:
 
 
 def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
-                    model: str = DEFAULT_MODEL) -> list[dict]:
+                    model: str = DEFAULT_MODEL,
+                    checkpoint_path: str | None = None) -> list[dict]:
     if not samples:
         return []
     client = get_openai_client()
@@ -232,6 +233,10 @@ def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
             print(f"  [{i:>4}/{n}] {stratum:<10} {tid[:36]} ERROR: {e}")
             continue
         results.append(parsed)
+        if checkpoint_path and i % 50 == 0:
+            with open(checkpoint_path, "w") as _f:
+                json.dump(results, _f)
+            print(f"  💾 checkpoint saved ({i}/{n})")
     dur = time.monotonic() - t_start
 
     if write_scores:
@@ -301,7 +306,8 @@ def main() -> int:
     judge_run_id = f"daily-eval-{yesterday_str}"
     write_scores = not args.no_write_scores
     results = run_judge_loop(samples, judge_run_id=judge_run_id,
-                              write_scores=write_scores, model=args.model)
+                              write_scores=write_scores, model=args.model,
+                              checkpoint_path=args.output + ".checkpoint")
 
     # 3. Save full results
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
@@ -313,6 +319,23 @@ def main() -> int:
     summary = aggregate(results)
     label = args.label or judge_run_id
     block = render_slack_block(summary, run_label=label, results=results)
+
+    # Cost + sample breakdown footer
+    n_judged = len(results)
+    in_tok = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in results)
+    out_tok = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in results)
+    est_usd = in_tok * 2e-6 + out_tok * 8e-6
+    strata_counts: dict[str, int] = {}
+    for r in results:
+        st = r.get("_stratum") or "all"
+        strata_counts[st] = strata_counts.get(st, 0) + 1
+    strata_summary = " | ".join(f"{v} {k}" for k, v in sorted(strata_counts.items()))
+    cost_footer = (
+        f"\n💰 *Run cost* | {n_judged} samples ({strata_summary})"
+        f" | Tokens: {in_tok:,} in / {out_tok:,} out"
+        f" | Est: ~${est_usd:.2f} (₹{est_usd*83:.0f})"
+    )
+    block = block + cost_footer
 
     print("\n" + "=" * 60)
     print(block)
