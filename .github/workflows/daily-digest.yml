@@ -26,3 +26,5 @@ jobs:
           METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
           # Fallback if secret was saved as METABASE_BEHAVIOR_REPHRASE_CARD (no _ID)
           METABASE_BEHAVIOR_REPHRASE_CARD: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD }}
+          # E2E video-co-pilot lifecycle summary — sql/vcp_stream_logs_digest_summary.sql
+          METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}

@@ -10,6 +10,8 @@ Required env vars:
   LANGFUSE_SECRET_KEY
   LANGFUSE_HOST        (default: https://cloud.langfuse.com)
   SLACK_WEBHOOK_URL
+  METABASE_STREAM_LOGS_CARD_ID  optional — Metabase question for
+      sql/vcp_stream_logs_digest_summary.sql (E2E API health vs Langfuse 24h block)
 
 Usage:
   python3 daily_digest.py           # fetch + post to Slack
@@ -46,6 +48,7 @@ BEHAVIOR_REPHRASE_CARD_ID = (
     os.environ.get("METABASE_BEHAVIOR_REPHRASE_CARD_ID", "").strip()
     or os.environ.get("METABASE_BEHAVIOR_REPHRASE_CARD", "").strip()
 )
+STREAM_LOGS_CARD_ID = os.environ.get("METABASE_STREAM_LOGS_CARD_ID", "").strip()
 
 # ---------------------------------------------------------------------------
 # Date helpers
@@ -308,6 +311,63 @@ def fmt_errors(error_obs: List, total_errors: int) -> str:
     )
 
 
+def _stream_logs_get(row: dict, col: str, default: float = 0.0) -> float:
+    """Case-insensitive column lookup (Metabase JSON keys may vary)."""
+    want = col.lower()
+    for k, v in row.items():
+        if k is not None and str(k).lower() == want:
+            if v is None:
+                return default
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+    return default
+
+
+def fmt_stream_logs_summary(
+    rows: Optional[List],
+    *,
+    card_configured: bool,
+    day_label: str,
+) -> str:
+    """Format single-row summary from vcp_stream_logs_digest_summary.sql."""
+    if not card_configured:
+        return (
+            "  _(Not configured — save `sql/vcp_stream_logs_digest_summary.sql` as a Metabase "
+            "question and set `METABASE_STREAM_LOGS_CARD_ID` in GitHub secrets.)_"
+        )
+    if rows is None:
+        return "  _(unavailable — Metabase fetch failed.)_"
+    if not rows:
+        return "  _(no summary row — check the Metabase question.)_"
+    r = rows[0]
+    n_req = int(_stream_logs_get(r, "n_requests", 0))
+    n_fail = int(_stream_logs_get(r, "n_failure", 0))
+    n_ok = int(_stream_logs_get(r, "n_success", 0))
+    fail_pct = _stream_logs_get(r, "failure_pct", 0.0)
+    n_400 = int(_stream_logs_get(r, "n_http_400", 0))
+    n_499 = int(_stream_logs_get(r, "n_http_499", 0))
+    n_500 = int(_stream_logs_get(r, "n_http_500", 0))
+    n_fail_200 = int(_stream_logs_get(r, "n_failure_http_200", 0))
+    n_sff = int(_stream_logs_get(r, "n_stream_flow_failed", 0))
+    n_she = int(_stream_logs_get(r, "n_success_with_handled_errors", 0))
+    n_can = int(_stream_logs_get(r, "n_cancelled_error", 0))
+
+    lines = [
+        f"  • *Requests (yesterday {day_label}):* {n_req:,}",
+        f"  • *Failures:* {n_fail:,} ({fail_pct:.2f}% of requests)  |  *Successes:* {n_ok:,}",
+        f"  • *HTTP:* 400 → {n_400:,}  |  499 (disconnect) → {n_499:,}  |  500 → {n_500:,}",
+        f"  • *Mid-stream failure signal:* FAILURE with HTTP 200 → {n_fail_200:,}  |  "
+        f"`stream_flow_failed` in steps → {n_sff:,}",
+        f"  • *SUCCESS with handled_errors (degraded but answered):* {n_she:,}  |  "
+        f"*CancelledError-type:* {n_can:,}",
+        "  _SUCCESS can still include handled_errors (infra recovered). "
+        "This block is *calendar yesterday* (Trino); Langfuse errors above are *rolling 24h*._",
+    ]
+    return "\n".join(lines)
+
+
 def fmt_scores(score_items: list, dv_total: int, total_traces: int) -> str:
     """dv_total = accurate downvote count from Langfuse meta.totalItems (value=0 filter)."""
     rate_str = "n/a"
@@ -423,6 +483,20 @@ def fmt_confirmed_regressions(
     )
     return f":rotating_light: *Confirmed regression signal* (judge × behavior)\n{lines}"
 
+
+def _digest_footer_links(stream_logs_card_id: str) -> str:
+    parts = [
+        f":link: <{METABASE_URL}/question/24973|Academic Reasons>",
+        f"<{METABASE_URL}/question/24974|Non-Academic Reasons>",
+        f"<{METABASE_URL}/question/23036|Downvote Dump>",
+        f"<{LANGFUSE_HOST}|Langfuse>",
+    ]
+    sid = (stream_logs_card_id or "").strip()
+    if sid.isdigit():
+        parts.append(f"<{METABASE_URL}/question/{sid}|Stream logs (VCP)>")
+    return " | ".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -439,12 +513,20 @@ def build_blocks(
     behavior_follow_rows: Optional[List] = None,
     behavior_rephrase_rows: Optional[List] = None,
     eval_summary: Optional[dict] = None,
+    stream_logs_rows: Optional[List] = None,
+    stream_logs_card_id: str = "",
 ) -> list:
     academic_block    = fmt_academic(academic_rows)
     nonacademic_block = fmt_nonacademic(nonacademic_rows)
     dump_block        = fmt_downvote_dump(dump_rows)
     scores_block      = fmt_scores(score_items, total_scores, total_traces)
     errors_block      = fmt_errors(error_obs, total_errors)
+    sl_cfg = bool(stream_logs_card_id and stream_logs_card_id.isdigit())
+    stream_logs_block = fmt_stream_logs_summary(
+        stream_logs_rows,
+        card_configured=sl_cfg,
+        day_label=yesterday,
+    )
 
     follow_txt = fmt_behavior_proxy(behavior_follow_rows)
     rephrase_txt = fmt_behavior_proxy(behavior_rephrase_rows)
@@ -466,6 +548,10 @@ def build_blocks(
         divider,
         section(f":rotating_light: *Langfuse Errors (last 24h)*\n{errors_block}"),
         divider,
+        section(
+            f":gear: *Video co-pilot API health (stream_logs, yesterday)*\n{stream_logs_block}"
+        ),
+        divider,
         section(f":speech_balloon: *User Comments on Downvotes (Langfuse, last 24h)*\n{scores_block}"),
         divider,
         section(f":thumbsdown: *Downvote Reasons — Academic (rolling 21d)*\n{academic_block}"),
@@ -486,12 +572,7 @@ def build_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": (
-                        f":link: <{METABASE_URL}/question/24973|Academic Reasons>"
-                        f" | <{METABASE_URL}/question/24974|Non-Academic Reasons>"
-                        f" | <{METABASE_URL}/question/23036|Downvote Dump>"
-                        f" | <{LANGFUSE_HOST}|Langfuse>"
-                    ),
+                    "text": _digest_footer_links(stream_logs_card_id),
                 }
             ],
         },
@@ -539,6 +620,12 @@ def main() -> None:
     )
     eval_summary = load_eval_summary(EVAL_SUMMARY_PATH)
 
+    stream_logs_rows = (
+        fetch_metabase_card(int(STREAM_LOGS_CARD_ID))
+        if STREAM_LOGS_CARD_ID.isdigit()
+        else None
+    )
+
     blocks = build_blocks(
         academic_rows,
         nonacademic_rows,
@@ -551,6 +638,8 @@ def main() -> None:
         behavior_follow_rows=follow_rows,
         behavior_rephrase_rows=rephrase_rows,
         eval_summary=eval_summary,
+        stream_logs_rows=stream_logs_rows,
+        stream_logs_card_id=STREAM_LOGS_CARD_ID,
     )
     fallback_text = f"Ask AI Daily Digest — {today_str}"
     print(f"{fallback_text}\n[{len(blocks)} blocks]")
