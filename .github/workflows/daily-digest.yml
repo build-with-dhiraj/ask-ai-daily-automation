@@ -1,3 +1,16 @@
+# Daily Digest — requires these Actions *repository* secrets (names must match exactly):
+#   METABASE_URL, METABASE_API_KEY
+#   LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST
+#   SLACK_WEBHOOK_URL
+# Optional Metabase card ids (digits only in secrets — canonical PW prod questions):
+#   METABASE_BEHAVIOR_FOLLOWUP_CARD_ID → 33282
+#     https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card
+#   METABASE_BEHAVIOR_REPHRASE_CARD_ID → 33283
+#     https://metabase-prod.penpencil.co/question/33283-metabase-behavior-rephrase-card
+#   METABASE_STREAM_LOGS_CARD_ID → 33285
+#     https://metabase-prod.penpencil.co/question/33285-metabase-stream-logs-card
+# Secrets under Settings are not visible to Python until listed under `env:` below.
+
 name: Daily Digest
 
 on:
@@ -9,20 +22,39 @@ jobs:
   digest:
     runs-on: self-hosted
     timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: "1"
+      METABASE_URL: ${{ secrets.METABASE_URL }}
+      METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      EVAL_SUMMARY_PATH: /tmp/daily_eval_yesterday_summary.json
+      METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
+      METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
+      METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify behaviour Metabase env (values not printed)
+        shell: bash
+        run: |
+          check_digits_if_set() {
+            name="$1"
+            raw="${!name}"
+            stripped="${raw#"${raw%%[![:space:]]*}"}"
+            stripped="${stripped%"${stripped##*[![:space:]]}"}"
+            if [[ -z "$stripped" ]]; then
+              return
+            fi
+            if ! [[ "$stripped" =~ ^[0-9]+$ ]]; then
+              echo "::warning::${name} must be digits-only (Metabase card id). Check the secret value for quotes or hidden characters."
+            fi
+          }
+          check_digits_if_set METABASE_BEHAVIOR_FOLLOWUP_CARD_ID
+          check_digits_if_set METABASE_BEHAVIOR_REPHRASE_CARD_ID
+          check_digits_if_set METABASE_STREAM_LOGS_CARD_ID
+
       - name: Run daily digest
         run: python3 daily_digest.py
-        env:
-          METABASE_URL: ${{ secrets.METABASE_URL }}
-          METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
-          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
-          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
-          LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          EVAL_SUMMARY_PATH: /tmp/daily_eval_yesterday_summary.json
-          METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
-          METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
-          # E2E video-co-pilot lifecycle summary — sql/vcp_stream_logs_digest_summary.sql
-          METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}

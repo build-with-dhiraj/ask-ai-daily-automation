@@ -3,6 +3,13 @@
 Ask AI Daily Digest — replaces n8n Cloud workflow.
 Fetches Metabase + Langfuse data and posts a formatted summary to Slack.
 
+Optional:
+  DIGEST_STRICT_STREAM_LOGS=1 — fail the job if METABASE_STREAM_LOGS_CARD_ID is set
+      but the Metabase card still fails after retries.
+
+Exit code: 0 on success; 1 if Slack post fails, all three core Metabase cards fail,
+  or (when DIGEST_STRICT_STREAM_LOGS) stream_logs Metabase fails.
+
 Required env vars:
   METABASE_URL         e.g. https://metabase-prod.penpencil.co
   METABASE_API_KEY
@@ -11,7 +18,13 @@ Required env vars:
   LANGFUSE_HOST        (default: https://cloud.langfuse.com)
   SLACK_WEBHOOK_URL
   METABASE_STREAM_LOGS_CARD_ID  optional — Metabase question for
-      sql/vcp_stream_logs_digest_summary.sql (E2E API health vs Langfuse 24h block)
+      sql/vcp_stream_logs_digest_summary.sql (E2E API health vs Langfuse 24h block).
+      Prod PW: question 33285
+      https://metabase-prod.penpencil.co/question/33285-metabase-stream-logs-card
+  METABASE_BEHAVIOR_FOLLOWUP_CARD_ID / METABASE_BEHAVIOR_REPHRASE_CARD_ID  optional.
+      Prod PW: 33282 follow-up, 33283 rephrase
+      https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card
+      https://metabase-prod.penpencil.co/question/33283-metabase-behavior-rephrase-card
 
 Metabase /api/card/.../query/json calls use no HTTP timeout (wait until the server
 returns). Langfuse and Slack keep short timeouts. The GitHub Actions job still has
@@ -25,6 +38,7 @@ Usage:
 import json
 import os
 import sys
+import time
 import base64
 import urllib.request
 import urllib.parse
@@ -50,6 +64,36 @@ BEHAVIOR_FOLLOWUP_CARD_ID = os.environ.get("METABASE_BEHAVIOR_FOLLOWUP_CARD_ID",
 # Accept typo alias from GitHub secret name (missing _ID suffix)
 BEHAVIOR_REPHRASE_CARD_ID = os.environ.get("METABASE_BEHAVIOR_REPHRASE_CARD_ID", "").strip()
 STREAM_LOGS_CARD_ID = os.environ.get("METABASE_STREAM_LOGS_CARD_ID", "").strip()
+
+# Langfuse public API: paginate scores/observations (limit per request).
+LANGFUSE_LIST_PAGE_SIZE = 500
+LANGFUSE_SCORE_MAX_PAGES = 50
+LANGFUSE_ERROR_MAX_PAGES = 40
+
+# If true, workflow fails when METABASE_STREAM_LOGS_CARD_ID is set but Metabase fetch fails.
+DIGEST_STRICT_STREAM_LOGS = os.environ.get("DIGEST_STRICT_STREAM_LOGS", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+SLACK_SECTION_MAX = 2800
+
+
+def _warn_metabase_card_env_var(name: str, value: str) -> None:
+    """Log if a secret was passed but is not a plain integer card id (no secret contents)."""
+    if not value:
+        return
+    stripped = value.strip()
+    if stripped.isdigit():
+        return
+    print(
+        f"[warn] {name}: env is non-empty but not digits-only after strip "
+        f"(raw_len={len(value)}, stripped_len={len(stripped)}) — "
+        "re-save the GitHub secret as plain digits (no quotes/BOM/newlines).",
+        file=sys.stderr,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Date helpers
@@ -87,23 +131,52 @@ def _langfuse_auth_header() -> str:
     token = base64.b64encode(f"{LANGFUSE_PK}:{LANGFUSE_SK}".encode()).decode()
     return f"Basic {token}"
 
+
+def _slack_escape(text: str) -> str:
+    """Escape &, <, > for text embedded in Slack mrkdwn (user/DB-sourced)."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _truncate_section(text: str, max_len: int = SLACK_SECTION_MAX) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 24].rstrip() + "\n_… (truncated)_"
+
+
 # ---------------------------------------------------------------------------
 # Metabase fetchers
 # ---------------------------------------------------------------------------
 
-def fetch_metabase_card(card_id: int) -> Optional[List]:
+def fetch_metabase_card_detailed(
+    card_id: int, *, retries: int = 1
+) -> Tuple[Optional[List], Optional[str]]:
+    """Returns (rows, error_repr). error_repr set when all attempts fail."""
     url = f"{METABASE_URL}/api/card/{card_id}/query/json"
     headers = {
         "X-Api-Key": METABASE_API_KEY,
         "Content-Type": "application/json",
     }
-    try:
-        # No timeout — Metabase /query/json duration is unbounded on heavy cards.
-        result = _http_post_json(url, headers, timeout=None)
-        return result if isinstance(result, list) else None
-    except Exception as exc:
-        print(f"[warn] Metabase card {card_id} failed: {exc}", file=sys.stderr)
-        return None
+    last_exc: Optional[BaseException] = None
+    for attempt in range(retries):
+        try:
+            result = _http_post_json(url, headers, timeout=None)
+            if isinstance(result, list):
+                return result, None
+            return None, "Metabase returned non-list JSON"
+        except Exception as exc:
+            last_exc = exc
+            print(
+                f"[warn] Metabase card {card_id} attempt {attempt + 1}/{retries}: {repr(exc)}",
+                file=sys.stderr,
+            )
+            if attempt + 1 < retries:
+                time.sleep(2**attempt)
+    return None, repr(last_exc) if last_exc else "unknown error"
+
+
+def fetch_metabase_card(card_id: int, *, retries: int = 1) -> Optional[List]:
+    rows, _ = fetch_metabase_card_detailed(card_id, retries=retries)
+    return rows
 
 
 def fmt_academic(rows: Optional[List]) -> str:
@@ -111,7 +184,7 @@ def fmt_academic(rows: Optional[List]) -> str:
         return "  _(unavailable)_"
     lines = []
     for row in rows:
-        text  = row.get("feedback_text", "Unknown")
+        text = _slack_escape(str(row.get("feedback_text", "Unknown")))
         count = row.get("downvotes", 0)
         lines.append(f"  • {text}: {count:,}")
     return "\n".join(lines) if lines else "  _(no data)_"
@@ -149,7 +222,8 @@ def fmt_downvote_dump(rows: Optional[List]) -> str:
         cat_counts[cat] = cat_counts.get(cat, 0) + 1
 
     cat_lines = "\n".join(
-        f"  {cat}: {cnt:,}" for cat, cnt in sorted(cat_counts.items(), key=lambda x: -x[1])
+        f"  {_slack_escape(str(cat))}: {cnt:,}"
+        for cat, cnt in sorted(cat_counts.items(), key=lambda x: -x[1])
     )
 
     # Top tagged reasons — Q23036 uses "user_feedback" field
@@ -166,7 +240,8 @@ def fmt_downvote_dump(rows: Optional[List]) -> str:
         if reason:
             reason = reason.strip().rstrip(",").strip()  # clean "Incorrect answer, " → "Incorrect answer"
             if reason:
-                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                rk = _slack_escape(reason)
+                reason_counts[rk] = reason_counts.get(rk, 0) + 1
 
     reason_lines = "\n".join(
         f"  • {r}: {c:,}"
@@ -184,50 +259,92 @@ def fmt_downvote_dump(rows: Optional[List]) -> str:
 # Langfuse fetchers
 # ---------------------------------------------------------------------------
 
-def fetch_langfuse_scores() -> Tuple[List, int]:
-    """Returns (score_items_sample, csat_downvote_count_from_sample).
-    Fetches up to 500 scores and counts value==0 (CSAT downvotes) from the sample.
-    Langfuse API does not support value filtering, so count is from sample only.
-    """
+def _dedupe_by_id(rows: List[dict]) -> List[dict]:
+    """Avoid duplicate rows if API ignores page parameter."""
+    out: List[dict] = []
+    seen = set()
+    for row in rows:
+        rid = row.get("id")
+        key = rid if rid is not None else None
+        if key is None:
+            out.append(row)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def fetch_langfuse_scores() -> Tuple[List, int, bool]:
+    """Paginate GET /api/public/scores. Returns (all score rows, count value==0 in that set, success)."""
     auth = {"Authorization": _langfuse_auth_header()}
-    url = (
-        f"{LANGFUSE_HOST}/api/public/scores"
-        f"?fromTimestamp={urllib.parse.quote(from_24h)}&limit=100"
-    )
+    all_items: List = []
+    ok = False
     try:
-        data = _http_get(url, auth)
-        score_items = data.get("data", [])
-        dv_count = sum(1 for s in score_items if s.get("value") == 0)
-        return score_items, dv_count
+        for page in range(1, LANGFUSE_SCORE_MAX_PAGES + 1):
+            url = (
+                f"{LANGFUSE_HOST}/api/public/scores"
+                f"?fromTimestamp={urllib.parse.quote(from_24h)}"
+                f"&limit={LANGFUSE_LIST_PAGE_SIZE}&page={page}"
+            )
+            data = _http_get(url, auth)
+            batch = data.get("data", [])
+            if not batch:
+                break
+            all_items.extend(batch)
+            if len(batch) < LANGFUSE_LIST_PAGE_SIZE:
+                break
+        ok = True
     except Exception as exc:
-        print(f"[warn] Langfuse scores failed: {exc}", file=sys.stderr)
-        return [], 0
+        print(f"[warn] Langfuse scores failed: {repr(exc)}", file=sys.stderr)
+    all_items = _dedupe_by_id(all_items)
+    dv_count = sum(1 for s in all_items if s.get("value") == 0)
+    return all_items, dv_count, ok
 
 
-def fetch_langfuse_errors() -> Tuple[List, int]:
-    url = (
-        f"{LANGFUSE_HOST}/api/public/observations"
-        f"?fromTimestamp={urllib.parse.quote(from_24h)}&limit=100&level=ERROR"
-    )
+def fetch_langfuse_errors() -> Tuple[List, int, bool]:
+    """Paginate error observations. meta.totalItems from first page."""
+    all_obs: List = []
+    total_items = 0
+    ok = False
     try:
-        data = _http_get(url, {"Authorization": _langfuse_auth_header()})
-        return data.get("data", []), data.get("meta", {}).get("totalItems", 0)
+        for page in range(1, LANGFUSE_ERROR_MAX_PAGES + 1):
+            url = (
+                f"{LANGFUSE_HOST}/api/public/observations"
+                f"?fromTimestamp={urllib.parse.quote(from_24h)}"
+                f"&limit={LANGFUSE_LIST_PAGE_SIZE}&page={page}&level=ERROR"
+            )
+            data = _http_get(url, {"Authorization": _langfuse_auth_header()})
+            if page == 1:
+                total_items = int(data.get("meta", {}).get("totalItems") or 0)
+            batch = data.get("data", [])
+            if not batch:
+                break
+            all_obs.extend(batch)
+            if len(batch) < LANGFUSE_LIST_PAGE_SIZE:
+                break
+        ok = True
     except Exception as exc:
-        print(f"[warn] Langfuse errors failed: {exc}", file=sys.stderr)
-        return [], 0
+        print(f"[warn] Langfuse errors failed: {repr(exc)}", file=sys.stderr)
+    all_obs = _dedupe_by_id(all_obs)
+    if total_items == 0 and all_obs:
+        total_items = len(all_obs)
+    return all_obs, total_items, ok
 
 
-def fetch_langfuse_traces_total() -> int:
+def fetch_langfuse_traces_total() -> Tuple[int, bool]:
     url = (
         f"{LANGFUSE_HOST}/api/public/traces"
         f"?fromTimestamp={urllib.parse.quote(from_24h)}&limit=1"
     )
     try:
         data = _http_get(url, {"Authorization": _langfuse_auth_header()})
-        return data.get("meta", {}).get("totalItems", 0)
+        n = int(data.get("meta", {}).get("totalItems") or 0)
+        return n, True
     except Exception as exc:
-        print(f"[warn] Langfuse traces failed: {exc}", file=sys.stderr)
-        return 0
+        print(f"[warn] Langfuse traces failed: {repr(exc)}", file=sys.stderr)
+        return 0, False
 
 # ---------------------------------------------------------------------------
 # Error categorisation
@@ -313,8 +430,10 @@ def fmt_errors(error_obs: List, total_errors: int) -> str:
         dominant = f":warning: Dominant error: {top_cat}"
 
     return (
-        f"Error observations: {total_errors:,} (sampled {n_sample:,} across {unique_traces:,} unique traces)\n\n"
-        f"Error type breakdown (from sample, sorted by count):\n{cat_block}\n\n"
+        f"Error observations (reported total in project): {total_errors:,}\n"
+        f"Breakdown uses {n_sample:,} observations retrieved from the API (paginated); "
+        f"{unique_traces:,} unique trace ids in that set.\n\n"
+        f"Error type breakdown (from retrieved sample, sorted by count):\n{cat_block}\n\n"
         f"{dominant}"
     )
 
@@ -338,6 +457,7 @@ def fmt_stream_logs_summary(
     *,
     card_configured: bool,
     day_label: str,
+    metabase_error_hint: Optional[str] = None,
 ) -> str:
     """Format single-row summary from vcp_stream_logs_digest_summary.sql."""
     if not card_configured:
@@ -346,7 +466,11 @@ def fmt_stream_logs_summary(
             "question and set `METABASE_STREAM_LOGS_CARD_ID` in GitHub secrets.)_"
         )
     if rows is None:
-        return "  _(unavailable — Metabase fetch failed.)_"
+        hint = ""
+        if metabase_error_hint:
+            safe = _slack_escape(metabase_error_hint[:200])
+            hint = f"\n  _Last error (truncated): {safe}_"
+        return "  _(unavailable — Metabase fetch failed after retries. Check Actions logs.)_" + hint
     if not rows:
         return "  _(no summary row — check the Metabase question.)_"
     r = rows[0]
@@ -376,24 +500,32 @@ def fmt_stream_logs_summary(
     return "\n".join(lines)
 
 
-def fmt_scores(score_items: list, dv_total: int, total_traces: int) -> str:
-    """dv_total = accurate downvote count from Langfuse meta.totalItems (value=0 filter)."""
+def fmt_scores(score_items: list, dv_in_sample: int, total_traces: int) -> str:
+    """dv_in_sample = count of csat=0 within all score rows fetched from Langfuse (paginated)."""
     rate_str = "n/a"
     if total_traces > 0:
-        rate = dv_total / total_traces * 100
+        rate = dv_in_sample / total_traces * 100
         rate_str = f"{rate:.2f}"
 
     # Pull free-text comments from the sample (value==0 scores with a comment)
     downvote_sample = [s for s in score_items if s.get("value") == 0]
     comments = [
         s.get("comment") for s in downvote_sample
-        if s.get("comment") and s.get("comment").strip()
+        if s.get("comment") and str(s.get("comment")).strip()
     ][:10]
 
-    comment_lines = "\n".join(f'  "{c}"' for c in comments) if comments else "  _(no free-text comments)_"
+    if comments:
+        comment_lines = "\n".join(
+            f'  "{_slack_escape(str(c))}"' for c in comments
+        )
+    else:
+        comment_lines = "  _(no free-text comments)_"
 
     return (
-        f"Total downvotes (csat=0): {dv_total:,}  |  Total traces: {total_traces:,}  |  Rate: {rate_str}%\n\n"
+        f"Downvotes (csat=0) in Langfuse score fetch: *{dv_in_sample:,}* "
+        f"(from *{len(score_items):,}* score rows retrieved, last 24h)\n"
+        f"Total traces (last 24h, Langfuse): *{total_traces:,}*  |  "
+        f"Downvotes per trace (using retrieved scores only): *{rate_str}%*\n\n"
         f"Sample free-text comments (verbatim):\n{comment_lines}"
     )
 
@@ -434,11 +566,19 @@ def _row_pct(row: dict) -> float:
     return 0.0
 
 
-def fmt_behavior_proxy(rows: Optional[List]) -> str:
+def fmt_behavior_proxy(
+    rows: Optional[List], *, card_configured: bool, setting_name: str
+) -> str:
+    if not card_configured:
+        return (
+            f"  _(not configured — set Actions secret `{setting_name}` (digits only), "
+            "and pass it under `env:` on the digest workflow step. "
+            "Settings → Secrets does not inject vars by itself.)_"
+        )
     if rows is None:
         return (
-            "  _(not configured — add Metabase card + set "
-            "`METABASE_BEHAVIOR_FOLLOWUP_CARD_ID` / `METABASE_BEHAVIOR_REPHRASE_CARD_ID`)_"
+            "  _(Metabase fetch failed for this behaviour card — see GitHub Actions logs "
+            "for `[warn] Metabase card`.)_"
         )
     if not rows:
         return "  _(no rows)_"
@@ -450,7 +590,7 @@ def fmt_behavior_proxy(rows: Optional[List]) -> str:
         pct = _row_pct(row)
         nq = row.get("n_queries")
         nq_s = f" _(n={nq})_" if nq is not None else ""
-        lines.append(f"  • *{ch}*: {pct:.2f}%{nq_s}")
+        lines.append(f"  • *{_slack_escape(ch)}*: {pct:.2f}%{nq_s}")
     if not lines:
         return "  _(no chapter column in result — check SQL aliases)_"
     return "\n".join(lines)
@@ -486,7 +626,7 @@ def fmt_confirmed_regressions(
             "elevated chapters (thresholds: rephrase ≥ {:.1f}%, follow-up burst ≥ {:.1f}%)._"
         ).format(rephrase_threshold, follow_threshold)
     lines = "\n".join(
-        f"  • *{c}* — formatting FAIL hotspot ∩ behavioral spike"
+        f"  • *{_slack_escape(c)}* — formatting FAIL hotspot ∩ behavioral spike"
         for c in both
     )
     return f":rotating_light: *Confirmed regression signal* (judge × behavior)\n{lines}"
@@ -509,12 +649,77 @@ def _digest_footer_links(stream_logs_card_id: str) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+def build_plain_fallback(
+    *,
+    errors_ok: bool,
+    total_errors: int,
+    err_fetched_n: int,
+    traces_n: int,
+    traces_ok: bool,
+    scores_ok: bool,
+    n_scores_fetched: int,
+    dv_in_sample: int,
+    stream_logs_ok: bool,
+    stream_logs_configured: bool,
+    academic_ok: bool,
+    nonacademic_ok: bool,
+    dump_ok: bool,
+    follow_cfg: bool,
+    follow_ok: bool,
+    rephrase_cfg: bool,
+    rephrase_ok: bool,
+) -> str:
+    """Plain-text multiline fallback for notifications and when blocks are not shown."""
+    lf_err = (
+        f"{total_errors:,} reported total; {err_fetched_n:,} obs fetched for breakdown."
+        if errors_ok
+        else "Langfuse errors fetch failed."
+    )
+    lf_scores = (
+        f"{dv_in_sample:,} downvotes in {n_scores_fetched:,} score rows."
+        if scores_ok
+        else "Langfuse scores fetch failed."
+    )
+    tr = f"{traces_n:,} traces." if traces_ok else "Traces total fetch failed."
+    sl = (
+        "not configured"
+        if not stream_logs_configured
+        else ("ok" if stream_logs_ok else "Metabase fetch failed (see Actions logs).")
+    )
+    mb_core = (
+        f"Metabase core cards: academic={'ok' if academic_ok else 'fail'}, "
+        f"nonacademic={'ok' if nonacademic_ok else 'fail'}, dump={'ok' if dump_ok else 'fail'}."
+    )
+    beh = []
+    if follow_cfg:
+        beh.append(f"follow-up card={'ok' if follow_ok else 'fetch failed'}")
+    if rephrase_cfg:
+        beh.append(f"rephrase card={'ok' if rephrase_ok else 'fetch failed'}")
+    beh_s = "; ".join(beh) if beh else "behaviour cards not configured."
+    parts = [
+        f"Ask AI Daily Digest — {today_str}",
+        "",
+        "Full message uses Slack blocks; open the message in the channel for layout.",
+        "",
+        f"Langfuse errors (24h): {lf_err}",
+        "",
+        f"Langfuse scores / downvotes: {lf_scores}",
+        f"Langfuse traces (24h): {tr}",
+        "",
+        f"Stream logs summary (yesterday): {sl}",
+        "",
+        mb_core,
+        f"Behaviour Metabase: {beh_s}",
+    ]
+    return "\n".join(parts)
+
+
 def build_blocks(
     academic_rows,
     nonacademic_rows,
     dump_rows,
     score_items,
-    total_scores,
+    dv_in_sample,
     error_obs,
     total_errors,
     total_traces,
@@ -523,27 +728,39 @@ def build_blocks(
     eval_summary: Optional[dict] = None,
     stream_logs_rows: Optional[List] = None,
     stream_logs_card_id: str = "",
+    stream_logs_error_hint: Optional[str] = None,
+    follow_card_configured: bool = False,
+    rephrase_card_configured: bool = False,
 ) -> list:
     academic_block    = fmt_academic(academic_rows)
     nonacademic_block = fmt_nonacademic(nonacademic_rows)
     dump_block        = fmt_downvote_dump(dump_rows)
-    scores_block      = fmt_scores(score_items, total_scores, total_traces)
+    scores_block      = fmt_scores(score_items, dv_in_sample, total_traces)
     errors_block      = fmt_errors(error_obs, total_errors)
     sl_cfg = bool(stream_logs_card_id and stream_logs_card_id.isdigit())
     stream_logs_block = fmt_stream_logs_summary(
         stream_logs_rows,
         card_configured=sl_cfg,
         day_label=yesterday,
+        metabase_error_hint=stream_logs_error_hint,
     )
 
-    follow_txt = fmt_behavior_proxy(behavior_follow_rows)
-    rephrase_txt = fmt_behavior_proxy(behavior_rephrase_rows)
+    follow_txt = fmt_behavior_proxy(
+        behavior_follow_rows,
+        card_configured=follow_card_configured,
+        setting_name="METABASE_BEHAVIOR_FOLLOWUP_CARD_ID",
+    )
+    rephrase_txt = fmt_behavior_proxy(
+        behavior_rephrase_rows,
+        card_configured=rephrase_card_configured,
+        setting_name="METABASE_BEHAVIOR_REPHRASE_CARD_ID",
+    )
     reg_txt = fmt_confirmed_regressions(
         behavior_follow_rows, behavior_rephrase_rows, eval_summary
     )
 
     def section(text: str) -> dict:
-        return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+        return {"type": "section", "text": {"type": "mrkdwn", "text": _truncate_section(text)}}
 
     divider: dict = {"type": "divider"}
 
@@ -580,58 +797,120 @@ def build_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": _digest_footer_links(stream_logs_card_id),
+                    "text": _truncate_section(_digest_footer_links(stream_logs_card_id)),
                 }
             ],
         },
     ]
 
 
-def post_to_slack(blocks: list, fallback_text: str) -> None:
+def post_to_slack(blocks: list, fallback_text: str) -> bool:
     if not SLACK_WEBHOOK:
         print("[warn] SLACK_WEBHOOK_URL not set — skipping Slack post.", file=sys.stderr)
-        return
-    payload = json.dumps({"text": fallback_text, "blocks": blocks}).encode()
+        return False
+    payload = json.dumps(
+        {
+            "text": fallback_text,
+            "blocks": blocks,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+    ).encode()
     req = urllib.request.Request(
         SLACK_WEBHOOK,
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        status = resp.getcode()
-        if status != 200:
-            print(f"[warn] Slack returned HTTP {status}", file=sys.stderr)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            status = resp.getcode()
+            raw = resp.read().decode().strip()
+    except Exception as exc:
+        print(f"[error] Slack request failed: {repr(exc)}", file=sys.stderr)
+        return False
+    if status != 200:
+        print(f"[error] Slack HTTP {status}: {raw}", file=sys.stderr)
+        return False
+    if raw == "ok":
+        return True
+    try:
+        body = json.loads(raw)
+        if body.get("ok") is True:
+            return True
+        print(f"[error] Slack webhook response: {raw}", file=sys.stderr)
+        return False
+    except json.JSONDecodeError:
+        print(f"[error] Slack unexpected response body: {raw}", file=sys.stderr)
+        return False
 
 
-def main() -> None:
+def main() -> int:
     print(f"[info] Fetching data for digest ({today_str}, yesterday={yesterday}) …", file=sys.stderr)
 
-    # Metabase
-    academic_rows    = fetch_metabase_card(24973)
+    _warn_metabase_card_env_var("METABASE_BEHAVIOR_FOLLOWUP_CARD_ID", BEHAVIOR_FOLLOWUP_CARD_ID)
+    _warn_metabase_card_env_var("METABASE_BEHAVIOR_REPHRASE_CARD_ID", BEHAVIOR_REPHRASE_CARD_ID)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        if not BEHAVIOR_FOLLOWUP_CARD_ID.strip() and not BEHAVIOR_REPHRASE_CARD_ID.strip():
+            print(
+                "[warn] METABASE_BEHAVIOR_* are empty in this job. If secrets exist under "
+                "Settings → Actions, ensure `.github/workflows/daily-digest.yml` passes "
+                "`METABASE_BEHAVIOR_FOLLOWUP_CARD_ID` and `METABASE_BEHAVIOR_REPHRASE_CARD_ID` "
+                "into the digest step `env:` block.",
+                file=sys.stderr,
+            )
+
+    academic_rows = fetch_metabase_card(24973)
     nonacademic_rows = fetch_metabase_card(24974)
-    dump_rows        = fetch_metabase_card(23036)
+    dump_rows = fetch_metabase_card(23036)
 
-    # Langfuse
-    score_items, total_scores = fetch_langfuse_scores()
-    error_obs, total_errors   = fetch_langfuse_errors()
-    total_traces               = fetch_langfuse_traces_total()
+    score_items, dv_in_sample, scores_ok = fetch_langfuse_scores()
+    error_obs, total_errors, errors_ok = fetch_langfuse_errors()
+    total_traces, traces_ok = fetch_langfuse_traces_total()
 
-    # Optional C11 — production SQL must be saved as Metabase questions first
+    follow_cfg = BEHAVIOR_FOLLOWUP_CARD_ID.isdigit()
     follow_rows = (
-        fetch_metabase_card(int(BEHAVIOR_FOLLOWUP_CARD_ID))
-        if BEHAVIOR_FOLLOWUP_CARD_ID.isdigit() else None
+        fetch_metabase_card(int(BEHAVIOR_FOLLOWUP_CARD_ID)) if follow_cfg else None
     )
+    rephrase_cfg = BEHAVIOR_REPHRASE_CARD_ID.isdigit()
     rephrase_rows = (
-        fetch_metabase_card(int(BEHAVIOR_REPHRASE_CARD_ID))
-        if BEHAVIOR_REPHRASE_CARD_ID.isdigit() else None
+        fetch_metabase_card(int(BEHAVIOR_REPHRASE_CARD_ID)) if rephrase_cfg else None
     )
     eval_summary = load_eval_summary(EVAL_SUMMARY_PATH)
 
-    stream_logs_rows = (
-        fetch_metabase_card(int(STREAM_LOGS_CARD_ID))
-        if STREAM_LOGS_CARD_ID.isdigit()
-        else None
+    sl_cfg = STREAM_LOGS_CARD_ID.isdigit()
+    stream_logs_rows: Optional[List] = None
+    stream_logs_err: Optional[str] = None
+    if sl_cfg:
+        stream_logs_rows, stream_logs_err = fetch_metabase_card_detailed(
+            int(STREAM_LOGS_CARD_ID), retries=3
+        )
+
+    mb_academic_ok = academic_rows is not None
+    mb_nonacademic_ok = nonacademic_rows is not None
+    mb_dump_ok = dump_rows is not None
+    follow_ok = (follow_rows is not None) if follow_cfg else False
+    rephrase_ok = (rephrase_rows is not None) if rephrase_cfg else False
+    stream_logs_ok = (stream_logs_rows is not None) if sl_cfg else False
+
+    fallback_text = build_plain_fallback(
+        errors_ok=errors_ok,
+        total_errors=total_errors,
+        err_fetched_n=len(error_obs),
+        traces_n=total_traces,
+        traces_ok=traces_ok,
+        scores_ok=scores_ok,
+        n_scores_fetched=len(score_items),
+        dv_in_sample=dv_in_sample,
+        stream_logs_ok=stream_logs_ok,
+        stream_logs_configured=sl_cfg,
+        academic_ok=mb_academic_ok,
+        nonacademic_ok=mb_nonacademic_ok,
+        dump_ok=mb_dump_ok,
+        follow_cfg=follow_cfg,
+        follow_ok=follow_ok,
+        rephrase_cfg=rephrase_cfg,
+        rephrase_ok=rephrase_ok,
     )
 
     blocks = build_blocks(
@@ -639,7 +918,7 @@ def main() -> None:
         nonacademic_rows,
         dump_rows,
         score_items,
-        total_scores,
+        dv_in_sample,
         error_obs,
         total_errors,
         total_traces,
@@ -648,18 +927,47 @@ def main() -> None:
         eval_summary=eval_summary,
         stream_logs_rows=stream_logs_rows,
         stream_logs_card_id=STREAM_LOGS_CARD_ID,
+        stream_logs_error_hint=stream_logs_err,
+        follow_card_configured=follow_cfg,
+        rephrase_card_configured=rephrase_cfg,
     )
-    fallback_text = f"Ask AI Daily Digest — {today_str}"
-    print(f"{fallback_text}\n[{len(blocks)} blocks]")
+    print(f"[info] {fallback_text.splitlines()[0]}\n[{len(blocks)} blocks]", file=sys.stderr)
 
     if DRY_RUN:
         import pprint
         pprint.pprint(blocks)
         print("\n[info] --dry-run: Slack post skipped.", file=sys.stderr)
-    else:
-        post_to_slack(blocks, fallback_text)
+        print(
+            f"[digest] metabase academic={'ok' if mb_academic_ok else 'fail'} "
+            f"nonacademic={'ok' if mb_nonacademic_ok else 'fail'} dump={'ok' if mb_dump_ok else 'fail'} "
+            f"stream_logs={'ok' if stream_logs_ok else ('na' if not sl_cfg else 'fail')} "
+            f"langfuse scores={'ok' if scores_ok else 'fail'} errors={'ok' if errors_ok else 'fail'} "
+            f"traces={'ok' if traces_ok else 'fail'} slack_post=skipped",
+            file=sys.stderr,
+        )
+        return 0
+
+    posted = post_to_slack(blocks, fallback_text)
+    exit_code = 0
+    if not posted:
+        exit_code = 1
+    if not mb_academic_ok and not mb_nonacademic_ok and not mb_dump_ok:
+        exit_code = 1
+    if DIGEST_STRICT_STREAM_LOGS and sl_cfg and stream_logs_rows is None:
+        exit_code = 1
+
+    print(
+        f"[digest] metabase academic={'ok' if mb_academic_ok else 'fail'} "
+        f"nonacademic={'ok' if mb_nonacademic_ok else 'fail'} dump={'ok' if mb_dump_ok else 'fail'} "
+        f"stream_logs={'ok' if stream_logs_ok else ('na' if not sl_cfg else 'fail')} "
+        f"langfuse scores={'ok' if scores_ok else 'fail'} errors={'ok' if errors_ok else 'fail'} "
+        f"traces={'ok' if traces_ok else 'fail'} slack_post={'ok' if posted else 'fail'}",
+        file=sys.stderr,
+    )
+    if posted:
         print("[info] Message posted to Slack.", file=sys.stderr)
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

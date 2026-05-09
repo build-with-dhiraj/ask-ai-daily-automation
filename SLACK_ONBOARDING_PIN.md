@@ -16,7 +16,8 @@ This channel is for **monitoring Ask AI quality and incidents**. Use it to notic
 Summarises how yesterday’s **sampled** Video Co-Pilot (academic) answers score on a **fixed checklist** (accuracy and experience). Shows counts, stratum split, and week-over-week style context where configured. A `?` link may point to a short doc on definitions and cost.
 
 **Daily Digest** (about 09:30 IST)  
-Pulls together **downvote and reason data from Metabase**, **errors and comments from Langfuse**, **yesterday’s API request summary from `stream_logs` (via Metabase)**, and optional **behaviour proxy cards** (also Metabase). Sections are in a fixed order so the same screen is easy to scan every day.
+Pulls together **downvote and reason data from Metabase**, **errors and comments from Langfuse**, **yesterday’s API request summary from `stream_logs` (via Metabase)**, and optional **behaviour proxy cards** (also Metabase). Sections are in a fixed order so the same screen is easy to scan every day.  
+The digest is **Slack Block Kit** (`blocks`); mobile search and some notifications may show only the **plain-text summary line** — open the full thread in-channel to read every section.
 
 ---
 
@@ -40,7 +41,7 @@ Neither message is typed by hand; both are **fully automated** from data + scrip
 4. **Downvote reasons and snapshots** — from Metabase.  
 5. **Silent-failure proxies** — from Metabase behaviour questions when configured; “confirmed regression” lines use overlap with the eval snapshot when that file exists on the runner.
 
-For a single request, **`trace_id`** is the usual key to align Langfuse with internal logs (see stream_logs documentation).
+**Prod Metabase (PW, digest):** GitHub secrets must map to saved questions **33282** (follow-up burst), **33283** (rephrase keywords), **33285** (`stream_logs` summary); see repo `ONE_PAGER.md` for links.
 
 ---
 

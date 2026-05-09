@@ -38,20 +38,25 @@ Order of magnitude **~$2–5 USD/day** at current sample volume (~3k traces, mod
 
 `METABASE_QUESTION_ID` in GitHub Actions secrets must stay **`33193`** unless you intentionally point to a clone.
 
-### Step 2 — Behavioral Metabase cards + GitHub secrets (optional digest)
+### Step 2 — Digest Metabase cards + GitHub secrets (behaviour + stream logs)
 
-This powers the **Silent-failure proxies** block in the 09:30 IST digest ([`daily_digest.py`](daily_digest.py)). Skip until you want the cross-check; the digest shows a “not configured” note until then.
+This powers the **Silent-failure proxies** and **Video co-pilot API health** blocks in the 09:30 IST digest ([`daily_digest.py`](daily_digest.py)). The workflow maps secrets under `jobs.digest.env` in [`.github/workflows/daily-digest.yml`](.github/workflows/daily-digest.yml).
 
-1. **Metabase → New → SQL query** → paste [sql/behavior_followup_burst.sql](sql/behavior_followup_burst.sql) → run → **Save**. Name e.g. `Ask AI — follow-up burst by chapter`. Copy the question id from the URL: `/question/<ID>`.
-2. **Repeat** for [sql/behavior_rephrase_keywords.sql](sql/behavior_rephrase_keywords.sql) → e.g. `Ask AI — rephrase keywords by chapter`.
-3. **GitHub** → repo **ask-ai-daily-automation** → **Settings → Secrets and variables → Actions** → **New repository secret**:
-   - Name: `METABASE_BEHAVIOR_FOLLOWUP_CARD_ID` → value: **digits only** (e.g. `33201`).
-   - Name: `METABASE_BEHAVIOR_REPHRASE_CARD_ID` → value: **digits only** (e.g. `33283`).
-4. Next **Daily Digest** run (schedule or **Actions → Daily Digest → Run workflow**) will fetch both cards. No code change needed.
+**Production (Physics Wallah Metabase)** — use these question ids as secret values (**digits only**, no quotes):
 
-**Production (Physics Wallah Metabase):** follow-up **[33282](https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card)** · rephrase **[33283](https://metabase-prod.penpencil.co/question/33283-metabase-behavior-rephrase-card)** — set GitHub secrets to **`33282`** and **`33283`** respectively.
+| Actions secret | Metabase question |
+|----------------|-------------------|
+| `METABASE_BEHAVIOR_FOLLOWUP_CARD_ID` | **[33282](https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card)** — SQL: [sql/behavior_followup_burst.sql](sql/behavior_followup_burst.sql) |
+| `METABASE_BEHAVIOR_REPHRASE_CARD_ID` | **[33283](https://metabase-prod.penpencil.co/question/33283-metabase-behavior-rephrase-card)** — SQL: [sql/behavior_rephrase_keywords.sql](sql/behavior_rephrase_keywords.sql) |
+| `METABASE_STREAM_LOGS_CARD_ID` | **[33285](https://metabase-prod.penpencil.co/question/33285-metabase-stream-logs-card)** — SQL: [sql/vcp_stream_logs_digest_summary.sql](sql/vcp_stream_logs_digest_summary.sql) |
 
-**Stream logs (E2E API health):** **[33285](https://metabase-prod.penpencil.co/question/33285-metabase-stream-logs-card)** — SQL in [sql/vcp_stream_logs_digest_summary.sql](sql/vcp_stream_logs_digest_summary.sql); GitHub secret **`METABASE_STREAM_LOGS_CARD_ID`** = **`33285`**. Powers the *Video co-pilot API health* block in the digest (calendar yesterday vs Langfuse rolling 24h).
+Setup checklist:
+
+1. **GitHub** → **Settings → Secrets and variables → Actions** → create or update the three secrets above with **`33282`**, **`33283`**, **`33285`** respectively.
+2. **Metabase:** confirm each saved question’s SQL matches the linked file in this repo (replace entire query if you cloned or recreated a card).
+3. **Daily Digest** run (schedule or **Actions → Daily Digest → Run workflow**) picks up the ids from secrets; no ids are hardcoded in the app.
+
+The digest is delivered as **Slack Block Kit** (`blocks`) plus a **multi-line plain-text summary** for notifications and accessibility; if a section looks compressed in search, open the message in the channel.
 
 The digest also reads **`EVAL_SUMMARY_PATH`** (`/tmp/daily_eval_yesterday_summary.json` on the runner). For the **Confirmed regression signal** line, the **Daily Eval** job should succeed on that machine **before** digest so the snapshot file exists.
 
