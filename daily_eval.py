@@ -300,14 +300,35 @@ def main() -> int:
     for k, v in sorted(by_strat.items()):
         print(f"     {k:<10} {v}")
 
+    # Auto-resume: if a checkpoint exists for this judge_run_id, skip already-evaluated samples
+    checkpoint_file = args.output + ".checkpoint"
+    checkpoint_results: list[dict] = []
+    already_done_ids: set[str] = set()
+    if os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file) as _cf:
+                checkpoint_results = json.load(_cf)
+            already_done_ids = {r["_trace_id"] for r in checkpoint_results if r.get("_trace_id")}
+            print(f"♻️  Checkpoint found: {len(checkpoint_results)} samples already evaluated. Skipping them.")
+        except Exception as _e:
+            print(f"⚠️  Could not load checkpoint ({_e}). Starting fresh.")
+            checkpoint_results = []
+            already_done_ids = set()
+
+    if already_done_ids:
+        before = len(samples)
+        samples = [s for s in samples if s.get("trace_id") not in already_done_ids]
+        print(f"♻️  {before - len(samples)} skipped (already done). {len(samples)} remaining to judge.")
+
     # 2. Judge loop
     yesterday = (date.today().toordinal() - 1)
     yesterday_str = date.fromordinal(yesterday).isoformat()
     judge_run_id = f"daily-eval-{yesterday_str}"
     write_scores = not args.no_write_scores
-    results = run_judge_loop(samples, judge_run_id=judge_run_id,
-                              write_scores=write_scores, model=args.model,
-                              checkpoint_path=args.output + ".checkpoint")
+    new_results = run_judge_loop(samples, judge_run_id=judge_run_id,
+                                 write_scores=write_scores, model=args.model,
+                                 checkpoint_path=args.output + ".checkpoint")
+    results = checkpoint_results + new_results  # full combined set for aggregation
 
     # 3. Save full results
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
@@ -320,18 +341,20 @@ def main() -> int:
     label = args.label or judge_run_id
     block = render_slack_block(summary, run_label=label, results=results)
 
-    # Cost + sample breakdown footer
-    n_judged = len(results)
-    in_tok = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in results)
-    out_tok = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in results)
+    # Cost + sample breakdown footer (cost from THIS run only; counts from all results)
+    n_judged_total = len(results)
+    n_judged_new = len(new_results)
+    in_tok = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in new_results)
+    out_tok = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in new_results)
     est_usd = in_tok * 2e-6 + out_tok * 8e-6
     strata_counts: dict[str, int] = {}
-    for r in results:
+    for r in results:  # count strata from ALL results
         st = r.get("_stratum") or "all"
         strata_counts[st] = strata_counts.get(st, 0) + 1
     strata_summary = " | ".join(f"{v} {k}" for k, v in sorted(strata_counts.items()))
+    resumed_note = f" _(resumed, {n_judged_total - n_judged_new} from checkpoint)_" if checkpoint_results else ""
     cost_footer = (
-        f"\n💰 *Run cost* | {n_judged} samples ({strata_summary})"
+        f"\n💰 *Run cost* | {n_judged_total} samples ({strata_summary}){resumed_note}"
         f" | Tokens: {in_tok:,} in / {out_tok:,} out"
         f" | Est: ~${est_usd:.2f} (₹{est_usd*83:.0f})"
     )
@@ -344,11 +367,25 @@ def main() -> int:
     # 5. Slack post
     if args.dry_run:
         print("(dry-run — skipping Slack post)")
+        # Clean up checkpoint on successful completion
+        if os.path.exists(checkpoint_file):
+            try:
+                os.remove(checkpoint_file)
+                print(f"🗑️  Checkpoint cleaned up: {checkpoint_file}")
+            except Exception:
+                pass
         return 0
 
     webhook = os.environ.get("SLACK_WEBHOOK_URL")
     if not webhook:
         print("⚠️  SLACK_WEBHOOK_URL not set. Block printed above only.")
+        # Clean up checkpoint on successful completion
+        if os.path.exists(checkpoint_file):
+            try:
+                os.remove(checkpoint_file)
+                print(f"🗑️  Checkpoint cleaned up: {checkpoint_file}")
+            except Exception:
+                pass
         return 0
 
     try:
@@ -357,6 +394,15 @@ def main() -> int:
     except Exception as e:
         print(f"❌ Slack post failed: {e}")
         return 1
+
+    # Clean up checkpoint on successful completion
+    if os.path.exists(checkpoint_file):
+        try:
+            os.remove(checkpoint_file)
+            print(f"🗑️  Checkpoint cleaned up: {checkpoint_file}")
+        except Exception:
+            pass
+
     return 0
 
 
