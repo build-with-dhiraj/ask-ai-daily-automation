@@ -1,7 +1,8 @@
 -- Digest: per-chapter "triple follow-up in 60s" proxy (silent frustration / confusion).
 -- Same academic VIDEO_CO_PILOT filter as daily stratified sample.
 -- Uses silver_conversational_query_table.userid (see DATA_BIBLE).
--- Save as a Metabase question; set METABASE_BEHAVIOR_FOLLOWUP_CARD_ID in the digest workflow.
+-- Prod Metabase: https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card
+-- Secret: METABASE_BEHAVIOR_FOLLOWUP_CARD_ID=33282
 --
 -- Output columns (flexible names for daily_digest.py): chapter, triple_followup_60s_pct, n_queries
 

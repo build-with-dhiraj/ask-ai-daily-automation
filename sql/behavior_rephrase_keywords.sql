@@ -1,5 +1,6 @@
 -- Digest: per-chapter rate of queries matching "rephrase / shorter / language switch" heuristics.
--- Save as a Metabase question; set METABASE_BEHAVIOR_REPHRASE_CARD_ID in the digest workflow.
+-- Prod Metabase: https://metabase-prod.penpencil.co/question/33283-metabase-behavior-rephrase-card
+-- Secret: METABASE_BEHAVIOR_REPHRASE_CARD_ID=33283 (or METABASE_BEHAVIOR_REPHRASE_CARD)
 --
 -- Output columns: chapter, rephrase_keyword_pct, n_queries
 

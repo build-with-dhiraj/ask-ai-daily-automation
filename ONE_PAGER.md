@@ -50,6 +50,8 @@ This powers the **Silent-failure proxies** block in the 09:30 IST digest ([`dail
      _(If you already saved it as `METABASE_BEHAVIOR_REPHRASE_CARD`, that still works — the digest workflow reads both.)_
 4. Next **Daily Digest** run (schedule or **Actions → Daily Digest → Run workflow**) will fetch both cards. No code change needed.
 
+**Production (Physics Wallah Metabase):** follow-up **[33282](https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card)** · rephrase **[33283](https://metabase-prod.penpencil.co/question/33283-metabase-behavior-rephrase-card)** — set GitHub secrets to **`33282`** and **`33283`** respectively.
+
 The digest also reads **`EVAL_SUMMARY_PATH`** (`/tmp/daily_eval_yesterday_summary.json` on the runner). For the **Confirmed regression signal** line, the **Daily Eval** job should succeed on that machine **before** digest so the snapshot file exists.
 
 ### Step 3 — Confirm Daily Eval Slack (after a green run)
