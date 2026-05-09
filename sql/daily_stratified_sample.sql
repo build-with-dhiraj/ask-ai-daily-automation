@@ -5,15 +5,15 @@
 --
 -- Planners note: prior version referenced `base` in four branches + many NOT IN
 -- subqueries (~173 stages, Trino max 150). This rewrite:
---   • One enriched scan (MATERIALIZED) — adds answer_len + pr_len there
+--   • Single `enriched` CTE — answer_len + PERCENT_RANK (`pr_len`) in one scan
 --   • Anti-joins instead of NOT IN (...)
---   • One MATERIALIZED union for exclusions before no_vote
+--   • Shared exclusion unions (`taken_down_out`, `taken_all`)
 --
--- If `AS MATERIALIZED` is rejected by your Trino version, remove that keyword
--- twice below and try session: SET SESSION distinct_aggregations_strategy = 'single_step';
+-- (Older Trino/Starburst: no `AS MATERIALIZED` — unsupported on this cluster.)
+-- If you again hit the stage limit, ask platform for session tweaks or a CTAS step.
 -- =============================================================================
 
-WITH enriched AS MATERIALIZED (
+WITH enriched AS (
   SELECT
     q.aiintentid                                                            AS trace_id,
     q.query                                                                 AS doubt,
@@ -85,7 +85,7 @@ outlier_long_final AS (
   WHERE rn_global <= 50
 ),
 
-taken_down_out AS MATERIALIZED (
+taken_down_out AS (
   SELECT trace_id FROM downvote_final
   UNION ALL
   SELECT trace_id FROM outlier_long_final
@@ -132,7 +132,7 @@ upvote_final AS (
   WHERE rn_global <= 600
 ),
 
-taken_all AS MATERIALIZED (
+taken_all AS (
   SELECT trace_id FROM downvote_final
   UNION ALL
   SELECT trace_id FROM outlier_long_final
