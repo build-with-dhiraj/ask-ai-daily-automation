@@ -38,6 +38,11 @@ SLACK_WEBHOOK    = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 DRY_RUN = "--dry-run" in sys.argv
 
+# C11/C12 — optional Metabase cards + yesterday's eval snapshot (same path as daily_eval.py)
+EVAL_SUMMARY_PATH = os.environ.get("EVAL_SUMMARY_PATH", "/tmp/daily_eval_yesterday_summary.json")
+BEHAVIOR_FOLLOWUP_CARD_ID = os.environ.get("METABASE_BEHAVIOR_FOLLOWUP_CARD_ID", "").strip()
+BEHAVIOR_REPHRASE_CARD_ID = os.environ.get("METABASE_BEHAVIOR_REPHRASE_CARD_ID", "").strip()
+
 # ---------------------------------------------------------------------------
 # Date helpers
 # ---------------------------------------------------------------------------
@@ -320,6 +325,100 @@ def fmt_scores(score_items: list, dv_total: int, total_traces: int) -> str:
         f"Sample free-text comments (verbatim):\n{comment_lines}"
     )
 
+
+def load_eval_summary(summary_path: str) -> Optional[dict]:
+    """Load JSON written by daily_eval.py (formatting_hotspot_chapters, axial_fail_pct, etc.)."""
+    if not summary_path:
+        return None
+    try:
+        with open(summary_path) as _sf:
+            return json.load(_sf)
+    except Exception:
+        return None
+
+
+def _row_chapter(row: dict) -> Optional[str]:
+    for k in ("chapter", "Chapter", "standardchaptername", "standardChapterName"):
+        v = row.get(k)
+        if v and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def _row_pct(row: dict) -> float:
+    for k in (
+        "triple_followup_60s_pct",
+        "rephrase_keyword_pct",
+        "rate_pct",
+        "pct",
+        "value",
+    ):
+        v = row.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+def fmt_behavior_proxy(rows: Optional[List]) -> str:
+    if rows is None:
+        return (
+            "  _(not configured — add Metabase card + set "
+            "`METABASE_BEHAVIOR_FOLLOWUP_CARD_ID` / `METABASE_BEHAVIOR_REPHRASE_CARD_ID`)_"
+        )
+    if not rows:
+        return "  _(no rows)_"
+    lines = []
+    for row in rows[:12]:
+        ch = _row_chapter(row)
+        if not ch:
+            continue
+        pct = _row_pct(row)
+        nq = row.get("n_queries")
+        nq_s = f" _(n={nq})_" if nq is not None else ""
+        lines.append(f"  • *{ch}*: {pct:.2f}%{nq_s}")
+    if not lines:
+        return "  _(no chapter column in result — check SQL aliases)_"
+    return "\n".join(lines)
+
+
+def fmt_confirmed_regressions(
+    follow_rows: Optional[List],
+    rephrase_rows: Optional[List],
+    eval_summary: Optional[dict],
+    rephrase_threshold: float = 3.0,
+    follow_threshold: float = 5.0,
+) -> str:
+    """C12 — chapters that are both formatting hotspots (judge) and behavioral spikes."""
+    fmt_hot = set(eval_summary.get("formatting_hotspot_chapters") or []) if eval_summary else set()
+    if not fmt_hot:
+        return (
+            "  _(No `formatting_hotspot_chapters` in eval snapshot — run daily eval on this host first, "
+            "or snapshot path differs from `EVAL_SUMMARY_PATH`.)_"
+        )
+    behavioral: set[str] = set()
+    for row in rephrase_rows or []:
+        ch = _row_chapter(row)
+        if ch and _row_pct(row) >= rephrase_threshold:
+            behavioral.add(ch)
+    for row in follow_rows or []:
+        ch = _row_chapter(row)
+        if ch and _row_pct(row) >= follow_threshold:
+            behavioral.add(ch)
+    both = sorted(fmt_hot & behavioral)
+    if not both:
+        return (
+            "  _No overlap today between judge *formatting* hotspots and behavioral "
+            "elevated chapters (thresholds: rephrase ≥ {:.1f}%, follow-up burst ≥ {:.1f}%)._"
+        ).format(rephrase_threshold, follow_threshold)
+    lines = "\n".join(
+        f"  • *{c}* — formatting FAIL hotspot ∩ behavioral spike"
+        for c in both
+    )
+    return f":rotating_light: *Confirmed regression signal* (judge × behavior)\n{lines}"
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -333,12 +432,21 @@ def build_blocks(
     error_obs,
     total_errors,
     total_traces,
+    behavior_follow_rows: Optional[List] = None,
+    behavior_rephrase_rows: Optional[List] = None,
+    eval_summary: Optional[dict] = None,
 ) -> list:
     academic_block    = fmt_academic(academic_rows)
     nonacademic_block = fmt_nonacademic(nonacademic_rows)
     dump_block        = fmt_downvote_dump(dump_rows)
     scores_block      = fmt_scores(score_items, total_scores, total_traces)
     errors_block      = fmt_errors(error_obs, total_errors)
+
+    follow_txt = fmt_behavior_proxy(behavior_follow_rows)
+    rephrase_txt = fmt_behavior_proxy(behavior_rephrase_rows)
+    reg_txt = fmt_confirmed_regressions(
+        behavior_follow_rows, behavior_rephrase_rows, eval_summary
+    )
 
     def section(text: str) -> dict:
         return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
@@ -356,6 +464,13 @@ def build_blocks(
         section(f":thumbsdown: *Downvote Reasons — Non-Academic (rolling 21d)*\n{nonacademic_block}"),
         divider,
         section(f":bar_chart: *Yesterday's Downvoted Queries Snapshot ({yesterday})*\n{dump_block}"),
+        divider,
+        section(
+            f":brain: *Silent-failure proxies (yesterday, academic VCP)*\n"
+            f"*Multi-turn burst (≥3 queries in 60s / user):*\n{follow_txt}\n\n"
+            f"*Rephrase / shorter / language-switch keyword rate:*\n{rephrase_txt}\n\n"
+            f"{reg_txt}"
+        ),
         divider,
         section(f":speech_balloon: *User Comments on Downvotes (Langfuse, last 24h)*\n{scores_block}"),
         divider,
@@ -408,6 +523,17 @@ def main() -> None:
     error_obs, total_errors   = fetch_langfuse_errors()
     total_traces               = fetch_langfuse_traces_total()
 
+    # Optional C11 — production SQL must be saved as Metabase questions first
+    follow_rows = (
+        fetch_metabase_card(int(BEHAVIOR_FOLLOWUP_CARD_ID))
+        if BEHAVIOR_FOLLOWUP_CARD_ID.isdigit() else None
+    )
+    rephrase_rows = (
+        fetch_metabase_card(int(BEHAVIOR_REPHRASE_CARD_ID))
+        if BEHAVIOR_REPHRASE_CARD_ID.isdigit() else None
+    )
+    eval_summary = load_eval_summary(EVAL_SUMMARY_PATH)
+
     blocks = build_blocks(
         academic_rows,
         nonacademic_rows,
@@ -417,6 +543,9 @@ def main() -> None:
         error_obs,
         total_errors,
         total_traces,
+        behavior_follow_rows=follow_rows,
+        behavior_rephrase_rows=rephrase_rows,
+        eval_summary=eval_summary,
     )
     fallback_text = f"Ask AI Daily Digest — {today_str}"
     print(f"{fallback_text}\n[{len(blocks)} blocks]")

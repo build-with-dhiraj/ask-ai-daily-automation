@@ -400,6 +400,10 @@ def main() -> int:
     )
 
     nl = "\n"
+    one_pager = os.environ.get(
+        "EVAL_ONE_PAGER_URL",
+        "https://github.com/build-with-dhiraj/ask-ai-daily-automation/blob/main/ONE_PAGER.md",
+    )
     cost_footer = (
         f"\n💰 *Run cost*\n"
         f"   Total: {n_judged_total} samples | {in_tok:,} in / {out_tok:,} out | "
@@ -407,6 +411,7 @@ def main() -> int:
         f"   By stratum:\n"
         f"{nl.join(strata_cost_lines)}"
         f"{(nl + resumed_note) if resumed_note else ''}"
+        f"\n❓ *What is this?* <{one_pager}|Eval one-pager — thresholds, cost, Metabase Q33193>\n"
     )
     block = block + cost_footer
 
@@ -426,6 +431,28 @@ def main() -> int:
         fail_pct_snap = round(100.0 * summary.n_fail / n_j, 1) if summary.n_judgable else 0.0
         acc_fail_pct_snap = round(100.0 * n_acc / n_j, 1) if summary.n_judgable else 0.0
         exp_fail_pct_snap = round(100.0 * n_exp / n_j, 1) if summary.n_judgable else 0.0
+
+        # C12: chapter names with worst formatting FAIL rate (min 5 samples), top 5 — for digest cross-correlation
+        def _hotspot_chapters_for_axial(ax: str, min_n: int = 5, top_k: int = 5) -> list[str]:
+            stats: dict[str, dict[str, int]] = {}
+            for r in results:
+                if r.get("overall_band") not in ("PASS", "NEUTRAL", "FAIL"):
+                    continue
+                ch = (r.get("_chapter") or "").strip() or "unknown"
+                d = stats.setdefault(ch, {"n": 0, "fail": 0})
+                d["n"] += 1
+                if not r.get(ax, {}).get("passed", True):
+                    d["fail"] += 1
+            eligible = [(c, d) for c, d in stats.items() if d["n"] >= min_n and c != "unknown"]
+            worst = sorted(
+                eligible,
+                key=lambda kv: (kv[1]["fail"] / kv[1]["n"], kv[1]["n"]),
+                reverse=True,
+            )[:top_k]
+            return [c for c, d in worst if d["fail"] > 0]
+
+        formatting_hotspot_chapters = _hotspot_chapters_for_axial("formatting")
+
         summary_snapshot = {
             "date": yesterday_str,
             "n_judgable": summary.n_judgable,
@@ -435,6 +462,7 @@ def main() -> int:
             "acc_fail_pct": acc_fail_pct_snap,
             "exp_fail_pct": exp_fail_pct_snap,
             "axial_fail_pct": dict(summary.axial_fail_pct),
+            "formatting_hotspot_chapters": formatting_hotspot_chapters,
         }
         with open(prev_snapshot_path, "w") as _sf:
             json.dump(summary_snapshot, _sf, indent=2)
