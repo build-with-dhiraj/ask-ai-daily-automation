@@ -1,6 +1,7 @@
 -- Daily digest: video co-pilot API lifecycle summary (stream_logs → Trino sink)
 -- =============================================================================
--- Metabase: save as native SQL question; set GitHub secret METABASE_STREAM_LOGS_CARD_ID
+-- Prod Metabase: https://metabase-prod.penpencil.co/question/33285-metabase-stream-logs-card
+-- GitHub secret: METABASE_STREAM_LOGS_CARD_ID=33285
 -- Table: central.silver_stream_logs
 -- Schema reference: ask-ai-behavioural-onboarding / 01_stream_logs_reference.docx
 --

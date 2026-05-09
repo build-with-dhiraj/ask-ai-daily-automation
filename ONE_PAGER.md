@@ -52,6 +52,8 @@ This powers the **Silent-failure proxies** block in the 09:30 IST digest ([`dail
 
 **Production (Physics Wallah Metabase):** follow-up **[33282](https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card)** · rephrase **[33283](https://metabase-prod.penpencil.co/question/33283-metabase-behavior-rephrase-card)** — set GitHub secrets to **`33282`** and **`33283`** respectively.
 
+**Stream logs (E2E API health):** **[33285](https://metabase-prod.penpencil.co/question/33285-metabase-stream-logs-card)** — SQL in [sql/vcp_stream_logs_digest_summary.sql](sql/vcp_stream_logs_digest_summary.sql); GitHub secret **`METABASE_STREAM_LOGS_CARD_ID`** = **`33285`**. Powers the *Video co-pilot API health* block in the digest (calendar yesterday vs Langfuse rolling 24h).
+
 The digest also reads **`EVAL_SUMMARY_PATH`** (`/tmp/daily_eval_yesterday_summary.json` on the runner). For the **Confirmed regression signal** line, the **Daily Eval** job should succeed on that machine **before** digest so the snapshot file exists.
 
 ### Step 3 — Confirm Daily Eval Slack (after a green run)
