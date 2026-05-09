@@ -15,8 +15,12 @@ import os
 import sys
 import urllib.request
 
+DEFAULT_QUERY_TIMEOUT_SEC = 300.0
 
-def run_card(base_url: str, api_key: str, card_id: int, timeout: float | None = 300.0) -> list:
+
+def run_card(base_url: str, api_key: str, card_id: int, timeout: float | None = None) -> list:
+    if timeout is None:
+        timeout = DEFAULT_QUERY_TIMEOUT_SEC
     url = f"{base_url.rstrip('/')}/api/card/{card_id}/query/json"
     req = urllib.request.Request(
         url,
@@ -74,9 +78,13 @@ def main() -> int:
 
     failed = False
     for cid, label in cards:
+        print(
+            f"... querying card {cid} ({label}) — can take up to {int(DEFAULT_QUERY_TIMEOUT_SEC)}s …",
+            flush=True,
+        )
         try:
             rows = run_card(base, key, cid)
-            print(f"OK   card {cid} ({label}): {len(rows)} rows")
+            print(f"OK   card {cid} ({label}): {len(rows)} rows", flush=True)
         except Exception as exc:
             failed = True
             print(f"FAIL card {cid} ({label}): {exc!r}", file=sys.stderr)
