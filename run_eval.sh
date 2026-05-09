@@ -1,0 +1,9 @@
+#!/bin/bash
+# Daily Eval — runs at 08:30 IST (03:00 UTC) Mon–Fri
+# Pulls from Metabase Q33193, judges via Azure gpt-4.1, writes scores to Langfuse, posts to Slack
+set -a
+source "$(dirname "$0")/.env"
+set +a
+cd "$(dirname "$0")"
+caffeinate -u -t 4200 &   # keep awake until after digest fires
+/usr/bin/python3 daily_eval.py >> /tmp/ask_ai_eval.log 2>&1

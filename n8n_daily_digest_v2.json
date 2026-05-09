@@ -1,0 +1,229 @@
+{
+  "name": "Ask AI Daily Digest v2",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 4 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule (Mon–Fri 9:30 IST)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://metabase-prod.penpencil.co/api/card/24973/query/json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Api-Key", "value": "={{ $vars.METABASE_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "node-q24973",
+      "name": "Q24973 Academic (21d)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 160],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://metabase-prod.penpencil.co/api/card/24974/query/json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Api-Key", "value": "={{ $vars.METABASE_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "node-q24974",
+      "name": "Q24974 Non-Academic (21d)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 280],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://metabase-prod.penpencil.co/api/card/23036/query/json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Api-Key", "value": "={{ $vars.METABASE_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "node-q23036",
+      "name": "Q23036 Downvote Dump",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 400],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://cloud.langfuse.com/api/public/scores?fromTimestamp={{ encodeURIComponent(new Date(Date.now()-86400000).toISOString()) }}&limit=100",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": { "timeout": 20000 }
+      },
+      "id": "node-lf-scores",
+      "name": "Langfuse Scores (24h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 520],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "langfuse-basic",
+          "name": "Langfuse Basic Auth"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://cloud.langfuse.com/api/public/observations?fromTimestamp={{ encodeURIComponent(new Date(Date.now()-86400000).toISOString()) }}&limit=100&level=ERROR",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": { "timeout": 20000 }
+      },
+      "id": "node-lf-errors",
+      "name": "Langfuse Errors (24h)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 640],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "langfuse-basic",
+          "name": "Langfuse Basic Auth"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://cloud.langfuse.com/api/public/traces?fromTimestamp={{ encodeURIComponent(new Date(Date.now()-86400000).toISOString()) }}&limit=1",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": { "timeout": 20000 }
+      },
+      "id": "node-lf-traces",
+      "name": "Langfuse Trace Volume",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 760],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "langfuse-basic",
+          "name": "Langfuse Basic Auth"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "numberInputs": 6
+      },
+      "id": "node-merge",
+      "name": "Merge All Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [760, 460]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── helpers ──────────────────────────────────────────────\nconst yesterday = () => {\n  const d = new Date();\n  d.setDate(d.getDate() - 1);\n  return d.toISOString().split('T')[0];\n};\n\nconst todayLabel = () =>\n  new Date().toLocaleDateString('en-US', {\n    weekday: 'short', day: 'numeric', month: 'long', year: 'numeric'\n  });\n\nconst safeRows = (data) => {\n  if (!data) return [];\n  if (Array.isArray(data)) return data;\n  if (data.data && Array.isArray(data.data)) return data.data;\n  if (data.data && data.data.rows) return data.data.rows;\n  return [];\n};\n\nconst findKey = (obj, patterns) => {\n  const keys = Object.keys(obj);\n  for (const pat of patterns) {\n    const k = keys.find(k => new RegExp(pat, 'i').test(k));\n    if (k) return k;\n  }\n  return keys[0];\n};\n\nconst formatTopRows = (rows, n = 5) => {\n  if (!rows || rows.length === 0) return '_(unavailable)_';\n  const r0 = rows[0];\n  const tk = findKey(r0, ['feedback', 'text', 'reason', 'label']);\n  const ck = findKey(r0, ['downvote', 'count', 'num', 'total', 'value']);\n  const top = rows.slice(0, n).map(r => `• ${r[tk]}: ${r[ck]}`).join('\\n');\n  const rest = rows.slice(n, 10).map(r => `\"${r[tk]}\" ${r[ck]}`).join(', ');\n  return rest ? `${top}\\n…also: ${rest}` : top;\n};\n\n// ── pull data from previous nodes ────────────────────────\nconst getNode = (name) => {\n  try { return $node[name].json; } catch { return null; }\n};\n\nconst academic    = safeRows(getNode('Q24973 Academic (21d)'));\nconst nonAcademic = safeRows(getNode('Q24974 Non-Academic (21d)'));\nconst dumpRaw     = safeRows(getNode('Q23036 Downvote Dump'));\n\n// Filter dump to yesterday\nconst yest = yesterday();\nconst dump = dumpRaw.filter(r => {\n  return Object.values(r).some(v => typeof v === 'string' && v.startsWith(yest));\n}).length > 0\n  ? dumpRaw.filter(r => Object.values(r).some(v => typeof v === 'string' && v.startsWith(yest)))\n  : dumpRaw;\n\n// Langfuse\nconst scoresData  = getNode('Langfuse Scores (24h)');\nconst errorsData  = getNode('Langfuse Errors (24h)');\nconst tracesData  = getNode('Langfuse Trace Volume');\n\nconst allScores   = scoresData?.data || [];\nconst downvotes   = allScores.filter(s => s.value === 0);\nconst comments    = downvotes\n  .filter(s => s.comment && s.comment.trim())\n  .slice(0, 8)\n  .map(s => `\"${s.comment.trim()}\"`);\n\nconst allErrors   = errorsData?.data || [];\nconst errMap      = {};\nconst traceIds    = new Set();\nallErrors.forEach(o => {\n  const raw = o.statusMessage || o.name || 'Unknown error';\n  const key = raw.replace(/\\b[0-9a-f]{8,}\\b/g, '').replace(/\\s+/g, ' ').trim().slice(0, 70) || 'Unknown error';\n  errMap[key] = (errMap[key] || 0) + 1;\n  if (o.traceId) traceIds.add(o.traceId);\n});\nconst errorsTotal = errorsData?.meta?.totalItems || allErrors.length;\nconst errLines    = Object.entries(errMap)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 8)\n  .map(([k, v]) => `• ${k}: ${v}`)\n  .join('\\n') || '_(none)_';\n\nconst totalTraces = tracesData?.meta?.totalItems || '?';\nconst dvCount     = downvotes.length;\nconst dvRate      = totalTraces !== '?' ? ((dvCount / totalTraces) * 100).toFixed(2) + '%' : '?';\n\n// Dump breakdown\nlet dumpSummary = `_(unavailable)_`;\nif (dump.length > 0) {\n  const r0 = dump[0];\n  const keys = Object.keys(r0);\n  const catKey = keys.find(k => /cat|type|topic|product|vertical/i.test(k));\n  const reasonKey = keys.find(k => /reason|feedback|label/i.test(k));\n  let lines = [`${dump.length} downvoted queries logged for ${yest}.`];\n  if (catKey) {\n    const cats = {};\n    dump.forEach(r => { const v = r[catKey] || 'unknown'; cats[v] = (cats[v]||0)+1; });\n    lines.push('Category split:');\n    Object.entries(cats).sort((a,b)=>b[1]-a[1]).slice(0,5).forEach(([k,v]) => lines.push(`  ${k}: ${v}`));\n  }\n  if (reasonKey) {\n    const reasons = {};\n    dump.forEach(r => { const v = r[reasonKey] || 'unknown'; reasons[v] = (reasons[v]||0)+1; });\n    lines.push('Top tagged reasons:');\n    Object.entries(reasons).sort((a,b)=>b[1]-a[1]).slice(0,5).forEach(([k,v]) => lines.push(`  • ${k}: ${v}`));\n  }\n  dumpSummary = lines.join('\\n');\n}\n\n// ── compose digest ───────────────────────────────────────\nconst today = todayLabel();\n\nconst digest = `:bar_chart: *Ask AI Daily Digest* — ${today}\n━━━━━━━━━━━━━━━━━━━━━━━━\n:thumbsdown: *Downvote Reasons — Academic (rolling 21d)*\n${formatTopRows(academic)}\n:thumbsdown: *Downvote Reasons — Non-Academic (rolling 21d)*\n${formatTopRows(nonAcademic)}\n━━━━━━━━━━━━━━━━━━━━━━━━\n:bar_chart: *Yesterday's Downvoted Queries Snapshot (${yest})*\n${dumpSummary}\n━━━━━━━━━━━━━━━━━━━━━━━━\n:speech_balloon: *User Comments on Downvotes (Langfuse, last 24h)*\nTotal downvotes (csat=0): ${dvCount}  |  Total traces: ${totalTraces}  |  Rate: ${dvRate}\n${comments.length > 0 ? comments.slice(0,6).join('\\n') : '_(No free-text comments)_'}\n━━━━━━━━━━━━━━━━━━━━━━━━\n:rotating_light: *Langfuse Errors (last 24h)*\nError observations: ${errorsTotal} across ${traceIds.size} unique traces\n${errLines}\n━━━━━━━━━━━━━━━━━━━━━━━━\n:link: <https://metabase-prod.penpencil.co/question/24973|Academic Reasons> | <https://metabase-prod.penpencil.co/question/24974|Non-Academic Reasons> | <https://metabase-prod.penpencil.co/question/23036|Downvote Dump> | <https://cloud.langfuse.com|Langfuse>`;\n\nreturn [{ json: { digest, today, yest, dvCount, totalTraces, dvRate } }];\n"
+      },
+      "id": "node-compose",
+      "name": "Compose Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [980, 460]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C0B2KT5RQ0H", "mode": "id" },
+        "text": "={{ $json.digest }}",
+        "otherOptions": {}
+      },
+      "id": "node-slack",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1200, 460],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-bot",
+          "name": "Slack Bot Token"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule (Mon–Fri 9:30 IST)": {
+      "main": [[
+        { "node": "Q24973 Academic (21d)", "type": "main", "index": 0 },
+        { "node": "Q24974 Non-Academic (21d)", "type": "main", "index": 0 },
+        { "node": "Q23036 Downvote Dump", "type": "main", "index": 0 },
+        { "node": "Langfuse Scores (24h)", "type": "main", "index": 0 },
+        { "node": "Langfuse Errors (24h)", "type": "main", "index": 0 },
+        { "node": "Langfuse Trace Volume", "type": "main", "index": 0 }
+      ]]
+    },
+    "Q24973 Academic (21d)": {
+      "main": [[{ "node": "Merge All Data", "type": "main", "index": 0 }]]
+    },
+    "Q24974 Non-Academic (21d)": {
+      "main": [[{ "node": "Merge All Data", "type": "main", "index": 1 }]]
+    },
+    "Q23036 Downvote Dump": {
+      "main": [[{ "node": "Merge All Data", "type": "main", "index": 2 }]]
+    },
+    "Langfuse Scores (24h)": {
+      "main": [[{ "node": "Merge All Data", "type": "main", "index": 3 }]]
+    },
+    "Langfuse Errors (24h)": {
+      "main": [[{ "node": "Merge All Data", "type": "main", "index": 4 }]]
+    },
+    "Langfuse Trace Volume": {
+      "main": [[{ "node": "Merge All Data", "type": "main", "index": 5 }]]
+    },
+    "Merge All Data": {
+      "main": [[{ "node": "Compose Digest", "type": "main", "index": 0 }]]
+    },
+    "Compose Digest": {
+      "main": [[{ "node": "Post to Slack", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["digest", "slack", "metabase", "langfuse"],
+  "triggerCount": 1,
+  "updatedAt": "2026-05-08T00:00:00.000Z",
+  "versionId": "2"
+}

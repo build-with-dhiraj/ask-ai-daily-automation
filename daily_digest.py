@@ -474,7 +474,18 @@ def _categorise_error(msg: str) -> str:
     return "Other"
 
 
-def fmt_errors(error_obs: List, total_errors: int, *, hit_item_cap: bool = False) -> str:
+def fmt_errors(
+    error_obs: List,
+    total_errors: int,
+    *,
+    hit_item_cap: bool = False,
+    errors_ok: bool = True,
+) -> str:
+    if not errors_ok:
+        return (
+            "  _Langfuse *error observations* fetch failed — this is not the same as zero errors. "
+            "Check Actions logs for `[warn] Langfuse errors failed` (401/403/host/project keys)._"
+        )
     if total_errors == 0 and not error_obs:
         return "  No error observations in the last 24h."
 
@@ -591,8 +602,14 @@ def fmt_scores(
     total_traces: int,
     *,
     hit_score_cap: bool = False,
+    scores_ok: bool = True,
 ) -> str:
     """dv_in_sample = count of csat=0 within fetched score rows."""
+    if not scores_ok:
+        return (
+            "  _Langfuse *scores* fetch failed — empty or sparse-looking results may be an API error, "
+            "not “no downvotes.” Check Actions logs for `[warn] Langfuse scores failed`._"
+        )
     n_scores = len(score_items)
     downvote_line = (
         f"Downvotes (csat=0) in Langfuse score fetch: *{dv_in_sample:,}* "
@@ -726,13 +743,40 @@ def fmt_confirmed_regressions(
     eval_summary: Optional[dict],
     rephrase_threshold: float = 3.0,
     follow_threshold: float = 5.0,
+    *,
+    eval_snapshot_path: str = "",
 ) -> str:
     """C12 — chapters that are both formatting hotspots (judge) and behavioral spikes."""
-    fmt_hot = set(eval_summary.get("formatting_hotspot_chapters") or []) if eval_summary else set()
-    if not fmt_hot:
+    if eval_summary is None:
+        path = (eval_snapshot_path or "").strip()
+        if not path:
+            return (
+                "  _(No eval snapshot — `EVAL_SUMMARY_PATH` is unset. "
+                "Use the **Daily Automation** workflow (eval job produces the artifact → digest consumes it); "
+                "a standalone digest run will not load `formatting_hotspot_chapters`.)_"
+            )
+        safe_path = _slack_escape(path)
+        if not os.path.isfile(path):
+            return (
+                f"  _(No eval snapshot file at `{safe_path}`. "
+                "Confirm the Daily Eval job succeeded before digest and the workflow downloads the summary "
+                "(or run digest from the full automation chain).)_"
+            )
         return (
-            "  _(No `formatting_hotspot_chapters` in eval snapshot — run daily eval on this host first, "
-            "or snapshot path differs from `EVAL_SUMMARY_PATH`.)_"
+            f"  _(Eval snapshot at `{safe_path}` could not be read (empty or invalid JSON). "
+            "Check Daily Eval logs and that the artifact matches this path.)_"
+        )
+
+    fmt_hot = set(eval_summary.get("formatting_hotspot_chapters") or [])
+    if not fmt_hot:
+        if "formatting_hotspot_chapters" not in eval_summary:
+            return (
+                "  _(Eval snapshot is missing key `formatting_hotspot_chapters` — update `daily_eval.py` output "
+                "or use a current eval artifact.)_"
+            )
+        return (
+            "  _Daily eval reported *no* formatting hotspot chapters in this run "
+            "(empty list — not the same as a missing snapshot.)_"
         )
     behavioral: set[str] = set()
     for row in rephrase_rows or []:
@@ -857,14 +901,23 @@ def build_blocks(
     rephrase_card_configured: bool = False,
     errors_hit_cap: bool = False,
     scores_hit_cap: bool = False,
+    errors_ok: bool = True,
+    scores_ok: bool = True,
+    eval_snapshot_path: str = "",
 ) -> list:
     academic_block    = fmt_academic(academic_rows)
     nonacademic_block = fmt_nonacademic(nonacademic_rows)
     dump_block        = fmt_downvote_dump(dump_rows)
     scores_block      = fmt_scores(
-        score_items, dv_in_sample, total_traces, hit_score_cap=scores_hit_cap
+        score_items,
+        dv_in_sample,
+        total_traces,
+        hit_score_cap=scores_hit_cap,
+        scores_ok=scores_ok,
     )
-    errors_block      = fmt_errors(error_obs, total_errors, hit_item_cap=errors_hit_cap)
+    errors_block      = fmt_errors(
+        error_obs, total_errors, hit_item_cap=errors_hit_cap, errors_ok=errors_ok
+    )
     sl_cfg = bool(stream_logs_card_id and stream_logs_card_id.isdigit())
     stream_logs_block = fmt_stream_logs_summary(
         stream_logs_rows,
@@ -884,7 +937,10 @@ def build_blocks(
         setting_name="METABASE_BEHAVIOR_REPHRASE_CARD_ID",
     )
     reg_txt = fmt_confirmed_regressions(
-        behavior_follow_rows, behavior_rephrase_rows, eval_summary
+        behavior_follow_rows,
+        behavior_rephrase_rows,
+        eval_summary,
+        eval_snapshot_path=eval_snapshot_path,
     )
 
     def section(text: str) -> dict:
@@ -1064,6 +1120,9 @@ def main() -> int:
         rephrase_card_configured=rephrase_cfg,
         errors_hit_cap=errors_hit_cap,
         scores_hit_cap=scores_hit_cap,
+        errors_ok=errors_ok,
+        scores_ok=scores_ok,
+        eval_snapshot_path=EVAL_SUMMARY_PATH,
     )
     print(f"[info] {fallback_text.splitlines()[0]}\n[{len(blocks)} blocks]", file=sys.stderr)
 
