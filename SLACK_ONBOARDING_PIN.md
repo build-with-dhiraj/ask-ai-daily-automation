@@ -1,105 +1,96 @@
 # `#ask-ai-evals` — channel onboarding (pin this)
 
-Paste into Slack as the channel description or a pinned message. Tweak names if your webhook posts elsewhere.
+Use as the channel description or a pinned message. Adjust times if your cron differs.
 
 ---
 
-**Ask AI runs on trust with millions of students. This channel is where we protect that trust — together.**
+## Purpose
 
-We don’t use it to point fingers at people. We use it to **see reality early** and **ship fixes**.
-
----
-
-### Two posts. One mission.
-
-| | **Daily Eval** (~08:30 IST) | **Daily Digest** (~09:30 IST) |
-|--|-----------------------------|-------------------------------|
-| **Nickname** | The **scorecard** | The **pulse** |
-| **Question it answers** | *“Are our answers good enough — factually and as an experience?”* | *“What did students say, and what did the system do?”* |
-| **Mental model** | Traffic lights on a **fixed rubric** — stable week over week. | A **stack of signals** — errors first, then voice of the student, then context. |
+This channel is for **monitoring Ask AI quality and incidents**. Use it to notice problems early and fix the product and systems — not to judge individuals.
 
 ---
 
-### 1) Daily Eval — the scorecard
+## The two daily messages
 
-- **What it is:** A sample of **real yesterday** conversations, judged the **same way every day** (accuracy + clarity + format + tone + pedagogy).
-- **How to read it:** Green is healthy. Yellow/red tells you **where to dig**, not who to blame. A **thumbs-up** can still flag issues — that’s normal; the checklist is stricter than a single tap.
-- **What it is not:** A popularity contest or a performance review of individuals.
-- **The `?` link:** Definitions, cost, what PASS/NEUTRAL/FAIL mean — **open it when jargon appears.**
+**Daily Eval** (about 08:30 IST)  
+Summarises how yesterday’s **sampled** Video Co-Pilot (academic) answers score on a **fixed checklist** (accuracy and experience). Shows counts, stratum split, and week-over-week style context where configured. A `?` link may point to a short doc on definitions and cost.
 
----
-
-### 2) Daily Digest — the pulse
-
-**Read top to bottom. The order is deliberate.**
-
-1. **Langfuse errors (24h)** — *Did the machine misbehave?* Spikes here → **engineering / platform first.**
-2. **Video co-pilot API health (`stream_logs`, yesterday)** — *Did requests succeed end-to-end?* Complements Langfuse; use **`trace_id`** to connect dots when debugging.
-3. **Student comments on downvotes** — *What did they actually say?* Long text = **high intent**. This is **gold** for product and design.
-4. **The rest** — Reason mix, yesterday’s downvote snapshot, **silent frustration** proxies (quick follow-ups, “explain again” patterns). Catches pain **without** a downvote.
-
-When **judge + behavior** both flag the same chapter, treat it as a **stronger** signal — not noise.
+**Daily Digest** (about 09:30 IST)  
+Pulls together **downvote and reason data from Metabase**, **errors and comments from Langfuse**, **yesterday’s API request summary from `stream_logs` (via Metabase)**, and optional **behaviour proxy cards** (also Metabase). Sections are in a fixed order so the same screen is easy to scan every day.
 
 ---
 
-### Who moves first (rough guide)
+## How each message is created (short)
 
-| Role | Lean in when… |
-|------|----------------|
-| **Engineering** | Errors, API health, latency, integrations, regressions after release. |
-| **Product / Design** | Comments, confusion, friction, wording, flows. |
-| **Data science** | Sampling, metric interpretation, deeper slices when something looks off. |
-| **QA** | Repro, release correlation, regression checks. |
+**Daily Eval**  
+A GitHub Action on a **self-hosted runner** runs `daily_eval.py`. It executes a **saved Metabase SQL question** that returns a **stratified list of traces** from yesterday. For each row, an **LLM judge** (same rubric each run) produces PASS / NEUTRAL / FAIL style results; those can be **written back to Langfuse** as scores. The script then **builds one Slack payload** and sends it to the webhook.
 
----
+**Daily Digest**  
+A separate GitHub Action runs `daily_digest.py`. It **calls Metabase** for several saved questions (downvote reasons, yesterday’s dump, optional follow-up/rephrase chapters, optional `stream_logs` summary). It **calls the Langfuse HTTP API** for recent error observations, downvote-related scores/comments, and trace counts. It may **read a small JSON file** on the runner (written by the last eval) for cross-checks. It **assembles Slack blocks in a fixed order** and posts to the webhook.
 
-### House rules
-
-- **Thread it.** See something off? Reply in a thread with what you saw — rough notes beat silence.
-- **One channel, two beats:** **Eval** = disciplined quality line. **Digest** = reality + system truth.
+Neither message is typed by hand; both are **fully automated** from data + scripts in the repo.
 
 ---
 
-**TL;DR for new joiners:** *Scorecard in the morning. Pulse right after. Errors and API health first, students’ words second, context third. We fix systems — not each other.*
+## How to read the Digest (order of sections)
+
+1. **Langfuse errors** — last 24 hours, from Langfuse “error” observations (LLM / tracing layer).  
+2. **Video co-pilot API health** — yesterday, from **`central.silver_stream_logs`** via Metabase (one row summary: failures, HTTP codes, etc.). Different source and time window from the block above.  
+3. **User comments on downvotes** — sample of free-text from Langfuse where available.  
+4. **Downvote reasons and snapshots** — from Metabase.  
+5. **Silent-failure proxies** — from Metabase behaviour questions when configured; “confirmed regression” lines use overlap with the eval snapshot when that file exists on the runner.
+
+For a single request, **`trace_id`** is the usual key to align Langfuse with internal logs (see stream_logs documentation).
 
 ---
 
-## Slack-optimized paste (mrkdwn)
+## Who usually looks at what
 
-Copy everything inside the block below into a pinned message.
+- **Engineering:** Error blocks, API health, latency, outages, release regressions.  
+- **Product / design:** Student comments, confusion patterns, UX.  
+- **Data science:** Sampling logic, metrics, deeper analysis when numbers shift.  
+- **QA:** Reproduction and linking issues to releases.
+
+---
+
+## House rules
+
+Reply in a **thread** if you see something worth acting on. Short notes are fine.
+
+---
+
+## Slack paste (mrkdwn)
+
+Copy the block below into a pinned message.
 
 ```
-*Ask AI runs on trust with millions of students. This channel is where we protect that trust — together.*
+*#ask-ai-evals — what this channel is for*
 
-We don’t point fingers at people. We *see reality early* and *ship fixes*.
+Monitoring Ask AI quality and incidents. Use it to fix the product and systems, not to blame individuals.
 
-*Two posts. One mission.*
-• *Daily Eval* (~08:30 IST) — the *scorecard*: “Are answers good enough — factually and as an experience?” Same rubric every day; read it like traffic lights.
-• *Daily Digest* (~09:30 IST) — the *pulse*: “What did students say, and what did the system do?”
+*Two automated posts each day*
 
-*Daily Eval — quick read*
-What it is: Real yesterday chats, judged on a fixed checklist (accuracy, clarity, format, tone, pedagogy).
-How to read: Green = healthy. Yellow/red = where to dig — not who to blame. Thumbs-up can still flag issues; that’s normal.
-Not this: A popularity contest or individual scorecard.
-The `?` link: Definitions and cost — use when jargon shows up.
+*Daily Eval (~08:30 IST)*  
+Summary of how a *sample* of yesterday’s Video Co-Pilot academic answers scores on a *fixed checklist*. Optional `?` link to definitions and cost.
 
-*Daily Digest — read top to bottom (order is deliberate)*
-1. *Langfuse errors (24h)* — machine misbehaving? → engineering / platform first.
-2. *Video co-pilot API health (stream_logs, yesterday)* — requests OK end-to-end? Pairs with Langfuse; stitch with `trace_id` when debugging.
-3. *Student comments on downvotes* — what they actually said. Long text = high intent — gold for product & design.
-4. *Everything else* — reasons, yesterday snapshot, silent-frustration signals (quick follow-ups, “explain again” patterns).
+*Daily Digest (~09:30 IST)*  
+Combines Metabase (downvotes, reasons, snapshots, optional behaviour + stream_logs summary) and Langfuse (errors, comments, trace counts). Optional cross-check with a small file from the last eval on the same runner. Same section order every day.
 
-When *judge + behavior* both flag the same chapter → treat as a *stronger* signal.
+*How they are built (logic)*  
+• *Eval:* GitHub Action → Metabase pulls a stratified trace list → LLM judge per row → optional Langfuse score writes → one Slack post.  
+• *Digest:* GitHub Action → Metabase (multiple questions) + Langfuse API + optional eval JSON on disk → assemble blocks → one Slack post.
 
-*Who moves first*
-• Engineering — errors, API health, latency, releases.
-• Product / Design — comments, confusion, UX.
-• Data science — sampling, interpretation, deep dives.
-• QA — repro, release correlation.
+*Digest — read top to bottom*  
+1. Langfuse errors (24h)  
+2. API health from stream_logs / Metabase (yesterday)  
+3. Downvote comments (Langfuse sample)  
+4. Metabase reason / dump sections  
+5. Behaviour proxies when configured  
 
-*House rules*
-Thread it — rough notes beat silence.
-One channel, two beats: Eval = disciplined quality line. Digest = reality + system truth.
+Use `trace_id` to line up Langfuse with server-side logs when debugging.
 
-_TL;DR: Scorecard then pulse. Errors & API first, students’ words second, context third. We fix systems — not each other._
+*Who looks at what*  
+Engineering: errors, API health, regressions. Product/design: comments and UX. DS: sampling and metrics. QA: repro and releases.
+
+*House rule:* use threads for follow-ups.
 ```
