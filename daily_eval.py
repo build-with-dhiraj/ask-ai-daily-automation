@@ -190,7 +190,8 @@ def fetch_samples_from_metabase() -> list[dict]:
 
 def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
                     model: str = DEFAULT_MODEL,
-                    checkpoint_path: str | None = None) -> list[dict]:
+                    checkpoint_path: str | None = None,
+                    checkpoint_prefix: list[dict] | None = None) -> list[dict]:
     if not samples:
         return []
     client = get_openai_client()
@@ -201,6 +202,9 @@ def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
         else:
             print(f"📡 Writing scores to Langfuse (judge_run_id={judge_run_id})")
 
+    # Prefix = rows restored from disk at startup (resume). Checkpoint file must store
+    # prefix + results so a re-run never overwrites prior progress on the first save.
+    prefix: list[dict] = list(checkpoint_prefix) if checkpoint_prefix else []
     results: list[dict] = []
     n = len(samples)
     n_scores = 0
@@ -229,6 +233,7 @@ def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
                 n_scores += added
                 tail = f"  +{added} scores"
             print(f"  [{i:>4}/{n}] {stratum:<10} {tid[:36]} {band}{tail}")
+            results.append(parsed)
         except Exception as e:
             results.append({
                 "_trace_id": tid,
@@ -239,12 +244,10 @@ def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
                 "_error": str(e),
             })
             print(f"  [{i:>4}/{n}] {stratum:<10} {tid[:36]} ERROR: {e}")
-            continue
-        results.append(parsed)
         if checkpoint_path and i % 50 == 0:
             with open(checkpoint_path, "w") as _f:
-                json.dump(results, _f)
-            print(f"  💾 checkpoint saved ({i}/{n})")
+                json.dump(prefix + results, _f)
+            print(f"  💾 checkpoint saved ({len(prefix) + i}/{len(prefix) + n})")
     dur = time.monotonic() - t_start
 
     if write_scores:
@@ -349,9 +352,12 @@ def main() -> int:
     yesterday_str = date.fromordinal(yesterday).isoformat()
     judge_run_id = f"daily-eval-{yesterday_str}"
     write_scores = not args.no_write_scores
-    new_results = run_judge_loop(samples, judge_run_id=judge_run_id,
-                                 write_scores=write_scores, model=args.model,
-                                 checkpoint_path=args.output + ".checkpoint")
+    new_results = run_judge_loop(
+        samples, judge_run_id=judge_run_id,
+        write_scores=write_scores, model=args.model,
+        checkpoint_path=args.output + ".checkpoint",
+        checkpoint_prefix=checkpoint_results if checkpoint_results else None,
+    )
     results = checkpoint_results + new_results  # full combined set for aggregation
 
     # 3. Save full results
