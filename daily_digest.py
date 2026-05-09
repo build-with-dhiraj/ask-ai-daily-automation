@@ -48,10 +48,7 @@ DRY_RUN = "--dry-run" in sys.argv
 EVAL_SUMMARY_PATH = os.environ.get("EVAL_SUMMARY_PATH", "/tmp/daily_eval_yesterday_summary.json")
 BEHAVIOR_FOLLOWUP_CARD_ID = os.environ.get("METABASE_BEHAVIOR_FOLLOWUP_CARD_ID", "").strip()
 # Accept typo alias from GitHub secret name (missing _ID suffix)
-BEHAVIOR_REPHRASE_CARD_ID = (
-    os.environ.get("METABASE_BEHAVIOR_REPHRASE_CARD_ID", "").strip()
-    or os.environ.get("METABASE_BEHAVIOR_REPHRASE_CARD", "").strip()
-)
+BEHAVIOR_REPHRASE_CARD_ID = os.environ.get("METABASE_BEHAVIOR_REPHRASE_CARD_ID", "").strip()
 STREAM_LOGS_CARD_ID = os.environ.get("METABASE_STREAM_LOGS_CARD_ID", "").strip()
 
 # ---------------------------------------------------------------------------

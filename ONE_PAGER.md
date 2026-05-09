@@ -46,8 +46,7 @@ This powers the **Silent-failure proxies** block in the 09:30 IST digest ([`dail
 2. **Repeat** for [sql/behavior_rephrase_keywords.sql](sql/behavior_rephrase_keywords.sql) → e.g. `Ask AI — rephrase keywords by chapter`.
 3. **GitHub** → repo **ask-ai-daily-automation** → **Settings → Secrets and variables → Actions** → **New repository secret**:
    - Name: `METABASE_BEHAVIOR_FOLLOWUP_CARD_ID` → value: **digits only** (e.g. `33201`).
-   - Name: `METABASE_BEHAVIOR_REPHRASE_CARD_ID` → value: **digits only** (e.g. `33202`).  
-     _(If you already saved it as `METABASE_BEHAVIOR_REPHRASE_CARD`, that still works — the digest workflow reads both.)_
+   - Name: `METABASE_BEHAVIOR_REPHRASE_CARD_ID` → value: **digits only** (e.g. `33283`).
 4. Next **Daily Digest** run (schedule or **Actions → Daily Digest → Run workflow**) will fetch both cards. No code change needed.
 
 **Production (Physics Wallah Metabase):** follow-up **[33282](https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card)** · rephrase **[33283](https://metabase-prod.penpencil.co/question/33283-metabase-behavior-rephrase-card)** — set GitHub secrets to **`33282`** and **`33283`** respectively.
