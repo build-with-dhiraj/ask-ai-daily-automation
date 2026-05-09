@@ -13,6 +13,10 @@ Required env vars:
   METABASE_STREAM_LOGS_CARD_ID  optional — Metabase question for
       sql/vcp_stream_logs_digest_summary.sql (E2E API health vs Langfuse 24h block)
 
+Metabase /api/card/.../query/json calls use no HTTP timeout (wait until the server
+returns). Langfuse and Slack keep short timeouts. The GitHub Actions job still has
+workflow `timeout-minutes` as the outer cap.
+
 Usage:
   python3 daily_digest.py           # fetch + post to Slack
   python3 daily_digest.py --dry-run # fetch + print only, skip Slack
@@ -69,7 +73,13 @@ def _http_get(url: str, headers: dict, timeout: int = 30) -> dict:
         return json.loads(resp.read().decode())
 
 
-def _http_post_json(url: str, headers: Dict, body: Optional[Dict] = None, timeout: int = 90) -> Union[List, Dict]:
+def _http_post_json(
+    url: str,
+    headers: Dict,
+    body: Optional[Dict] = None,
+    timeout: Optional[float] = 90,
+) -> Union[List, Dict]:
+    """POST JSON body. timeout=None means no socket read limit (wait until Metabase finishes)."""
     data = json.dumps(body or {}).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -91,7 +101,8 @@ def fetch_metabase_card(card_id: int) -> Optional[List]:
         "Content-Type": "application/json",
     }
     try:
-        result = _http_post_json(url, headers)
+        # No timeout — Metabase /query/json duration is unbounded on heavy cards.
+        result = _http_post_json(url, headers, timeout=None)
         return result if isinstance(result, list) else None
     except Exception as exc:
         print(f"[warn] Metabase card {card_id} failed: {exc}", file=sys.stderr)
