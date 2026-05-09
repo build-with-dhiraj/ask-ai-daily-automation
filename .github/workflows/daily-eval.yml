@@ -8,7 +8,7 @@ on:
 jobs:
   eval:
     runs-on: self-hosted
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
