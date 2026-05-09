@@ -214,6 +214,8 @@ def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
             v = validate_judge_output(parsed)
             parsed["_trace_id"] = tid
             parsed["_stratum"] = stratum
+            parsed["_chapter"] = s.get("chapter") or "unknown"
+            parsed["_subject"] = s.get("subject") or "unknown"
             parsed["_validation_ok"] = v.ok
             parsed["_validation_errors"] = v.errors
             parsed["_meta"] = meta
@@ -229,7 +231,14 @@ def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
                 tail = f"  +{added} scores"
             print(f"  [{i:>4}/{n}] {stratum:<10} {tid[:36]} {band}{tail}")
         except Exception as e:
-            results.append({"_trace_id": tid, "_stratum": stratum, "_parse_error": True, "_error": str(e)})
+            results.append({
+                "_trace_id": tid,
+                "_stratum": stratum,
+                "_chapter": s.get("chapter") or "unknown",
+                "_subject": s.get("subject") or "unknown",
+                "_parse_error": True,
+                "_error": str(e),
+            })
             print(f"  [{i:>4}/{n}] {stratum:<10} {tid[:36]} ERROR: {e}")
             continue
         results.append(parsed)
@@ -292,6 +301,22 @@ def main() -> int:
         print("⚠️  Zero samples to judge. Exiting cleanly.")
         return 0
 
+    # B10: Load yesterday's snapshot for WoW deltas (if it exists).
+    # We load BEFORE judging today's run so we can pass it to render_slack_block.
+    prev_snapshot_path = "/tmp/daily_eval_yesterday_summary.json"
+    prev_snapshot: dict | None = None
+    if os.path.exists(prev_snapshot_path):
+        try:
+            with open(prev_snapshot_path) as _f:
+                prev_snapshot = json.load(_f)
+            print(f"📈 Loaded previous snapshot from {prev_snapshot_path} "
+                  f"(date={prev_snapshot.get('date', '?')}) for WoW deltas")
+        except Exception as _e:
+            print(f"⚠️  Could not load previous snapshot ({_e}). First-run mode.")
+            prev_snapshot = None
+    else:
+        print(f"📈 No previous snapshot at {prev_snapshot_path} — first-run mode (no WoW deltas).")
+
     # Distribution by stratum
     by_strat: dict[str, int] = {}
     for s in samples:
@@ -336,29 +361,86 @@ def main() -> int:
         json.dump(results, f, indent=2)
     print(f"💾 Saved {len(results)} results to {args.output}")
 
-    # 4. Render Slack block
+    # 4. Render Slack block (B10: pass prev_snapshot for WoW deltas)
     summary = aggregate(results)
     label = args.label or judge_run_id
-    block = render_slack_block(summary, run_label=label, results=results)
+    block = render_slack_block(summary, run_label=label, results=results,
+                                prev_snapshot=prev_snapshot)
 
-    # Cost + sample breakdown footer (cost from THIS run only; counts from all results)
+    # B8: Per-stratum cost split footer.
+    # Cost is computed from THIS run only (new_results); counts from all results.
     n_judged_total = len(results)
     n_judged_new = len(new_results)
     in_tok = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in new_results)
     out_tok = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in new_results)
     est_usd = in_tok * 2e-6 + out_tok * 8e-6
+
+    # Stratum counts from ALL results (includes checkpoint)
     strata_counts: dict[str, int] = {}
-    for r in results:  # count strata from ALL results
+    for r in results:
         st = r.get("_stratum") or "all"
         strata_counts[st] = strata_counts.get(st, 0) + 1
-    strata_summary = " | ".join(f"{v} {k}" for k, v in sorted(strata_counts.items()))
-    resumed_note = f" _(resumed, {n_judged_total - n_judged_new} from checkpoint)_" if checkpoint_results else ""
+
+    # Per-stratum token + cost split (THIS run only — checkpoint rows have no fresh _meta cost)
+    strata_cost_lines = []
+    for st in sorted(strata_counts.keys()):
+        st_rows = [r for r in new_results if (r.get("_stratum") or "all") == st]
+        st_n = strata_counts[st]  # total count (incl. resumed)
+        st_in = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in st_rows)
+        st_out = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in st_rows)
+        st_tokens = st_in + st_out
+        st_cost = st_in * 2e-6 + st_out * 8e-6
+        strata_cost_lines.append(
+            f"     {st:<14}  n={st_n:<5}  tokens={st_tokens:>9,}   ~${st_cost:.2f}"
+        )
+
+    resumed_note = (
+        f"   _(resumed, {n_judged_total - n_judged_new} from checkpoint — cost reflects new judgements only)_"
+        if checkpoint_results else ""
+    )
+
+    nl = "\n"
     cost_footer = (
-        f"\n💰 *Run cost* | {n_judged_total} samples ({strata_summary}){resumed_note}"
-        f" | Tokens: {in_tok:,} in / {out_tok:,} out"
-        f" | Est: ~${est_usd:.2f} (₹{est_usd*83:.0f})"
+        f"\n💰 *Run cost*\n"
+        f"   Total: {n_judged_total} samples | {in_tok:,} in / {out_tok:,} out | "
+        f"~${est_usd:.2f} (₹{est_usd*83:.0f})\n"
+        f"   By stratum:\n"
+        f"{nl.join(strata_cost_lines)}"
+        f"{(nl + resumed_note) if resumed_note else ''}"
     )
     block = block + cost_footer
+
+    # B10: Save today's snapshot for tomorrow's WoW deltas.
+    try:
+        n_j = summary.n_judgable or 1
+        n_acc = sum(1 for r in results
+                    if r.get("overall_band") in ("PASS", "NEUTRAL", "FAIL")
+                    and not r.get("academic", {}).get("passed", True))
+        exp_axials_for_snap = ("intent", "formatting", "pedagogy", "tone")
+        n_exp = sum(1 for r in results
+                    if r.get("overall_band") in ("PASS", "NEUTRAL", "FAIL")
+                    and any(not r.get(ax, {}).get("passed", True)
+                            for ax in exp_axials_for_snap))
+        pass_pct_snap = round(100.0 * summary.n_pass / n_j, 1) if summary.n_judgable else 0.0
+        neutral_pct_snap = round(100.0 * summary.n_neutral / n_j, 1) if summary.n_judgable else 0.0
+        fail_pct_snap = round(100.0 * summary.n_fail / n_j, 1) if summary.n_judgable else 0.0
+        acc_fail_pct_snap = round(100.0 * n_acc / n_j, 1) if summary.n_judgable else 0.0
+        exp_fail_pct_snap = round(100.0 * n_exp / n_j, 1) if summary.n_judgable else 0.0
+        summary_snapshot = {
+            "date": yesterday_str,
+            "n_judgable": summary.n_judgable,
+            "pass_pct": pass_pct_snap,
+            "neutral_pct": neutral_pct_snap,
+            "fail_pct": fail_pct_snap,
+            "acc_fail_pct": acc_fail_pct_snap,
+            "exp_fail_pct": exp_fail_pct_snap,
+            "axial_fail_pct": dict(summary.axial_fail_pct),
+        }
+        with open(prev_snapshot_path, "w") as _sf:
+            json.dump(summary_snapshot, _sf, indent=2)
+        print(f"📸 Saved today's snapshot to {prev_snapshot_path} (for tomorrow's WoW deltas)")
+    except Exception as _e:
+        print(f"⚠️  Could not save today's snapshot ({_e}). WoW deltas may be missing tomorrow.")
 
     print("\n" + "=" * 60)
     print(block)

@@ -569,6 +569,42 @@ class DigestSummary:
     top_open_codes: list[tuple[str, int]]  # sorted descending
 
 
+def wilson_ci_pp(p: float, n: int, z: float = 1.96) -> float:
+    """Returns half-width of Wilson 95% CI in percentage points.
+
+    Input `p` is already in percent (e.g. 22.0 for 22%).
+    Output is the half-width in percentage points (e.g. 4.1 means ±4.1pp).
+    """
+    if n == 0:
+        return 0.0
+    p = p / 100.0  # input is already in percent
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom  # noqa: F841 (kept for readability)
+    half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / denom
+    return round(half * 100, 1)
+
+
+def _delta_marker(curr_pct: float, prev_pct: float | None,
+                   higher_is_bad: bool = True) -> str:
+    """Build a `↑X.Xpp 🔴` style annotation for a metric vs its previous value.
+
+    higher_is_bad=True means "increase = regression" (FAIL%, error%).
+    higher_is_bad=False means "increase = improvement" (PASS%).
+    Returns "" if prev_pct is None.
+    """
+    if prev_pct is None:
+        return ""
+    delta = round(curr_pct - prev_pct, 1)
+    if abs(delta) < 0.05:  # treat as flat
+        return " (flat vs prev)"
+    arrow = "↑" if delta > 0 else "↓"
+    if higher_is_bad:
+        emoji = "🔴" if delta > 0 else "🟢"
+    else:
+        emoji = "🟢" if delta > 0 else "🔴"
+    return f" {arrow}{abs(delta):.1f}pp {emoji}"
+
+
 def aggregate(results: list[dict]) -> DigestSummary:
     n_total = len(results)
     n_pass = sum(1 for r in results if r.get("overall_band") == "PASS")
@@ -614,15 +650,22 @@ def aggregate(results: list[dict]) -> DigestSummary:
 
 
 def render_slack_block(summary: DigestSummary, run_label: str = "yesterday",
-                        results: list[dict] | None = None) -> str:
+                        results: list[dict] | None = None,
+                        prev_snapshot: dict | None = None) -> str:
     """Format the rubric scoreboard as a Slack-ready block.
 
     Per EVAL_STRATEGY.md §3.2: split into Accuracy track (academic axial only,
     calibrate to SME) and Experience track (intent + formatting + pedagogy +
     tone, calibrate to CSAT). Two separate calibration loops, two separate
     health numbers — never collapsed into one.
+
+    `prev_snapshot` (optional): a dict shaped like {pass_pct, fail_pct,
+    neutral_pct, acc_fail_pct, exp_fail_pct, axial_fail_pct: {ax: pct}, date}.
+    When supplied, every percentage gets a `↑X.Xpp 🔴/🟢` WoW-delta annotation.
+    When absent, deltas are omitted and a `_(first run)_` note is shown.
     """
     n = summary.n_judgable or 1
+    has_prev = isinstance(prev_snapshot, dict) and prev_snapshot
 
     # Per-axial fail counts (need raw counts for the new layout)
     if results is None:
@@ -659,10 +702,16 @@ def render_slack_block(summary: DigestSummary, run_label: str = "yesterday",
         "pedagogy": "Pedagogy      ",
         "tone": "Tone / Feel   ",
     }
+    prev_axial_pct = (prev_snapshot or {}).get("axial_fail_pct") or {}
     for ax in exp_axials:
         cnt = axial_fail_count(ax)
         pct = round(100.0 * cnt / n, 1) if summary.n_judgable else 0.0
-        exp_axial_lines.append(f"    {exp_axial_labels[ax]} {cnt:>3} ({pct:>4.1f}%)")
+        ci = wilson_ci_pp(pct, summary.n_judgable)
+        prev_p = prev_axial_pct.get(ax) if has_prev else None
+        delta = _delta_marker(pct, prev_p, higher_is_bad=True)
+        exp_axial_lines.append(
+            f"    {exp_axial_labels[ax]} {cnt:>3} ({pct:>4.1f}% ±{ci}pp){delta}"
+        )
 
     # Top codes by track
     acc_codes = axial_codes("academic")
@@ -693,7 +742,7 @@ def render_slack_block(summary: DigestSummary, run_label: str = "yesterday",
     has_strata = len(strata_present) > 1 or (strata_present and strata_present != ["all"])
     stratum_lines = []
     if has_strata:
-        # We display: for each stratum, n / Acc-FAIL% / Exp-FAIL%
+        # We display: for each stratum, n / Acc-FAIL% / Exp-FAIL% (with Wilson CI)
         for stratum in strata_present:
             srows = [r for r in judgable_results if (r.get("_stratum") or "all") == stratum]
             n_s = len(srows)
@@ -706,8 +755,12 @@ def render_slack_block(summary: DigestSummary, run_label: str = "yesterday",
             )
             acc_p = round(100.0 * n_s_acc / n_s, 1)
             exp_p = round(100.0 * n_s_exp / n_s, 1)
+            acc_ci = wilson_ci_pp(acc_p, n_s)
+            exp_ci = wilson_ci_pp(exp_p, n_s)
             stratum_lines.append(
-                f"  {stratum:<10} n={n_s:<4} acc-FAIL {n_s_acc} ({acc_p}%)  exp-FAIL {n_s_exp} ({exp_p}%)"
+                f"  {stratum:<10} n={n_s:<4} "
+                f"acc-FAIL {n_s_acc} ({acc_p}% ±{acc_ci}pp)  "
+                f"exp-FAIL {n_s_exp} ({exp_p}% ±{exp_ci}pp)"
             )
     stratum_block = (
         f"\n🎚️ *By stratum* (calibration signal — accuracy FAIL should drop by stratum)\n"
@@ -715,23 +768,102 @@ def render_slack_block(summary: DigestSummary, run_label: str = "yesterday",
         if stratum_lines else ""
     )
 
+    # ---- Per-chapter hotspots (top 5 worst by acc-FAIL and exp-FAIL) ----
+    # Group judgable results by chapter; require >= 5 samples to qualify (noise floor).
+    chapter_stats: dict[str, dict[str, int]] = {}
+    for r in judgable_results:
+        ch = r.get("_chapter") or "unknown"
+        d = chapter_stats.setdefault(ch, {"n": 0, "acc_fail": 0, "exp_fail": 0})
+        d["n"] += 1
+        if not r.get("academic", {}).get("passed", True):
+            d["acc_fail"] += 1
+        if any(not r.get(ax, {}).get("passed", True) for ax in exp_axials):
+            d["exp_fail"] += 1
+
+    eligible_chapters = [
+        (ch, d) for ch, d in chapter_stats.items()
+        if d["n"] >= 5 and ch != "unknown"
+    ]
+
+    chapter_block = ""
+    if eligible_chapters:
+        worst_acc = sorted(
+            eligible_chapters,
+            key=lambda kv: (kv[1]["acc_fail"] / kv[1]["n"], kv[1]["n"]),
+            reverse=True,
+        )[:5]
+        worst_exp = sorted(
+            eligible_chapters,
+            key=lambda kv: (kv[1]["exp_fail"] / kv[1]["n"], kv[1]["n"]),
+            reverse=True,
+        )[:5]
+
+        def _ch_line(ch: str, d: dict, kind: str) -> str:
+            cnt = d[f"{kind}_fail"]
+            n_ch = d["n"]
+            pct = round(100.0 * cnt / n_ch, 1)
+            ci = wilson_ci_pp(pct, n_ch)
+            # Truncate chapter name for fixed-width readability
+            label = (ch[:32] + "…") if len(ch) > 33 else ch
+            return f"    {label:<34} n={n_ch:<4} {kind}-FAIL {cnt} ({pct}% ±{ci}pp)"
+
+        acc_lines = [_ch_line(ch, d, "acc") for ch, d in worst_acc]
+        exp_lines = [_ch_line(ch, d, "exp") for ch, d in worst_exp]
+        chapter_block = (
+            "\n🏫 *Per-Chapter Hotspots* (top 5 by FAIL rate, min 5 samples)\n"
+            "  Worst by ACCURACY FAIL:\n"
+            f"{chr(10).join(acc_lines)}\n"
+            "  Worst by EXPERIENCE FAIL:\n"
+            f"{chr(10).join(exp_lines)}\n"
+        )
+
+    # CI annotations + WoW deltas for top-line metrics
+    acc_ci_top = wilson_ci_pp(acc_fail_pct, summary.n_judgable)
+    exp_ci_top = wilson_ci_pp(exp_fail_pct, summary.n_judgable)
+    pass_ci = wilson_ci_pp(pass_pct, summary.n_judgable)
+    neutral_ci = wilson_ci_pp(neutral_pct, summary.n_judgable)
+    fail_ci = wilson_ci_pp(fail_pct, summary.n_judgable)
+
+    if has_prev:
+        prev_acc = prev_snapshot.get("acc_fail_pct")
+        prev_exp = prev_snapshot.get("exp_fail_pct")
+        prev_pass = prev_snapshot.get("pass_pct")
+        prev_neutral = prev_snapshot.get("neutral_pct")
+        prev_fail = prev_snapshot.get("fail_pct")
+        wow_header = (
+            f"_WoW vs {prev_snapshot.get('date', 'previous run')}: "
+            f"acc-FAIL {prev_acc}% → {acc_fail_pct}%"
+            f"{_delta_marker(acc_fail_pct, prev_acc, higher_is_bad=True)} | "
+            f"exp-FAIL {prev_exp}% → {exp_fail_pct}%"
+            f"{_delta_marker(exp_fail_pct, prev_exp, higher_is_bad=True)}_\n"
+        )
+    else:
+        prev_acc = prev_exp = prev_pass = prev_neutral = prev_fail = None
+        wow_header = "_(first run — no WoW deltas)_\n"
+
+    acc_delta = _delta_marker(acc_fail_pct, prev_acc, higher_is_bad=True) if has_prev else ""
+    exp_delta = _delta_marker(exp_fail_pct, prev_exp, higher_is_bad=True) if has_prev else ""
+    pass_delta = _delta_marker(pass_pct, prev_pass, higher_is_bad=False) if has_prev else ""
+    neutral_delta = _delta_marker(neutral_pct, prev_neutral, higher_is_bad=True) if has_prev else ""
+    fail_delta = _delta_marker(fail_pct, prev_fail, higher_is_bad=True) if has_prev else ""
+
     block = f"""\
 🎯 *Rubric Scoreboard ({run_label}, n={n_total})*
-
+{wow_header}
 📚 *ACCURACY TRACK* [DS — calibrate to SME, NOT CSAT]
-  Academic FAIL rate: {n_acc_fail}/{summary.n_judgable} ({acc_fail_pct}%)
+  Academic FAIL rate: {n_acc_fail}/{summary.n_judgable} ({acc_fail_pct}% ±{acc_ci_top}pp){acc_delta}
   Top codes: {fmt_codes(acc_codes, 4)}
   _Note: CSAT is silent on accuracy — only SME audit calibrates this._
 
 ✨ *EXPERIENCE TRACK* [PM, DS — calibrate to CSAT]
-  Experience FAIL rate: {n_exp_fail}/{summary.n_judgable} ({exp_fail_pct}%)
-  By axial (count, % of judgable):
+  Experience FAIL rate: {n_exp_fail}/{summary.n_judgable} ({exp_fail_pct}% ±{exp_ci_top}pp){exp_delta}
+  By axial (count, % of judgable, ±Wilson 95% CI):
 {chr(10).join(exp_axial_lines)}
   Top codes: {fmt_codes(exp_codes_combined, 5)}
   _Where leverage exists — prompt tuning targets these._
-{stratum_block}
+{stratum_block}{chapter_block}
 📊 *Overall band* (derived; reporting only)
-  PASS {summary.n_pass} ({pass_pct}%) | NEUTRAL {summary.n_neutral} ({neutral_pct}%) | FAIL {summary.n_fail} ({fail_pct}%)
+  PASS {summary.n_pass} ({pass_pct}% ±{pass_ci}pp){pass_delta} | NEUTRAL {summary.n_neutral} ({neutral_pct}% ±{neutral_ci}pp){neutral_delta} | FAIL {summary.n_fail} ({fail_pct}% ±{fail_ci}pp){fail_delta}
   NOT_JUDGABLE: {summary.n_not_judgable}{parse_err}
 """
     return block
