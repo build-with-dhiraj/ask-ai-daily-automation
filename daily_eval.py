@@ -289,6 +289,30 @@ def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
     return results
 
 
+def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -> None:
+    """Write digest-readable summary so artifact upload does not ship stale /tmp JSON.
+
+    When eval exits before the main snapshot block (e.g. zero Metabase rows), an older
+    file on the runner may lack keys such as formatting_hotspot_chapters; the digest job
+    then misreports C12. Daily Automation uploads this path with ``if: always()``."""
+    payload = {
+        "date": yesterday_str,
+        "n_judgable": 0,
+        "pass_pct": 0.0,
+        "neutral_pct": 0.0,
+        "fail_pct": 0.0,
+        "acc_fail_pct": 0.0,
+        "exp_fail_pct": 0.0,
+        "axial_fail_pct": {},
+        "formatting_hotspot_chapters": [],
+        "_eval_note": reason,
+    }
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as _sf:
+        json.dump(payload, _sf, indent=2)
+    print(f"📸 Wrote minimal eval snapshot ({reason}) to {path}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -325,6 +349,12 @@ def main() -> int:
 
     if not samples:
         print("⚠️  Zero samples to judge. Exiting cleanly.")
+        yesterday_str = date.fromordinal(date.today().toordinal() - 1).isoformat()
+        write_minimal_eval_snapshot(
+            "/tmp/daily_eval_yesterday_summary.json",
+            yesterday_str=yesterday_str,
+            reason="zero_samples",
+        )
         return 0
 
     # B10: Load yesterday's snapshot for WoW deltas (if it exists).
