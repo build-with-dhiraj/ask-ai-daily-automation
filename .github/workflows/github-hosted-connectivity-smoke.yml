@@ -1,11 +1,13 @@
 # Run with your Mac off: GitHub-hosted runners + repository secrets only.
 #
-# If Metabase shows curl (28) "Connection timed out" from ubuntu-latest, traffic from
-# GitHub Actions (Azure datacenter egress) is not reaching your Metabase host — VPN-only,
-# corporate firewall, or IP allowlisting. Langfuse Cloud often still works; see the
-# separate langfuse job in the same workflow run.
+# Network checklist if Metabase fails with curl (28) connection timed out:
+#   1. Metabase must listen on a URL reachable from the PUBLIC internet (or allowlisted below).
+#   2. Corporate VPN: GitHub-hosted runners are NOT on your VPN — use self-hosted runner or VPN gateway.
+#   3. Firewall / WAF / IP allowlist: allow GitHub Actions egress IPs → https://api.github.com/meta (key "actions")
+#   4. DNS: runner must resolve your hostname (see "Network diagnostics" in logs).
+#   5. TLS: some proxies need SNI; curl uses HTTPS by default.
 #
-# Allowlisting: https://api.github.com/meta  (key "actions")
+# Timeouts (seconds) — tune via env on this job. Card query can be very slow; default max is 2 hours.
 #
 # Repo → Settings → Secrets and variables → Actions
 
@@ -18,11 +20,18 @@ jobs:
   metabase:
     name: Metabase (GitHub egress)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Must exceed MB_CARD_MAX_SEC (default 7200s = 120m) plus diagnostics buffer.
+    timeout-minutes: 130
     env:
       METABASE_URL: ${{ secrets.METABASE_URL }}
       METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
       METABASE_SMOKE_CARD_ID: "24973"
+      # Seconds — TCP connect wait per curl(1) --connect-timeout
+      MB_CONNECT_TIMEOUT_SEC: "90"
+      # Seconds — full request budget for GET /api/user/current
+      MB_USER_MAX_SEC: "120"
+      # Seconds — full request budget for POST card query (heavy questions); 7200 = 120 minutes
+      MB_CARD_MAX_SEC: "7200"
     steps:
       - name: Probe Metabase API
         shell: bash
@@ -30,20 +39,47 @@ jobs:
           set -euo pipefail
           MB_URL="${METABASE_URL:?Set Actions secret METABASE_URL}"
           MB_KEY="${METABASE_API_KEY:?Set Actions secret METABASE_API_KEY}"
+          CT="${MB_CONNECT_TIMEOUT_SEC:?}"
+          UM="${MB_USER_MAX_SEC:?}"
+          CM="${MB_CARD_MAX_SEC:?}"
 
           echo "Metabase base: ${MB_URL}"
-          echo "Runner region: GitHub-hosted ubuntu-latest (public egress, not your Mac)."
+          echo "Runner: GitHub-hosted ubuntu-latest (not your Mac / not your VPN)."
+          echo "curl limits: connect=${CT}s user/current max=${UM}s card/query max=${CM}s"
 
-          echo "::group::DNS + TCP sanity (optional)"
-          host_try="$(echo "${MB_URL}" | sed -e 's|https\?://||' -e 's|/.*||')"
-          echo "Host for lookup: ${host_try}"
+          host_try="$(echo "${MB_URL}" | sed -e 's|https\?://||' -e 's|/.*||' -e 's|:.*||')"
+          echo "Host for checks: ${host_try}"
+
+          echo "::group::Network diagnostics (DNS)"
           getent hosts "${host_try}" || true
+          echo "::endgroup::"
+
+          echo "::group::Network diagnostics (TCP :443, 15s budget)"
+          if timeout 15 bash -c "echo >/dev/tcp/${host_try}/443" 2>/dev/null; then
+            echo "TCP connect to ${host_try}:443 succeeded from runner."
+          else
+            echo "TCP connect to ${host_try}:443 failed or timed out — firewall, VPN-only service, or no listener on public internet."
+            echo "This is separate from HTTP auth; fix path or use self-hosted runner inside your network."
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Network diagnostics (TLS + timing, no auth)"
+          set +e
+          curl -sS -o /dev/null -w "namelookup=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} total=%{time_total} http=%{http_code}\n" \
+            --connect-timeout "${CT}" --max-time "${UM}" \
+            "${MB_URL}/" 2>/tmp/curl_tls_err.txt
+          tls_exit=$?
+          set -e
+          cat /tmp/curl_tls_err.txt || true
+          if [[ "${tls_exit}" != "0" ]]; then
+            echo "(TLS probe non-zero exit ${tls_exit} — often timeout or TLS error; Metabase may still require API path.)"
+          fi
           echo "::endgroup::"
 
           echo "::group::Metabase GET /api/user/current"
           set +e
           code="$(curl -sS -o /tmp/mb_user.json -w "%{http_code}" \
-            --connect-timeout 20 --max-time 45 \
+            --connect-timeout "${CT}" --max-time "${UM}" \
             -H "X-Api-Key: ${MB_KEY}" \
             -H "Content-Type: application/json" \
             "${MB_URL}/api/user/current")"
@@ -51,7 +87,7 @@ jobs:
           set -e
           echo "HTTP ${code:-000} (curl_exit=${curl_exit})"
           if [[ "${curl_exit}" != "0" ]]; then
-            echo "::error::Metabase curl failed (exit ${curl_exit}). (28) = connection timed out → host not reachable from GitHub datacenter egress (VPN/firewall/IP allowlist). Keep self-hosted runner on Mac/VPN, or allowlist GitHub Actions: https://api.github.com/meta"
+            echo "::error::Metabase curl failed (exit ${curl_exit}). (28) = connection timed out → see network checklist in workflow header; allowlist https://api.github.com/meta actions IPs or use self-hosted runner."
             exit 1
           fi
           head -c 400 /tmp/mb_user.json || true
@@ -59,15 +95,22 @@ jobs:
           [[ "${code}" == "200" ]] || { echo "::error::Metabase user/current HTTP ${code}"; exit 1; }
           echo "::endgroup::"
 
-          echo "::group::Metabase POST /api/card/${METABASE_SMOKE_CARD_ID}/query/json"
+          echo "::group::Metabase POST /api/card/${METABASE_SMOKE_CARD_ID}/query/json (may run up to ${CM}s)"
+          set +e
           code="$(curl -sS -o /tmp/mb_card.json -w "%{http_code}" \
-            --connect-timeout 20 --max-time 120 \
+            --connect-timeout "${CT}" --max-time "${CM}" \
             -X POST \
             -H "X-Api-Key: ${MB_KEY}" \
             -H "Content-Type: application/json" \
             -d '{}' \
             "${MB_URL}/api/card/${METABASE_SMOKE_CARD_ID}/query/json")"
-          echo "HTTP ${code}"
+          curl_exit=$?
+          set -e
+          echo "HTTP ${code:-000} (curl_exit=${curl_exit})"
+          if [[ "${curl_exit}" != "0" ]]; then
+            echo "::error::Metabase card query curl exit ${curl_exit}"
+            exit 1
+          fi
           head -c 400 /tmp/mb_card.json || true
           echo
           [[ "${code}" == "200" ]] || { echo "::error::Metabase card query HTTP ${code}"; exit 1; }
@@ -78,11 +121,13 @@ jobs:
   langfuse:
     name: Langfuse (GitHub egress)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+      LF_CONNECT_TIMEOUT_SEC: "90"
+      LF_MAX_SEC: "120"
     steps:
       - name: Probe Langfuse public API
         shell: bash
@@ -94,14 +139,16 @@ jobs:
           if [[ -z "${LF_H// }" ]]; then
             LF_H="https://cloud.langfuse.com"
           fi
+          CT="${LF_CONNECT_TIMEOUT_SEC:?}"
+          MX="${LF_MAX_SEC:?}"
 
-          echo "Langfuse host: ${LF_H}"
+          echo "Langfuse host: ${LF_H} (connect=${CT}s max=${MX}s)"
 
           echo "::group::Langfuse GET /api/public/traces"
           FROM_TS="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
           set +e
           code="$(curl -sS -o /tmp/lf_traces.json -w "%{http_code}" \
-            --connect-timeout 20 --max-time 45 \
+            --connect-timeout "${CT}" --max-time "${MX}" \
             -u "${LF_PK}:${LF_SK}" \
             -G "${LF_H}/api/public/traces" \
             --data-urlencode "fromTimestamp=${FROM_TS}" \
