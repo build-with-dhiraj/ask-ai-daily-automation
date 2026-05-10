@@ -7,7 +7,7 @@ on:
 jobs:
   eval:
     runs-on: self-hosted
-    timeout-minutes: 240
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -30,3 +30,5 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           # Per-request LLM HTTP timeout (seconds); after this, sample is logged ERROR and run continues
           JUDGE_HTTP_TIMEOUT_SEC: "300"
+          JUDGE_CONCURRENCY: "8"
+          EVAL_MAX_RUNTIME_SEC: "13800"

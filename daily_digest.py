@@ -682,6 +682,25 @@ def load_eval_summary(summary_path: str) -> Optional[dict]:
         return None
 
 
+def _eval_sample_counts(eval_summary: dict) -> Tuple[Optional[int], Optional[int]]:
+    """M = Metabase pull size, N = judged count (`n_sampled` alias if present)."""
+
+    def _coerce(v: object) -> Optional[int]:
+        if v is None or isinstance(v, bool):
+            return None
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float) and v.is_integer():
+            return int(v)
+        return None
+
+    m = _coerce(eval_summary.get("n_sampled"))
+    if m is None:
+        m = _coerce(eval_summary.get("n_metabase_rows"))
+    n = _coerce(eval_summary.get("n_judged"))
+    return m, n
+
+
 def _row_chapter(row: dict) -> Optional[str]:
     for k in ("chapter", "Chapter", "standardchaptername", "standardChapterName"):
         v = row.get(k)
@@ -735,6 +754,34 @@ def fmt_behavior_proxy(
     if not lines:
         return "  _(no chapter column in result — check SQL aliases)_"
     return "\n".join(lines)
+
+
+def fmt_eval_coverage_note(eval_summary: Optional[dict]) -> str:
+    """Neutral M vs N from the eval snapshot for C12 / WoW (no partial-failure framing)."""
+    if not eval_summary:
+        return ""
+    sr = str(eval_summary.get("stopped_reason") or "complete").strip()
+    m, n = _eval_sample_counts(eval_summary)
+
+    if m is None or n is None:
+        if sr == "complete":
+            return ""
+        return f"_Daily eval: stopped_reason=`{sr}` (see eval Slack thread)._ \n\n"
+
+    if n < m:
+        if sr == "complete":
+            return (
+                f"_Sample: {m} traces from Metabase; this run judged {n}. "
+                f"C12 uses the judged set._ \n\n"
+            )
+        return (
+            f"_Sample: {m} traces from Metabase; this run judged {n} "
+            f"(C12 uses the judged set). Stop: `{sr}`._ \n\n"
+        )
+
+    if sr != "complete":
+        return f"_Daily eval: stopped_reason=`{sr}` (see eval Slack thread)._ \n\n"
+    return ""
 
 
 def fmt_confirmed_regressions(
@@ -936,7 +983,7 @@ def build_blocks(
         card_configured=rephrase_card_configured,
         setting_name="METABASE_BEHAVIOR_REPHRASE_CARD_ID",
     )
-    reg_txt = fmt_confirmed_regressions(
+    reg_txt = fmt_eval_coverage_note(eval_summary) + fmt_confirmed_regressions(
         behavior_follow_rows,
         behavior_rephrase_rows,
         eval_summary,

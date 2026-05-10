@@ -36,6 +36,9 @@ Required env (set in Cowork SKILL.md or shell before invoking):
                               # prevents one hung Azure request from stalling the whole run)
   METABASE_QUERY_TIMEOUT_SEC  # optional — Metabase card query HTTP timeout (default 600s;
                               # prevents socket timeout if stratified sample query is slow)
+  JUDGE_CONCURRENCY           # optional — concurrent LLM judges (default 1; e.g. 8 in CI)
+  JUDGE_CHUNK_SIZE            # optional — samples per ThreadPool batch (default max(32, 4×concurrency))
+  EVAL_MAX_RUNTIME_SEC        # optional — soft time budget; stop between chunks & finalize (graceful vs SIGKILL)
 
 Usage:
   # Full daily run (Metabase pull → judge → Slack post)
@@ -53,9 +56,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import socket
 import sys
+import threading
 import time
+from concurrent.futures import (
+    CancelledError,
+    FIRST_COMPLETED,
+    ThreadPoolExecutor,
+    wait,
+)
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -70,6 +82,143 @@ from judge_runner import (  # noqa: E402
     validate_judge_output, write_judge_scores_to_langfuse,
     _get_langfuse_writer, DEFAULT_MODEL,
 )
+
+
+# ---------------------------------------------------------------------------
+# Concurrent judge loop (ThreadPoolExecutor)
+# ---------------------------------------------------------------------------
+
+_PRINT_LOCK = threading.Lock()
+_CHECKPOINT_LOCK = threading.Lock()
+_SIGTERM_REQUESTED = threading.Event()
+
+
+def _handle_sigterm(_signum: int, _frame: Any) -> None:
+    print(
+        "\n⚠️  SIGTERM received — finishing current chunk, then finalizing.",
+        file=sys.stderr,
+    )
+    _SIGTERM_REQUESTED.set()
+
+
+def _judge_concurrency() -> int:
+    raw = os.environ.get("JUDGE_CONCURRENCY", "1").strip()
+    try:
+        n = int(raw)
+        return max(1, min(n, 64))
+    except ValueError:
+        return 1
+
+
+def _eval_max_runtime_sec() -> float | None:
+    raw = os.environ.get("EVAL_MAX_RUNTIME_SEC", "").strip()
+    if not raw:
+        return None
+    try:
+        return max(60.0, float(raw))
+    except ValueError:
+        return None
+
+
+def _judge_chunk_size(concurrency: int) -> int:
+    raw = os.environ.get("JUDGE_CHUNK_SIZE", "").strip()
+    if raw:
+        try:
+            c = int(raw)
+            return max(concurrency, c)
+        except ValueError:
+            pass
+    return max(32, concurrency * 4)
+
+
+@dataclass
+class JudgeLoopOutcome:
+    new_results: list[dict]
+    stopped_reason: str  # "complete" | "time_budget" | "signal"
+    n_langfuse_scores: int
+    judge_phase_sec: float = 0.0
+
+
+def _write_checkpoint(
+    checkpoint_path: str,
+    prefix: list[dict],
+    results: list[dict],
+    n_samples_this_run: int,
+) -> None:
+    """Thread-safe checkpoint (prefix from resume + new results this invocation)."""
+    with _CHECKPOINT_LOCK:
+        with open(checkpoint_path, "w") as _f:
+            json.dump(prefix + results, _f)
+    done = len(prefix) + len(results)
+    total = len(prefix) + n_samples_this_run
+    print(f"  💾 checkpoint saved ({done}/{total})")
+
+
+def _maybe_checkpoint_every_n(
+    checkpoint_path: str | None,
+    prefix: list[dict],
+    results: list[dict],
+    n_samples_this_run: int,
+    *,
+    step: int = 50,
+) -> None:
+    if not checkpoint_path:
+        return
+    done = len(prefix) + len(results)
+    if done > 0 and done % step == 0:
+        _write_checkpoint(checkpoint_path, prefix, results, n_samples_this_run)
+def _judge_one_sample(
+    client: Any,
+    global_idx: int,
+    n_total: int,
+    s: dict,
+    *,
+    judge_run_id: str,
+    model: str,
+    write_scores: bool,
+) -> tuple[dict, int]:
+    tid = s.get("trace_id") or f"sample-{global_idx}"
+    stratum = s.get("stratum") or "all"
+    n_written = 0
+    try:
+        parsed, meta = call_judge(client, s, model=model)
+        v = validate_judge_output(parsed)
+        parsed["_trace_id"] = tid
+        parsed["_stratum"] = stratum
+        parsed["_chapter"] = s.get("chapter") or "unknown"
+        parsed["_subject"] = s.get("subject") or "unknown"
+        parsed["_validation_ok"] = v.ok
+        parsed["_validation_errors"] = v.errors
+        parsed["_meta"] = meta
+        band = parsed.get("overall_band")
+        tail = ""
+        if write_scores and v.ok:
+            n_written = write_judge_scores_to_langfuse(
+                production_trace_id=tid,
+                parsed=parsed,
+                judge_run_id=judge_run_id,
+                judge_model=meta.get("model_param", ""),
+            )
+            tail = f"  +{n_written} scores"
+        with _PRINT_LOCK:
+            print(f"  [{global_idx:>4}/{n_total}] {stratum:<10} {tid[:36]} {band}{tail}")
+        return parsed, n_written
+    except Exception as e:
+        with _PRINT_LOCK:
+            print(
+                f"  [{global_idx:>4}/{n_total}] {stratum:<10} {tid[:36]} ERROR: {e}"
+            )
+        return (
+            {
+                "_trace_id": tid,
+                "_stratum": stratum,
+                "_chapter": s.get("chapter") or "unknown",
+                "_subject": s.get("subject") or "unknown",
+                "_parse_error": True,
+                "_error": str(e),
+            },
+            0,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -212,66 +361,154 @@ def fetch_samples_from_metabase() -> list[dict]:
     return normalize_metabase_rows(rows)
 
 
-def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
-                    model: str = DEFAULT_MODEL,
-                    checkpoint_path: str | None = None,
-                    checkpoint_prefix: list[dict] | None = None) -> list[dict]:
+def run_judge_loop(
+    samples: list[dict],
+    judge_run_id: str,
+    write_scores: bool,
+    model: str = DEFAULT_MODEL,
+    checkpoint_path: str | None = None,
+    checkpoint_prefix: list[dict] | None = None,
+    *,
+    stop_event: threading.Event | None = None,
+) -> JudgeLoopOutcome:
     if not samples:
-        return []
+        return JudgeLoopOutcome(
+            new_results=[],
+            stopped_reason="complete",
+            n_langfuse_scores=0,
+            judge_phase_sec=0.0,
+        )
+
+    judge_conc = _judge_concurrency()
+    chunk_sz = _judge_chunk_size(judge_conc)
+    max_run = _eval_max_runtime_sec()
+    deadline = time.monotonic() + max_run if max_run is not None else None
+    evt = stop_event if stop_event is not None else _SIGTERM_REQUESTED
+
     client = get_openai_client()
     if write_scores:
         if _get_langfuse_writer() is None:
-            print("⚠️  --write-scores requested but Langfuse keys missing; continuing without writes")
+            print(
+                "⚠️  --write-scores requested but Langfuse keys missing; continuing without writes"
+            )
             write_scores = False
         else:
-            print(f"📡 Writing scores to Langfuse (judge_run_id={judge_run_id})")
+            print(
+                f"📡 Writing scores to Langfuse (judge_run_id={judge_run_id}); "
+                f"concurrency={judge_conc} chunk_size={chunk_sz}"
+            )
 
-    # Prefix = rows restored from disk at startup (resume). Checkpoint file must store
-    # prefix + results so a re-run never overwrites prior progress on the first save.
     prefix: list[dict] = list(checkpoint_prefix) if checkpoint_prefix else []
     results: list[dict] = []
-    n = len(samples)
+    n_total = len(samples)
     n_scores = 0
+    stopped_reason = "complete"
     t_start = time.monotonic()
-    for i, s in enumerate(samples, 1):
-        tid = s.get("trace_id") or f"sample-{i}"
-        stratum = s.get("stratum") or "all"
-        try:
-            parsed, meta = call_judge(client, s, model=model)
-            v = validate_judge_output(parsed)
-            parsed["_trace_id"] = tid
-            parsed["_stratum"] = stratum
-            parsed["_chapter"] = s.get("chapter") or "unknown"
-            parsed["_subject"] = s.get("subject") or "unknown"
-            parsed["_validation_ok"] = v.ok
-            parsed["_validation_errors"] = v.errors
-            parsed["_meta"] = meta
-            band = parsed.get("overall_band")
-            tail = ""
-            if write_scores and v.ok:
-                added = write_judge_scores_to_langfuse(
-                    production_trace_id=tid, parsed=parsed,
+
+    for chunk_start in range(0, n_total, chunk_sz):
+        if evt.is_set():
+            stopped_reason = "signal"
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            stopped_reason = "time_budget"
+            break
+
+        chunk = samples[chunk_start : chunk_start + chunk_sz]
+        chunk_stopped_early = False
+
+        if judge_conc <= 1:
+            for j, s in enumerate(chunk):
+                if evt.is_set():
+                    stopped_reason = "signal"
+                    chunk_stopped_early = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    stopped_reason = "time_budget"
+                    chunk_stopped_early = True
+                    break
+                gidx = chunk_start + j + 1
+                parsed, nw = _judge_one_sample(
+                    client,
+                    gidx,
+                    n_total,
+                    s,
                     judge_run_id=judge_run_id,
-                    judge_model=meta.get("model_param", ""),
+                    model=model,
+                    write_scores=write_scores,
                 )
-                n_scores += added
-                tail = f"  +{added} scores"
-            print(f"  [{i:>4}/{n}] {stratum:<10} {tid[:36]} {band}{tail}")
-            results.append(parsed)
-        except Exception as e:
-            results.append({
-                "_trace_id": tid,
-                "_stratum": stratum,
-                "_chapter": s.get("chapter") or "unknown",
-                "_subject": s.get("subject") or "unknown",
-                "_parse_error": True,
-                "_error": str(e),
-            })
-            print(f"  [{i:>4}/{n}] {stratum:<10} {tid[:36]} ERROR: {e}")
-        if checkpoint_path and i % 50 == 0:
-            with open(checkpoint_path, "w") as _f:
-                json.dump(prefix + results, _f)
-            print(f"  💾 checkpoint saved ({len(prefix) + i}/{len(prefix) + n})")
+                results.append(parsed)
+                n_scores += nw
+                _maybe_checkpoint_every_n(
+                    checkpoint_path, prefix, results, n_total
+                )
+        else:
+            slots: list[tuple[dict, int] | None] = [None] * len(chunk)
+            with ThreadPoolExecutor(max_workers=judge_conc) as ex:
+                futures = [
+                    ex.submit(
+                        _judge_one_sample,
+                        client,
+                        chunk_start + j + 1,
+                        n_total,
+                        s,
+                        judge_run_id=judge_run_id,
+                        model=model,
+                        write_scores=write_scores,
+                    )
+                    for j, s in enumerate(chunk)
+                ]
+                future_to_j = {futures[k]: k for k in range(len(futures))}
+                pending = set(futures)
+                while pending:
+                    if evt.is_set():
+                        stopped_reason = "signal"
+                        chunk_stopped_early = True
+                        for f in pending:
+                            f.cancel()
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
+                        stopped_reason = "time_budget"
+                        chunk_stopped_early = True
+                        for f in pending:
+                            f.cancel()
+                        break
+                    done, pending = wait(
+                        pending,
+                        timeout=2.0,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for f in done:
+                        jj = future_to_j[f]
+                        try:
+                            slots[jj] = f.result()
+                        except CancelledError:
+                            slots[jj] = None
+            for item in slots:
+                if item is None:
+                    continue
+                results.append(item[0])
+                n_scores += item[1]
+                _maybe_checkpoint_every_n(
+                    checkpoint_path, prefix, results, n_total
+                )
+            if stopped_reason != "complete":
+                chunk_stopped_early = True
+
+        if checkpoint_path:
+            _write_checkpoint(checkpoint_path, prefix, results, n_total)
+
+        if chunk_stopped_early:
+            break
+
+        if evt.is_set():
+            stopped_reason = "signal"
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            stopped_reason = "time_budget"
+            break
+        if chunk_start + len(chunk) >= n_total:
+            break
+
     dur = time.monotonic() - t_start
 
     if write_scores:
@@ -281,12 +518,168 @@ def run_judge_loop(samples: list[dict], judge_run_id: str, write_scores: bool,
         except Exception as e:
             print(f"📡 Langfuse flush warning: {e}")
 
-    # Cost estimate (gpt-4.1 list price; Azure may differ)
     in_tok = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in results)
     out_tok = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in results)
     est_usd = in_tok * 2e-6 + out_tok * 8e-6
-    print(f"⏱  Total run: {dur:.1f}s | tokens {in_tok}/{out_tok} | est ~${est_usd:.2f} (₹{est_usd*83:.0f})")
-    return results
+    print(
+        f"⏱  Judge phase: {dur:.1f}s | stopped={stopped_reason} | "
+        f"tokens {in_tok}/{out_tok} | est ~${est_usd:.2f} (₹{est_usd*83:.0f})"
+    )
+
+    return JudgeLoopOutcome(
+        new_results=results,
+        stopped_reason=stopped_reason,
+        n_langfuse_scores=n_scores,
+        judge_phase_sec=dur,
+    )
+
+
+def finalize_eval_run(
+    *,
+    output_path: str,
+    results: list[dict],
+    new_results: list[dict],
+    checkpoint_results: list[dict],
+    judge_outcome: JudgeLoopOutcome,
+    n_sampled: int,
+    yesterday_str: str,
+    judge_run_id: str,
+    prev_snapshot: dict | None,
+    prev_snapshot_path: str,
+    label: str | None,
+) -> str:
+    """Save full results JSON, build Slack block (incl. cost footer), write eval summary snapshot.
+
+    Single finalization path for normal completion, soft time budget, and SIGTERM-after-chunk.
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"💾 Saved {len(results)} results to {output_path}")
+
+    summary = aggregate(results)
+    run_label = label or judge_run_id
+    block = render_slack_block(
+        summary, run_label=run_label, results=results, prev_snapshot=prev_snapshot
+    )
+
+    n_judged_total = len(results)
+    n_judged_new = len(new_results)
+    in_tok = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in new_results)
+    out_tok = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in new_results)
+    est_usd = in_tok * 2e-6 + out_tok * 8e-6
+
+    strata_counts: dict[str, int] = {}
+    for r in results:
+        st = r.get("_stratum") or "all"
+        strata_counts[st] = strata_counts.get(st, 0) + 1
+
+    strata_cost_lines = []
+    for st in sorted(strata_counts.keys()):
+        st_rows = [r for r in new_results if (r.get("_stratum") or "all") == st]
+        st_n = strata_counts[st]
+        st_in = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in st_rows)
+        st_out = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in st_rows)
+        st_tokens = st_in + st_out
+        st_cost = st_in * 2e-6 + st_out * 8e-6
+        strata_cost_lines.append(
+            f"     {st:<14}  n={st_n:<5}  tokens={st_tokens:>9,}   ~${st_cost:.2f}"
+        )
+
+    resumed_note = (
+        f"   _(resumed, {n_judged_total - n_judged_new} from checkpoint — cost reflects new judgements only)_"
+        if checkpoint_results
+        else ""
+    )
+
+    nl = "\n"
+    one_pager = os.environ.get(
+        "EVAL_ONE_PAGER_URL",
+        "https://github.com/build-with-dhiraj/ask-ai-daily-automation/blob/main/ONE_PAGER.md",
+    )
+    cost_footer = (
+        f"\n💰 *Run cost*\n"
+        f"   Total: {n_judged_total} samples | {in_tok:,} in / {out_tok:,} out | "
+        f"~${est_usd:.2f} (₹{est_usd*83:.0f})\n"
+        f"   By stratum:\n"
+        f"{nl.join(strata_cost_lines)}"
+        f"{(nl + resumed_note) if resumed_note else ''}"
+        f"\n❓ *What is this?* <{one_pager}|Eval one-pager — thresholds, cost, Metabase Q33193>\n"
+    )
+    if judge_outcome.stopped_reason != "complete":
+        cost_footer += (
+            f"\n⏱ _Run ended with `{judge_outcome.stopped_reason}` before every pending sample "
+            f"was judged. Sample: {n_sampled} traces (Metabase pull); this aggregate has "
+            f"{len(results)} judged traces. Metrics use completed judgements; resume uses "
+            f"the checkpoint file._\n"
+        )
+    block = block + cost_footer
+
+    try:
+        n_j = summary.n_judgable or 1
+        n_acc = sum(
+            1
+            for r in results
+            if r.get("overall_band") in ("PASS", "NEUTRAL", "FAIL")
+            and not r.get("academic", {}).get("passed", True)
+        )
+        exp_axials_for_snap = ("intent", "formatting", "pedagogy", "tone")
+        n_exp = sum(
+            1
+            for r in results
+            if r.get("overall_band") in ("PASS", "NEUTRAL", "FAIL")
+            and any(not r.get(ax, {}).get("passed", True) for ax in exp_axials_for_snap)
+        )
+        pass_pct_snap = round(100.0 * summary.n_pass / n_j, 1) if summary.n_judgable else 0.0
+        neutral_pct_snap = round(100.0 * summary.n_neutral / n_j, 1) if summary.n_judgable else 0.0
+        fail_pct_snap = round(100.0 * summary.n_fail / n_j, 1) if summary.n_judgable else 0.0
+        acc_fail_pct_snap = round(100.0 * n_acc / n_j, 1) if summary.n_judgable else 0.0
+        exp_fail_pct_snap = round(100.0 * n_exp / n_j, 1) if summary.n_judgable else 0.0
+
+        def _hotspot_chapters_for_axial(ax: str, min_n: int = 5, top_k: int = 5) -> list[str]:
+            stats: dict[str, dict[str, int]] = {}
+            for r in results:
+                if r.get("overall_band") not in ("PASS", "NEUTRAL", "FAIL"):
+                    continue
+                ch = (r.get("_chapter") or "").strip() or "unknown"
+                d = stats.setdefault(ch, {"n": 0, "fail": 0})
+                d["n"] += 1
+                if not r.get(ax, {}).get("passed", True):
+                    d["fail"] += 1
+            eligible = [(c, d) for c, d in stats.items() if d["n"] >= min_n and c != "unknown"]
+            worst = sorted(
+                eligible,
+                key=lambda kv: (kv[1]["fail"] / kv[1]["n"], kv[1]["n"]),
+                reverse=True,
+            )[:top_k]
+            return [c for c, d in worst if d["fail"] > 0]
+
+        formatting_hotspot_chapters = _hotspot_chapters_for_axial("formatting")
+
+        summary_snapshot = {
+            "date": yesterday_str,
+            "n_sampled": n_sampled,
+            "n_metabase_rows": n_sampled,
+            "n_judged": len(results),
+            "time_window_sec": round(judge_outcome.judge_phase_sec, 2),
+            "eval_completed": True,
+            "stopped_reason": judge_outcome.stopped_reason,
+            "n_judgable": summary.n_judgable,
+            "pass_pct": pass_pct_snap,
+            "neutral_pct": neutral_pct_snap,
+            "fail_pct": fail_pct_snap,
+            "acc_fail_pct": acc_fail_pct_snap,
+            "exp_fail_pct": exp_fail_pct_snap,
+            "axial_fail_pct": dict(summary.axial_fail_pct),
+            "formatting_hotspot_chapters": formatting_hotspot_chapters,
+        }
+        with open(prev_snapshot_path, "w") as _sf:
+            json.dump(summary_snapshot, _sf, indent=2)
+        print(f"📸 Saved today's snapshot to {prev_snapshot_path} (for tomorrow's WoW deltas)")
+    except Exception as _e:
+        print(f"⚠️  Could not save today's snapshot ({_e}). WoW deltas may be missing tomorrow.")
+
+    return block
 
 
 def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -> None:
@@ -297,6 +690,12 @@ def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -
     then misreports C12. Daily Automation uploads this path with ``if: always()``."""
     payload = {
         "date": yesterday_str,
+        "n_sampled": 0,
+        "n_metabase_rows": 0,
+        "n_judged": 0,
+        "time_window_sec": 0.0,
+        "eval_completed": True,
+        "stopped_reason": reason,
         "n_judgable": 0,
         "pass_pct": 0.0,
         "neutral_pct": 0.0,
@@ -331,6 +730,10 @@ def main() -> int:
                    help="Slack-block label (default: daily-eval-YYYY-MM-DD)")
     args = p.parse_args()
 
+    _SIGTERM_REQUESTED.clear()
+    if getattr(signal, "SIGTERM", None) is not None:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+
     # 1. Load samples
     if args.samples:
         with open(args.samples) as f:
@@ -346,6 +749,8 @@ def main() -> int:
             if not os.environ.get(k):
                 sys.exit(f"ERROR: {k} not set; either export it or use --samples PATH")
         samples = fetch_samples_from_metabase()
+
+    n_metabase_pulled = len(samples)
 
     if not samples:
         print("⚠️  Zero samples to judge. Exiting cleanly.")
@@ -406,128 +811,30 @@ def main() -> int:
     yesterday_str = date.fromordinal(yesterday).isoformat()
     judge_run_id = f"daily-eval-{yesterday_str}"
     write_scores = not args.no_write_scores
-    new_results = run_judge_loop(
-        samples, judge_run_id=judge_run_id,
+    judge_outcome = run_judge_loop(
+        samples,
+        judge_run_id=judge_run_id,
         write_scores=write_scores, model=args.model,
         checkpoint_path=args.output + ".checkpoint",
         checkpoint_prefix=checkpoint_results if checkpoint_results else None,
+        stop_event=_SIGTERM_REQUESTED,
     )
+    new_results = judge_outcome.new_results
     results = checkpoint_results + new_results  # full combined set for aggregation
 
-    # 3. Save full results
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.output, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"💾 Saved {len(results)} results to {args.output}")
-
-    # 4. Render Slack block (B10: pass prev_snapshot for WoW deltas)
-    summary = aggregate(results)
-    label = args.label or judge_run_id
-    block = render_slack_block(summary, run_label=label, results=results,
-                                prev_snapshot=prev_snapshot)
-
-    # B8: Per-stratum cost split footer.
-    # Cost is computed from THIS run only (new_results); counts from all results.
-    n_judged_total = len(results)
-    n_judged_new = len(new_results)
-    in_tok = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in new_results)
-    out_tok = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in new_results)
-    est_usd = in_tok * 2e-6 + out_tok * 8e-6
-
-    # Stratum counts from ALL results (includes checkpoint)
-    strata_counts: dict[str, int] = {}
-    for r in results:
-        st = r.get("_stratum") or "all"
-        strata_counts[st] = strata_counts.get(st, 0) + 1
-
-    # Per-stratum token + cost split (THIS run only — checkpoint rows have no fresh _meta cost)
-    strata_cost_lines = []
-    for st in sorted(strata_counts.keys()):
-        st_rows = [r for r in new_results if (r.get("_stratum") or "all") == st]
-        st_n = strata_counts[st]  # total count (incl. resumed)
-        st_in = sum((r.get("_meta") or {}).get("input_tokens") or 0 for r in st_rows)
-        st_out = sum((r.get("_meta") or {}).get("output_tokens") or 0 for r in st_rows)
-        st_tokens = st_in + st_out
-        st_cost = st_in * 2e-6 + st_out * 8e-6
-        strata_cost_lines.append(
-            f"     {st:<14}  n={st_n:<5}  tokens={st_tokens:>9,}   ~${st_cost:.2f}"
-        )
-
-    resumed_note = (
-        f"   _(resumed, {n_judged_total - n_judged_new} from checkpoint — cost reflects new judgements only)_"
-        if checkpoint_results else ""
+    block = finalize_eval_run(
+        output_path=args.output,
+        results=results,
+        new_results=new_results,
+        checkpoint_results=checkpoint_results,
+        judge_outcome=judge_outcome,
+        n_sampled=n_metabase_pulled,
+        yesterday_str=yesterday_str,
+        judge_run_id=judge_run_id,
+        prev_snapshot=prev_snapshot,
+        prev_snapshot_path=prev_snapshot_path,
+        label=args.label,
     )
-
-    nl = "\n"
-    one_pager = os.environ.get(
-        "EVAL_ONE_PAGER_URL",
-        "https://github.com/build-with-dhiraj/ask-ai-daily-automation/blob/main/ONE_PAGER.md",
-    )
-    cost_footer = (
-        f"\n💰 *Run cost*\n"
-        f"   Total: {n_judged_total} samples | {in_tok:,} in / {out_tok:,} out | "
-        f"~${est_usd:.2f} (₹{est_usd*83:.0f})\n"
-        f"   By stratum:\n"
-        f"{nl.join(strata_cost_lines)}"
-        f"{(nl + resumed_note) if resumed_note else ''}"
-        f"\n❓ *What is this?* <{one_pager}|Eval one-pager — thresholds, cost, Metabase Q33193>\n"
-    )
-    block = block + cost_footer
-
-    # B10: Save today's snapshot for tomorrow's WoW deltas.
-    try:
-        n_j = summary.n_judgable or 1
-        n_acc = sum(1 for r in results
-                    if r.get("overall_band") in ("PASS", "NEUTRAL", "FAIL")
-                    and not r.get("academic", {}).get("passed", True))
-        exp_axials_for_snap = ("intent", "formatting", "pedagogy", "tone")
-        n_exp = sum(1 for r in results
-                    if r.get("overall_band") in ("PASS", "NEUTRAL", "FAIL")
-                    and any(not r.get(ax, {}).get("passed", True)
-                            for ax in exp_axials_for_snap))
-        pass_pct_snap = round(100.0 * summary.n_pass / n_j, 1) if summary.n_judgable else 0.0
-        neutral_pct_snap = round(100.0 * summary.n_neutral / n_j, 1) if summary.n_judgable else 0.0
-        fail_pct_snap = round(100.0 * summary.n_fail / n_j, 1) if summary.n_judgable else 0.0
-        acc_fail_pct_snap = round(100.0 * n_acc / n_j, 1) if summary.n_judgable else 0.0
-        exp_fail_pct_snap = round(100.0 * n_exp / n_j, 1) if summary.n_judgable else 0.0
-
-        # C12: chapter names with worst formatting FAIL rate (min 5 samples), top 5 — for digest cross-correlation
-        def _hotspot_chapters_for_axial(ax: str, min_n: int = 5, top_k: int = 5) -> list[str]:
-            stats: dict[str, dict[str, int]] = {}
-            for r in results:
-                if r.get("overall_band") not in ("PASS", "NEUTRAL", "FAIL"):
-                    continue
-                ch = (r.get("_chapter") or "").strip() or "unknown"
-                d = stats.setdefault(ch, {"n": 0, "fail": 0})
-                d["n"] += 1
-                if not r.get(ax, {}).get("passed", True):
-                    d["fail"] += 1
-            eligible = [(c, d) for c, d in stats.items() if d["n"] >= min_n and c != "unknown"]
-            worst = sorted(
-                eligible,
-                key=lambda kv: (kv[1]["fail"] / kv[1]["n"], kv[1]["n"]),
-                reverse=True,
-            )[:top_k]
-            return [c for c, d in worst if d["fail"] > 0]
-
-        formatting_hotspot_chapters = _hotspot_chapters_for_axial("formatting")
-
-        summary_snapshot = {
-            "date": yesterday_str,
-            "n_judgable": summary.n_judgable,
-            "pass_pct": pass_pct_snap,
-            "neutral_pct": neutral_pct_snap,
-            "fail_pct": fail_pct_snap,
-            "acc_fail_pct": acc_fail_pct_snap,
-            "exp_fail_pct": exp_fail_pct_snap,
-            "axial_fail_pct": dict(summary.axial_fail_pct),
-            "formatting_hotspot_chapters": formatting_hotspot_chapters,
-        }
-        with open(prev_snapshot_path, "w") as _sf:
-            json.dump(summary_snapshot, _sf, indent=2)
-        print(f"📸 Saved today's snapshot to {prev_snapshot_path} (for tomorrow's WoW deltas)")
-    except Exception as _e:
-        print(f"⚠️  Could not save today's snapshot ({_e}). WoW deltas may be missing tomorrow.")
 
     print("\n" + "=" * 60)
     print(block)
@@ -536,8 +843,10 @@ def main() -> int:
     # 5. Slack post
     if args.dry_run:
         print("(dry-run — skipping Slack post)")
-        # Clean up checkpoint on successful completion
-        if os.path.exists(checkpoint_file):
+        if (
+            judge_outcome.stopped_reason == "complete"
+            and os.path.exists(checkpoint_file)
+        ):
             try:
                 os.remove(checkpoint_file)
                 print(f"🗑️  Checkpoint cleaned up: {checkpoint_file}")
@@ -548,8 +857,10 @@ def main() -> int:
     webhook = os.environ.get("SLACK_WEBHOOK_URL")
     if not webhook:
         print("⚠️  SLACK_WEBHOOK_URL not set. Block printed above only.")
-        # Clean up checkpoint on successful completion
-        if os.path.exists(checkpoint_file):
+        if (
+            judge_outcome.stopped_reason == "complete"
+            and os.path.exists(checkpoint_file)
+        ):
             try:
                 os.remove(checkpoint_file)
                 print(f"🗑️  Checkpoint cleaned up: {checkpoint_file}")
@@ -564,8 +875,7 @@ def main() -> int:
         print(f"❌ Slack post failed: {e}")
         return 1
 
-    # Clean up checkpoint on successful completion
-    if os.path.exists(checkpoint_file):
+    if judge_outcome.stopped_reason == "complete" and os.path.exists(checkpoint_file):
         try:
             os.remove(checkpoint_file)
             print(f"🗑️  Checkpoint cleaned up: {checkpoint_file}")

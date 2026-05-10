@@ -15,7 +15,8 @@ jobs:
   eval:
     name: Daily Eval
     runs-on: self-hosted
-    timeout-minutes: 240
+    # Eval soft-stops via EVAL_MAX_RUNTIME_SEC between chunks; extra margin avoids losing Slack/snapshot on_kill.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +38,10 @@ jobs:
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           JUDGE_HTTP_TIMEOUT_SEC: "300"
+          # Concurrent LLM calls on this runner (ThreadPoolExecutor); raise to speed up large daily samples.
+          JUDGE_CONCURRENCY: "8"
+          # Soft wall before Actions hard kill: finalize chunk, flush Langfuse, write snapshot + Slack.
+          EVAL_MAX_RUNTIME_SEC: "13800"
 
       - name: Upload eval summary for digest
         if: always()

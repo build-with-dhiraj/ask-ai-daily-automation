@@ -31,6 +31,7 @@ import json
 import os
 from datetime import datetime, timezone
 import sys
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field, asdict
@@ -400,6 +401,9 @@ def _resolve_model_param(requested_model: str) -> str:
 # unconditionally from the runner.
 
 _LANGFUSE_CLIENT_CACHE: dict = {}
+# Serialize Langfuse create_score bursts from concurrent judge workers (daily_eval ThreadPoolExecutor).
+_LANGFUSE_SCORE_WRITE_LOCK = threading.Lock()
+
 
 def _get_langfuse_writer():
     """Returns a Langfuse client capable of create_score, or None if disabled."""
@@ -429,6 +433,8 @@ def write_judge_scores_to_langfuse(production_trace_id: str, parsed: dict,
     """Write all axial + open-code scores back to the production trace_id.
 
     Returns: number of scores written (0 if Langfuse disabled or trace_id missing).
+
+    Thread-safe when daily_eval runs judges concurrently (lock around create_score burst).
     """
     if not production_trace_id:
         return 0
@@ -446,68 +452,69 @@ def write_judge_scores_to_langfuse(production_trace_id: str, parsed: dict,
     }
 
     try:
-        # Headline scores
-        if band in band_to_num and band_to_num[band] is not None:
-            lf.create_score(name="judge_overall_score", value=band_to_num[band],
-                            data_type="NUMERIC", **base_kwargs)
-            written += 1
-        if band:
-            lf.create_score(name="judge_overall_band", value=band,
-                            data_type="CATEGORICAL", **base_kwargs)
-            written += 1
+        with _LANGFUSE_SCORE_WRITE_LOCK:
+            # Headline scores
+            if band in band_to_num and band_to_num[band] is not None:
+                lf.create_score(name="judge_overall_score", value=band_to_num[band],
+                                data_type="NUMERIC", **base_kwargs)
+                written += 1
+            if band:
+                lf.create_score(name="judge_overall_band", value=band,
+                                data_type="CATEGORICAL", **base_kwargs)
+                written += 1
 
-        if parsed.get("not_judgable"):
-            lf.create_score(name="judge_not_judgable", value=1,
-                            data_type="BOOLEAN",
-                            comment=parsed.get("not_judgable_reason") or base_kwargs["comment"],
-                            trace_id=production_trace_id)
-            written += 1
+            if parsed.get("not_judgable"):
+                lf.create_score(name="judge_not_judgable", value=1,
+                                data_type="BOOLEAN",
+                                comment=parsed.get("not_judgable_reason") or base_kwargs["comment"],
+                                trace_id=production_trace_id)
+                written += 1
 
-        # Per-axial PASS/FAIL (binary 1.0/0.0 + categorical label)
-        for ax in AXIAL_TO_CODES:
-            block = parsed.get(ax) or {}
-            if "passed" not in block:
-                continue
-            passed = bool(block["passed"])
-            lf.create_score(
-                name=f"judge_axial_{ax}",
-                value=1.0 if passed else 0.0,
-                data_type="NUMERIC",
-                comment=(block.get("reasoning") or "")[:500],
-                trace_id=production_trace_id,
-            )
-            written += 1
-            lf.create_score(
-                name=f"judge_axial_{ax}_band",
-                value="PASS" if passed else "FAIL",
-                data_type="CATEGORICAL",
-                trace_id=production_trace_id,
-            )
-            written += 1
-
-        # One boolean score per fired open code (sparse — only fired ones written)
-        for code in parsed.get("all_open_codes_fired", []) or []:
-            if code in ALL_CODES:
+            # Per-axial PASS/FAIL (binary 1.0/0.0 + categorical label)
+            for ax in AXIAL_TO_CODES:
+                block = parsed.get(ax) or {}
+                if "passed" not in block:
+                    continue
+                passed = bool(block["passed"])
                 lf.create_score(
-                    name=f"judge_code_{code}",
-                    value=1,
-                    data_type="BOOLEAN",
-                    comment=CODE_LABELS.get(code, code),
+                    name=f"judge_axial_{ax}",
+                    value=1.0 if passed else 0.0,
+                    data_type="NUMERIC",
+                    comment=(block.get("reasoning") or "")[:500],
+                    trace_id=production_trace_id,
+                )
+                written += 1
+                lf.create_score(
+                    name=f"judge_axial_{ax}_band",
+                    value="PASS" if passed else "FAIL",
+                    data_type="CATEGORICAL",
                     trace_id=production_trace_id,
                 )
                 written += 1
 
-        # Confidence
-        conf = parsed.get("confidence")
-        if conf in ("low", "med", "high"):
-            lf.create_score(name="judge_confidence", value=conf,
+            # One boolean score per fired open code (sparse — only fired ones written)
+            for code in parsed.get("all_open_codes_fired", []) or []:
+                if code in ALL_CODES:
+                    lf.create_score(
+                        name=f"judge_code_{code}",
+                        value=1,
+                        data_type="BOOLEAN",
+                        comment=CODE_LABELS.get(code, code),
+                        trace_id=production_trace_id,
+                    )
+                    written += 1
+
+            # Confidence
+            conf = parsed.get("confidence")
+            if conf in ("low", "med", "high"):
+                lf.create_score(name="judge_confidence", value=conf,
+                                data_type="CATEGORICAL", trace_id=production_trace_id)
+                written += 1
+
+            # Judge run id (for grouping)
+            lf.create_score(name="judge_run_id", value=judge_run_id,
                             data_type="CATEGORICAL", trace_id=production_trace_id)
             written += 1
-
-        # Judge run id (for grouping)
-        lf.create_score(name="judge_run_id", value=judge_run_id,
-                        data_type="CATEGORICAL", trace_id=production_trace_id)
-        written += 1
     except Exception as e:
         # Never fail the judge run because Langfuse write failed; log + continue
         print(f"  (langfuse score write partial failure on {production_trace_id}: {e})")
