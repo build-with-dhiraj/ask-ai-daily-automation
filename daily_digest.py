@@ -24,6 +24,9 @@ Optional tuning:
   LANGFUSE_ERROR_MAX_ITEMS / LANGFUSE_SCORE_MAX_ITEMS (default 500000)
   LANGFUSE_ERROR_MAX_PAGES / LANGFUSE_SCORE_MAX_PAGES (0 = unlimited pages)
   DIGEST_MIN_SCORE_ROWS_FOR_RATE (default 500) — sparse Langfuse scores: hide misleading rate vs all traces
+  DIGEST_FAIL_ON_LANGFUSE_ERROR — set to 0/false/no to allow posting when Langfuse fetches fail.
+      In GitHub Actions the default is strict: bad Langfuse config fails the job before Slack.
+  LANGFUSE_HOST — if unset or empty, defaults to https://cloud.langfuse.com (empty secret must not override).
 
 Optional card id env vars (digits only):
   METABASE_STREAM_LOGS_CARD_ID — Metabase question for
@@ -61,10 +64,18 @@ from typing import Dict, List, Optional, Tuple, Union
 
 METABASE_URL     = os.environ.get("METABASE_URL", "https://metabase-prod.penpencil.co")
 METABASE_API_KEY = os.environ.get("METABASE_API_KEY", "")
-LANGFUSE_HOST    = os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com")
-LANGFUSE_PK      = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
-LANGFUSE_SK      = os.environ.get("LANGFUSE_SECRET_KEY", "")
-SLACK_WEBHOOK    = os.environ.get("SLACK_WEBHOOK_URL", "")
+# GitHub Actions often sets `LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}` — if the secret is
+# unset, the env value is empty and must not override the Langfuse cloud default (empty host
+# breaks URLs and yields 401-shaped failures).
+def _env_strip_or_default(key: str, default: str) -> str:
+    v = (os.environ.get(key) or "").strip()
+    return v if v else default
+
+
+LANGFUSE_HOST = _env_strip_or_default("LANGFUSE_HOST", "https://cloud.langfuse.com")
+LANGFUSE_PK = (os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip()
+LANGFUSE_SK = (os.environ.get("LANGFUSE_SECRET_KEY") or "").strip()
+SLACK_WEBHOOK = (os.environ.get("SLACK_WEBHOOK_URL") or "").strip()
 
 DRY_RUN = "--dry-run" in sys.argv
 
@@ -133,6 +144,19 @@ yesterday = (now_utc - timedelta(days=1)).strftime("%Y-%m-%d")
 today_str = now_utc.strftime("%Y-%m-%d")
 from_24h  = (now_utc - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+
+def _digest_fail_on_langfuse_error() -> bool:
+    """In CI, refuse to post a digest with broken Langfuse blocks (set DIGEST_FAIL_ON_LANGFUSE_ERROR=0 to override)."""
+    if DRY_RUN:
+        return False
+    raw = (os.environ.get("DIGEST_FAIL_ON_LANGFUSE_ERROR") or "").strip().lower()
+    if raw in ("0", "false", "no"):
+        return False
+    if raw in ("1", "true", "yes"):
+        return True
+    return os.environ.get("GITHUB_ACTIONS") == "true"
+
+
 # ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only)
 # ---------------------------------------------------------------------------
@@ -159,6 +183,41 @@ def _http_get_langfuse(url: str, headers: dict, timeout: int = 90) -> dict:
     if last_err:
         raise last_err
     raise RuntimeError("Langfuse GET exhausted retries")  # pragma: no cover
+
+
+def _preflight_langfuse_or_exit() -> None:
+    """Validate credentials + reachability before Metabase work so misconfig fails fast."""
+    if not _digest_fail_on_langfuse_error():
+        return
+    if not LANGFUSE_PK or not LANGFUSE_SK:
+        print(
+            "[error] Langfuse API keys missing — set repository secrets LANGFUSE_PUBLIC_KEY and "
+            "LANGFUSE_SECRET_KEY. If LANGFUSE_HOST is unset, it defaults to https://cloud.langfuse.com.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    url = (
+        f"{LANGFUSE_HOST}/api/public/traces"
+        f"?fromTimestamp={urllib.parse.quote(from_24h)}&limit=1"
+    )
+    try:
+        _http_get_langfuse(url, {"Authorization": _langfuse_auth_header()}, timeout=45)
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode(errors="replace")[:500]
+        except Exception:
+            pass
+        print(
+            f"[error] Langfuse preflight HTTP {exc.code} against {LANGFUSE_HOST} — "
+            "verify keys match the project and LANGFUSE_HOST is the project base URL "
+            f"(not empty). Response: {body!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except Exception as exc:
+        print(f"[error] Langfuse preflight failed: {exc!r}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _http_post_json(
@@ -677,7 +736,12 @@ def load_eval_summary(summary_path: str) -> Optional[dict]:
         return None
     try:
         with open(summary_path) as _sf:
-            return json.load(_sf)
+            data = json.load(_sf)
+        if isinstance(data, dict):
+            data.setdefault("formatting_hotspot_chapters", [])
+            if "n_sampled" not in data and "n_metabase_rows" in data:
+                data["n_sampled"] = data["n_metabase_rows"]
+        return data
     except Exception:
         return None
 
@@ -814,16 +878,12 @@ def fmt_confirmed_regressions(
             "Check Daily Eval logs and that the artifact matches this path.)_"
         )
 
+    # Legacy snapshots may omit this key; treat like an empty list (no judge hotspots to cross).
     fmt_hot = set(eval_summary.get("formatting_hotspot_chapters") or [])
     if not fmt_hot:
-        if "formatting_hotspot_chapters" not in eval_summary:
-            return (
-                "  _(Eval snapshot is missing key `formatting_hotspot_chapters` — update `daily_eval.py` output "
-                "or use a current eval artifact.)_"
-            )
         return (
             "  _Daily eval reported *no* formatting hotspot chapters in this run "
-            "(empty list — not the same as a missing snapshot.)_"
+            "(or snapshot predates the key — C12 cross-check uses an empty judge hotspot set)._"
         )
     behavioral: set[str] = set()
     for row in rephrase_rows or []:
@@ -1079,6 +1139,8 @@ def post_to_slack(blocks: list, fallback_text: str) -> bool:
 def main() -> int:
     print(f"[info] Fetching data for digest ({today_str}, yesterday={yesterday}) …", file=sys.stderr)
 
+    _preflight_langfuse_or_exit()
+
     _warn_metabase_card_env_var("METABASE_BEHAVIOR_FOLLOWUP_CARD_ID", BEHAVIOR_FOLLOWUP_CARD_ID)
     _warn_metabase_card_env_var("METABASE_BEHAVIOR_REPHRASE_CARD_ID", BEHAVIOR_REPHRASE_CARD_ID)
     if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -1112,6 +1174,24 @@ def main() -> int:
         else None
     )
     eval_summary = load_eval_summary(EVAL_SUMMARY_PATH)
+
+    if _digest_fail_on_langfuse_error() and (not errors_ok or not scores_ok or not traces_ok):
+        bad = [
+            name
+            for name, ok in (
+                ("errors", errors_ok),
+                ("scores", scores_ok),
+                ("traces", traces_ok),
+            )
+            if not ok
+        ]
+        print(
+            "[error] Langfuse fetch failed for: "
+            + ", ".join(bad)
+            + " — not posting digest (fix credentials/host or set DIGEST_FAIL_ON_LANGFUSE_ERROR=0).",
+            file=sys.stderr,
+        )
+        return 1
 
     sl_cfg = STREAM_LOGS_CARD_ID.isdigit()
     stream_logs_rows: Optional[List] = None

@@ -43,6 +43,44 @@ jobs:
           # Soft wall before Actions hard kill: finalize chunk, flush Langfuse, write snapshot + Slack.
           EVAL_MAX_RUNTIME_SEC: "13800"
 
+      # Guarantee a digest-readable JSON on disk so the artifact is never stale/missing keys
+      # (digest C12 + upload both rely on this path).
+      - name: Normalize or create eval snapshot for artifact
+        if: always()
+        run: |
+          python3 <<'PY'
+          import json
+          import sys
+          from datetime import date
+          from pathlib import Path
+
+          sys.path.insert(0, ".")
+          p = Path("/tmp/daily_eval_yesterday_summary.json")
+          y = date.fromordinal(date.today().toordinal() - 1).isoformat()
+
+          def write_minimal():
+              from daily_eval import write_minimal_eval_snapshot
+
+              write_minimal_eval_snapshot(
+                  str(p), yesterday_str=y, reason="eval_job_no_snapshot_on_disk"
+              )
+
+          if p.is_file() and p.stat().st_size > 2:
+              try:
+                  d = json.loads(p.read_text())
+              except Exception:
+                  write_minimal()
+                  raise SystemExit(0)
+              if isinstance(d, dict):
+                  d.setdefault("formatting_hotspot_chapters", [])
+                  if "n_sampled" not in d and "n_metabase_rows" in d:
+                      d["n_sampled"] = d["n_metabase_rows"]
+                  p.write_text(json.dumps(d, indent=2))
+              raise SystemExit(0)
+
+          write_minimal()
+          PY
+
       - name: Upload eval summary for digest
         if: always()
         uses: actions/upload-artifact@v4
@@ -69,11 +107,12 @@ jobs:
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
+      # Fail the job (no Slack) if Langfuse API is misconfigured — avoids “fetch failed” noise in-channel.
+      DIGEST_FAIL_ON_LANGFUSE_ERROR: "1"
     steps:
       - uses: actions/checkout@v4
 
       - name: Download eval summary
-        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: eval-summary

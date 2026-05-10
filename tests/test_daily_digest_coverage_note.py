@@ -15,6 +15,7 @@ _spec.loader.exec_module(_mod)
 
 _eval_sample_counts = _mod._eval_sample_counts
 fmt_eval_coverage_note = _mod.fmt_eval_coverage_note
+fmt_confirmed_regressions = _mod.fmt_confirmed_regressions
 
 
 class TestEvalSampleCounts(unittest.TestCase):
@@ -33,6 +34,20 @@ class TestEvalSampleCounts(unittest.TestCase):
             {"n_metabase_rows": 1000.0, "n_judged": 400.0}
         )
         self.assertEqual((m, n), (1000, 400))
+
+
+class TestFmtConfirmedRegressions(unittest.TestCase):
+    def test_legacy_snapshot_without_hotspot_key(self) -> None:
+        ev = {"n_judged": 10, "stopped_reason": "complete"}
+        txt = fmt_confirmed_regressions(None, None, ev)
+        self.assertNotIn("missing key", txt)
+        self.assertIn("formatting hotspot", txt.lower())
+
+    def test_empty_hotspot_list_same_as_legacy(self) -> None:
+        ev = {"formatting_hotspot_chapters": [], "n_judged": 1}
+        txt = fmt_confirmed_regressions(None, None, ev)
+        self.assertNotIn("missing key", txt)
+        self.assertIn("formatting hotspot chapters", txt.lower())
 
 
 class TestFmtEvalCoverageNote(unittest.TestCase):

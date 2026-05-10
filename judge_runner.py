@@ -414,11 +414,11 @@ def _get_langfuse_writer():
         return None
     try:
         from langfuse import Langfuse
+        _h = (os.environ.get("LANGFUSE_HOST") or os.environ.get("LANGFUSE_BASE_URL") or "").strip()
         c = Langfuse(
             public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
             secret_key=os.environ["LANGFUSE_SECRET_KEY"],
-            host=os.environ.get("LANGFUSE_HOST") or os.environ.get("LANGFUSE_BASE_URL")
-                 or "https://cloud.langfuse.com",
+            host=_h or "https://cloud.langfuse.com",
         )
         _LANGFUSE_CLIENT_CACHE["client"] = c
         return c
