@@ -1,7 +1,13 @@
-# Run this with your Mac off: it uses GitHub-hosted runners + repository *secrets* only.
-# Proves Metabase + Langfuse are reachable from GitHub egress with your keys (not from your laptop).
+# Run with your Mac off: GitHub-hosted runners + repository secrets only.
 #
-# Repo → Settings → Secrets and variables → Actions (METABASE_URL, METABASE_API_KEY, etc.)
+# If Metabase shows curl (28) "Connection timed out" from ubuntu-latest, traffic from
+# GitHub Actions (Azure datacenter egress) is not reaching your Metabase host — VPN-only,
+# corporate firewall, or IP allowlisting. Langfuse Cloud often still works; see the
+# separate langfuse job in the same workflow run.
+#
+# Allowlisting: https://api.github.com/meta  (key "actions")
+#
+# Repo → Settings → Secrets and variables → Actions
 
 name: GitHub-hosted connectivity smoke
 
@@ -9,49 +15,53 @@ on:
   workflow_dispatch:
 
 jobs:
-  probe:
+  metabase:
+    name: Metabase (GitHub egress)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       METABASE_URL: ${{ secrets.METABASE_URL }}
       METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
-      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
-      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
-      LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
-      # Same card family as daily_digest academic reasons; change if your instance differs.
       METABASE_SMOKE_CARD_ID: "24973"
     steps:
-      - name: Probe Metabase and Langfuse (GitHub egress)
+      - name: Probe Metabase API
         shell: bash
         run: |
           set -euo pipefail
-
           MB_URL="${METABASE_URL:?Set Actions secret METABASE_URL}"
           MB_KEY="${METABASE_API_KEY:?Set Actions secret METABASE_API_KEY}"
-          LF_PK="${LANGFUSE_PUBLIC_KEY:?Set Actions secret LANGFUSE_PUBLIC_KEY}"
-          LF_SK="${LANGFUSE_SECRET_KEY:?Set Actions secret LANGFUSE_SECRET_KEY}"
-
-          LF_H="${LANGFUSE_HOST:-}"
-          if [[ -z "${LF_H// }" ]]; then
-            LF_H="https://cloud.langfuse.com"
-          fi
 
           echo "Metabase base: ${MB_URL}"
-          echo "Langfuse host: ${LF_H}"
+          echo "Runner region: GitHub-hosted ubuntu-latest (public egress, not your Mac)."
+
+          echo "::group::DNS + TCP sanity (optional)"
+          host_try="$(echo "${MB_URL}" | sed -e 's|https\?://||' -e 's|/.*||')"
+          echo "Host for lookup: ${host_try}"
+          getent hosts "${host_try}" || true
+          echo "::endgroup::"
 
           echo "::group::Metabase GET /api/user/current"
-          code="$(curl -sS -o /tmp/mb_user.json -w "%{http_code}" --max-time 30 \
+          set +e
+          code="$(curl -sS -o /tmp/mb_user.json -w "%{http_code}" \
+            --connect-timeout 20 --max-time 45 \
             -H "X-Api-Key: ${MB_KEY}" \
             -H "Content-Type: application/json" \
             "${MB_URL}/api/user/current")"
-          echo "HTTP ${code}"
+          curl_exit=$?
+          set -e
+          echo "HTTP ${code:-000} (curl_exit=${curl_exit})"
+          if [[ "${curl_exit}" != "0" ]]; then
+            echo "::error::Metabase curl failed (exit ${curl_exit}). (28) = connection timed out → host not reachable from GitHub datacenter egress (VPN/firewall/IP allowlist). Keep self-hosted runner on Mac/VPN, or allowlist GitHub Actions: https://api.github.com/meta"
+            exit 1
+          fi
           head -c 400 /tmp/mb_user.json || true
           echo
-          [[ "${code}" == "200" ]] || { echo "::error::Metabase user/current failed"; exit 1; }
+          [[ "${code}" == "200" ]] || { echo "::error::Metabase user/current HTTP ${code}"; exit 1; }
           echo "::endgroup::"
 
           echo "::group::Metabase POST /api/card/${METABASE_SMOKE_CARD_ID}/query/json"
-          code="$(curl -sS -o /tmp/mb_card.json -w "%{http_code}" --max-time 120 \
+          code="$(curl -sS -o /tmp/mb_card.json -w "%{http_code}" \
+            --connect-timeout 20 --max-time 120 \
             -X POST \
             -H "X-Api-Key: ${MB_KEY}" \
             -H "Content-Type: application/json" \
@@ -60,20 +70,52 @@ jobs:
           echo "HTTP ${code}"
           head -c 400 /tmp/mb_card.json || true
           echo
-          [[ "${code}" == "200" ]] || { echo "::error::Metabase card query failed"; exit 1; }
+          [[ "${code}" == "200" ]] || { echo "::error::Metabase card query HTTP ${code}"; exit 1; }
           echo "::endgroup::"
+
+          echo "OK — Metabase reachable from GitHub-hosted runner."
+
+  langfuse:
+    name: Langfuse (GitHub egress)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+    steps:
+      - name: Probe Langfuse public API
+        shell: bash
+        run: |
+          set -euo pipefail
+          LF_PK="${LANGFUSE_PUBLIC_KEY:?Set Actions secret LANGFUSE_PUBLIC_KEY}"
+          LF_SK="${LANGFUSE_SECRET_KEY:?Set Actions secret LANGFUSE_SECRET_KEY}"
+          LF_H="${LANGFUSE_HOST:-}"
+          if [[ -z "${LF_H// }" ]]; then
+            LF_H="https://cloud.langfuse.com"
+          fi
+
+          echo "Langfuse host: ${LF_H}"
 
           echo "::group::Langfuse GET /api/public/traces"
           FROM_TS="$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
-          code="$(curl -sS -o /tmp/lf_traces.json -w "%{http_code}" --max-time 45 \
+          set +e
+          code="$(curl -sS -o /tmp/lf_traces.json -w "%{http_code}" \
+            --connect-timeout 20 --max-time 45 \
             -u "${LF_PK}:${LF_SK}" \
             -G "${LF_H}/api/public/traces" \
             --data-urlencode "fromTimestamp=${FROM_TS}" \
             --data-urlencode "limit=1")"
-          echo "HTTP ${code}"
+          curl_exit=$?
+          set -e
+          echo "HTTP ${code:-000} (curl_exit=${curl_exit})"
+          if [[ "${curl_exit}" != "0" ]]; then
+            echo "::error::Langfuse curl failed (exit ${curl_exit}) — check host, keys, and network."
+            exit 1
+          fi
           head -c 400 /tmp/lf_traces.json || true
           echo
-          [[ "${code}" == "200" ]] || { echo "::error::Langfuse traces failed"; exit 1; }
+          [[ "${code}" == "200" ]] || { echo "::error::Langfuse traces HTTP ${code}"; exit 1; }
           echo "::endgroup::"
 
-          echo "OK — GitHub-hosted runner reached Metabase + Langfuse with repo secrets."
+          echo "OK — Langfuse reachable from GitHub-hosted runner."
