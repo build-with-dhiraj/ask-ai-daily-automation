@@ -1,44 +1,61 @@
 -- Daily stratified eval sample for v8 judge runner
 -- =============================================================================
--- Dialect: Trino (json_extract_scalar, window functions, random()).
+-- Dialect: Trino (json_extract_scalar, window functions).
 -- Metabase Question 33193 — POST /api/card/{id}/query/json
 --
--- Stage budget (Starburst/Trino max ~150 stages):
---   • Dropped PERCENT_RANK() over the full day — replaced by row_number vs
---     LEAST(50, CEIL(0.01 * n_day)) where n_day = COUNT(*) OVER () on the day.
---   • Fewer named CTEs; chapter totals via COUNT(*) OVER (PARTITION BY chapter).
---   • Anti-joins / small UNION ALL exclusion sets (no NOT IN).
+-- Performance (refresh when Metabase "spins" or times out):
+--   1. n_day via day_stats CROSS JOIN — avoids COUNT(*) OVER () on every enriched row.
+--   2. base CTE — filter silver_conversational_query_table once; json_extract only on that set.
+--   3. Sampling order: xxhash64(trace_id) replaces random() (cheaper full sorts at scale).
 --
--- Optional (run as separate Metabase statement if allowed): keep under stage cap
+-- If still slow: check Trino/Metabase query max time, table stats/partitions on
+-- silver_conversational_query_table, and whether feedback join duplicates rows per
+-- aiintentid (duplicates inflate work — dedupe in a staging table if needed).
+--
+-- Optional session (Metabase native query prefix if allowed):
 --   SET SESSION distinct_aggregations_strategy = 'single_step';
---
--- Outlier stratum: ~top 1% longest answers by count (not rank tie semantics),
--- capped at 50, excluding downvote picks — close to prior PERCENT_RANK ≤ 0.01.
 -- =============================================================================
 
-WITH enriched AS (
+WITH
+-- One scan of conversational rows for the day (narrow as early as possible).
+base AS (
   SELECT
-    q.aiintentid                                                            AS trace_id,
-    q.query                                                                 AS doubt,
-    q.answer                                                                AS ai_answer,
-    ''                                                                      AS transcript,
-    ''                                                                      AS ideal_answer,
-    json_extract_scalar(q.output, '$.metadata[0].subject[0].subject')       AS subject,
-    json_extract_scalar(q.output, '$.metadata[0].chapter[0].chapter')         AS chapter,
-    json_extract_scalar(q.output, '$.user_message.author_metadata.classes') AS student_class,
-    json_extract_scalar(q.output, '$.user_message.author_metadata.exam')    AS exam,
-    json_extract_scalar(q.output, '$.metadata[0].image_url')                AS image_url,
-    CAST(json_extract_scalar(q.output, '$.metadata[0].is_annotated') AS BOOLEAN) AS is_annotated,
-    f.rating,
-    LENGTH(q.answer)                                                        AS answer_len,
-    COUNT(*) OVER ()                                                        AS n_day
+    q.aiintentid,
+    q.query,
+    q.answer,
+    q.output,
+    LENGTH(q.answer) AS answer_len
   FROM astracdc.silver_conversational_query_table q
-  LEFT JOIN astracdc.silver_prod_feedback_by_user_entity f
-    ON f.entity_id = q.aiintentid
-   AND f.type IN ('copilot_message', 'message')
   WHERE q.intenttype = 'VIDEO_CO_PILOT'
     AND DATE(q.createdat) = CURRENT_DATE - INTERVAL '1' DAY
     AND COALESCE(json_extract_scalar(q.output, '$.metadata[0].category_name'), '') = 'academic'
+),
+
+day_stats AS (
+  SELECT COUNT(*) AS n_day FROM base
+),
+
+enriched AS (
+  SELECT
+    b.aiintentid                                                            AS trace_id,
+    b.query                                                                 AS doubt,
+    b.answer                                                                AS ai_answer,
+    ''                                                                      AS transcript,
+    ''                                                                      AS ideal_answer,
+    json_extract_scalar(b.output, '$.metadata[0].subject[0].subject')       AS subject,
+    json_extract_scalar(b.output, '$.metadata[0].chapter[0].chapter')        AS chapter,
+    json_extract_scalar(b.output, '$.user_message.author_metadata.classes') AS student_class,
+    json_extract_scalar(b.output, '$.user_message.author_metadata.exam')    AS exam,
+    json_extract_scalar(b.output, '$.metadata[0].image_url')                 AS image_url,
+    CAST(json_extract_scalar(b.output, '$.metadata[0].is_annotated') AS BOOLEAN) AS is_annotated,
+    f.rating,
+    b.answer_len,
+    ds.n_day
+  FROM base b
+  CROSS JOIN day_stats ds
+  LEFT JOIN astracdc.silver_prod_feedback_by_user_entity f
+    ON f.entity_id = b.aiintentid
+   AND f.type IN ('copilot_message', 'message')
 ),
 
 downvote_final AS (
@@ -73,8 +90,13 @@ downvote_final AS (
       e.is_annotated,
       e.rating,
       CAST(NULL AS VARCHAR) AS _sample_meta,
-      ROW_NUMBER() OVER (PARTITION BY e.chapter ORDER BY random()) AS rn_chapter,
-      ROW_NUMBER() OVER (ORDER BY random()) AS rn_global
+      ROW_NUMBER() OVER (
+        PARTITION BY e.chapter
+        ORDER BY xxhash64(to_utf8(CAST(e.trace_id AS varchar)))
+      ) AS rn_chapter,
+      ROW_NUMBER() OVER (
+        ORDER BY xxhash64(to_utf8(CAST(e.trace_id AS varchar)))
+      ) AS rn_global
     FROM enriched e
     WHERE e.rating = 0
   ) dv
@@ -169,7 +191,9 @@ upvote_final AS (
       u.is_annotated,
       u.rating,
       CAST(NULL AS VARCHAR) AS _sample_meta,
-      ROW_NUMBER() OVER (ORDER BY random()) AS rn_global
+      ROW_NUMBER() OVER (
+        ORDER BY xxhash64(to_utf8(CAST(u.trace_id AS varchar) || 'g'))
+      ) AS rn_global
     FROM (
       SELECT
         x.trace_id,
@@ -190,7 +214,10 @@ upvote_final AS (
           LEAST(30, x.chapter_total),
           CAST(CEIL(0.03 * x.chapter_total) AS INTEGER)
         ) AS chapter_target,
-        ROW_NUMBER() OVER (PARTITION BY x.chapter ORDER BY random()) AS rn_chapter
+        ROW_NUMBER() OVER (
+          PARTITION BY x.chapter
+          ORDER BY xxhash64(to_utf8(CAST(x.trace_id AS varchar)))
+        ) AS rn_chapter
       FROM (
         SELECT p.*, COUNT(*) OVER (PARTITION BY p.chapter) AS chapter_total
         FROM upvote_pool p
@@ -249,7 +276,9 @@ no_vote_final AS (
       n.is_annotated,
       n.rating,
       CAST(NULL AS VARCHAR) AS _sample_meta,
-      ROW_NUMBER() OVER (ORDER BY random()) AS rn_global
+      ROW_NUMBER() OVER (
+        ORDER BY xxhash64(to_utf8(CAST(n.trace_id AS varchar) || 'h'))
+      ) AS rn_global
     FROM (
       SELECT
         x.trace_id,
@@ -270,7 +299,10 @@ no_vote_final AS (
           LEAST(30, x.chapter_total),
           CAST(CEIL(0.15 * x.chapter_total) AS INTEGER)
         ) AS chapter_target,
-        ROW_NUMBER() OVER (PARTITION BY x.chapter ORDER BY random()) AS rn_chapter
+        ROW_NUMBER() OVER (
+          PARTITION BY x.chapter
+          ORDER BY xxhash64(to_utf8(CAST(x.trace_id AS varchar)))
+        ) AS rn_chapter
       FROM (
         SELECT p.*, COUNT(*) OVER (PARTITION BY p.chapter) AS chapter_total
         FROM no_vote_pool p
