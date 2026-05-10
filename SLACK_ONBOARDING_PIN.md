@@ -1,6 +1,6 @@
 # `#ask-ai-evals` — channel onboarding (pin this)
 
-Use as the channel description or a pinned message. Adjust times if your cron differs.
+Use as the channel description or a pinned message. **Daily Automation** is scheduled for **04:00 IST** (GitHub cron `30 22 * * *` UTC); keep the **self-hosted runner** (Mac) online then. Aim for both posts to land by **~08:00–09:00 IST** so you can review before stakeholder-facing **09:00 IST**.
 
 ---
 
@@ -12,10 +12,10 @@ This channel is for **monitoring Ask AI quality and incidents**. Use it to notic
 
 ## The two daily messages
 
-**Daily Eval** (about 08:30 IST)  
-Summarises how yesterday’s **sampled** Video Co-Pilot (academic) answers score on a **fixed checklist** (accuracy and experience). Shows counts, stratum split, and week-over-week style context where configured. A `?` link may point to a short doc on definitions and cost.
+**Daily Eval** (after the **04:00 IST** automation start; duration up to the configured soft time budget, typically finishing **~08:00 IST** in a heavy sample)  
+Summarises how yesterday’s **sampled** Video Co-Pilot (academic) answers score on a **fixed checklist** (accuracy and experience). Shows counts, stratum split, and week-over-week style context where configured. A `?` link may point to a short doc on definitions and cost. If the run is time-bounded, metrics reflect **N traces judged** in that window (see snapshot fields), not “failed because rows remain.”
 
-**Daily Digest** (about 09:30 IST)  
+**Daily Digest** (same workflow, immediately after eval; usually minutes later unless eval is long)  
 Pulls together **downvote and reason data from Metabase**, **errors and comments from Langfuse**, **yesterday’s API request summary from `stream_logs` (via Metabase)**, and optional **behaviour proxy cards** (also Metabase). Sections are in a fixed order so the same screen is easy to scan every day.  
 The digest is **Slack Block Kit** (`blocks`); mobile search and some notifications may show only the **plain-text summary line** — open the full thread in-channel to read every section.
 
@@ -71,10 +71,10 @@ Monitoring Ask AI quality and incidents. Use it to fix the product and systems, 
 
 *Two automated posts each day*
 
-*Daily Eval (~08:30 IST)*  
+*Daily Eval (starts ~04:00 IST; may finish later on heavy samples)*  
 Summary of how a *sample* of yesterday’s Video Co-Pilot academic answers scores on a *fixed checklist*. Optional `?` link to definitions and cost.
 
-*Daily Digest (~09:30 IST)*  
+*Daily Digest (after eval in the same run)*  
 Combines Metabase (downvotes, reasons, snapshots, optional behaviour + stream_logs summary) and Langfuse (errors, comments, trace counts). Optional cross-check with a small file from the last eval on the same runner. Same section order every day.
 
 *How they are built (logic)*  

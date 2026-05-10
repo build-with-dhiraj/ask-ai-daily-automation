@@ -1,5 +1,5 @@
 #!/bin/bash
-# Daily Eval — runs at 08:30 IST (03:00 UTC) Mon–Fri
+# Daily Eval — scheduled 04:00 IST (22:30 UTC) via Daily Automation; self-hosted runner required
 # Pulls from Metabase Q33193, judges via Azure gpt-4.1, writes scores to Langfuse, posts to Slack
 set -a
 source "$(dirname "$0")/.env"

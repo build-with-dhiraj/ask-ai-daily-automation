@@ -2,7 +2,7 @@
 
 ## What this is
 
-Every morning (08:30 IST) a GitHub Action runs on a **self-hosted runner** inside the PW network. It pulls a **stratified sample** of yesterday’s Video Co-Pilot **academic** doubts from Metabase, runs the **v8 rubric judge** (Azure OpenAI), optionally writes scores to **Langfuse**, and posts a **Slack scorecard** (`#ask-ai-evals` or your configured webhook).
+Each day (**04:00 IST** schedule, cron `30 22 * * *` UTC) a GitHub Action runs on a **self-hosted runner** inside the PW network. It pulls a **stratified sample** of yesterday’s Video Co-Pilot **academic** doubts from Metabase, runs the **v8 rubric judge** (Azure OpenAI), optionally writes scores to **Langfuse**, and posts a **Slack scorecard** (`#ask-ai-evals` or your configured webhook). **Daily Digest** runs in the same workflow immediately after eval.
 
 This is **production monitoring**, not training-data labeling. The goal is **directional** health: catch regressions early at manageable cost.
 

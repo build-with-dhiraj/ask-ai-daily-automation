@@ -31,4 +31,4 @@ jobs:
           # Per-request LLM HTTP timeout (seconds); after this, sample is logged ERROR and run continues
           JUDGE_HTTP_TIMEOUT_SEC: "300"
           JUDGE_CONCURRENCY: "8"
-          EVAL_MAX_RUNTIME_SEC: "13800"
+          EVAL_MAX_RUNTIME_SEC: "14400"
