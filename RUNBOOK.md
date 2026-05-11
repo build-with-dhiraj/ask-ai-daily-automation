@@ -60,7 +60,145 @@ To stop caffeinate later: `kill $(cat /tmp/caffeinate.pid)`.
 
 ---
 
-## 1. Mac sleep prevention (most common failure)
+## 1. Persistent sleep prevention via LaunchAgent (one-time setup, recommended)
+
+### Why
+
+The `caffeinate -d -i -m -s -t 86400 &` line in section 0 has two limitations:
+the `-t 86400` 24-hour timer expires every day (so it must be re-run before
+each cron), and the process dies on reboot. If either step is forgotten, the
+Mac can sleep mid-eval, the GitHub Actions runner loses heartbeat, the in-progress
+job is cancelled, and the digest never posts.
+
+A user-LaunchAgent solves both: launchd starts `caffeinate` on every login and
+restarts it if it ever exits. There is no timer to renew and no manual step per
+run. The `pmset -a sleep 0 displaysleep 0 disksleep 0 powernap 0 womp 1`
+settings from section 0 remain the **primary** defense; this LaunchAgent is a
+belt-and-suspenders secondary guard so caffeinate keeps the Mac awake even if
+an OS update silently reverts `pmset` defaults.
+
+### The plist
+
+Save this content to `~/Library/LaunchAgents/com.pw.caffeinate.always.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pw.caffeinate.always</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-d</string>
+        <string>-i</string>
+        <string>-m</string>
+        <string>-s</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/caffeinate-launchagent.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/caffeinate-launchagent.err.log</string>
+</dict>
+</plist>
+```
+
+Flag meanings:
+- `-d` — prevent display sleep
+- `-i` — prevent idle sleep
+- `-m` — prevent disk sleep
+- `-s` — prevent system sleep (only effective on AC power)
+- `RunAtLoad=true` — launchd starts the process the moment the agent loads (i.e. login)
+- `KeepAlive=true` — launchd restarts the process immediately if it ever exits
+
+Note there is **no** `-t` flag here — without the timer, caffeinate runs
+indefinitely until launchd is told to stop it.
+
+### Install steps (one-time)
+
+```bash
+# 1. Stop any manually-started caffeinate first so we don't end up with duplicates
+[ -f /tmp/caffeinate.pid ] && kill "$(cat /tmp/caffeinate.pid)" 2>/dev/null; rm -f /tmp/caffeinate.pid
+
+# 2. Write the plist (paste the full XML content from above between the EOF markers)
+cat > ~/Library/LaunchAgents/com.pw.caffeinate.always.plist <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pw.caffeinate.always</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-d</string>
+        <string>-i</string>
+        <string>-m</string>
+        <string>-s</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/caffeinate-launchagent.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/caffeinate-launchagent.err.log</string>
+</dict>
+</plist>
+EOF
+
+# 3. Load it into launchd
+launchctl load ~/Library/LaunchAgents/com.pw.caffeinate.always.plist
+
+# 4. Verify it's running
+launchctl list | grep com.pw.caffeinate.always
+# Expect: <PID>  0  com.pw.caffeinate.always
+
+ps -ef | grep -v grep | grep "caffeinate -d -i -m -s"
+# Expect: one line showing the caffeinate process owned by launchd
+```
+
+### Verification (it survives a reboot)
+
+After installation, optionally reboot. After logging back in:
+
+```bash
+launchctl list | grep com.pw.caffeinate.always
+# Should still show a PID and exit code 0 — confirms RunAtLoad fired on login
+```
+
+### Uninstall (if you ever want to revert)
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.pw.caffeinate.always.plist
+rm ~/Library/LaunchAgents/com.pw.caffeinate.always.plist
+```
+
+### Interaction with pmset
+
+This LaunchAgent is a **secondary** safeguard. The primary defense remains the
+`pmset -a sleep 0 displaysleep 0 disksleep 0 powernap 0 womp 1` settings
+documented in section 0. The LaunchAgent caffeinate is an additional guard that
+survives:
+
+- macOS updates that occasionally reset `pmset` defaults
+- Login sessions where `pmset` settings weren't reapplied
+- Edge cases where another app overrides `pmset` at runtime
+
+If both `pmset` and the LaunchAgent are in place, the Mac will not sleep
+regardless of how it got there. Section 0's manual `caffeinate -t 86400` line
+becomes redundant once the LaunchAgent is installed — leaving it in place is
+harmless (multiple caffeinate instances are fine) but no longer required.
+
+---
+
+## 2. Mac sleep prevention (most common failure)
 
 The runner agent loses heartbeat when the Mac sleeps. GitHub then cancels the
 in-progress job and `upload-artifact` returns `403 Forbidden: job is completed`,
@@ -96,7 +234,7 @@ Battery panel or rerun `caffeinate`.
 
 ---
 
-## 2. Don't manually cancel runs
+## 3. Don't manually cancel runs
 
 Daily Eval runs to completion. There is no preset duration — it stops only
 when all stratified rows have been judged. With ~2,500 rows at 8-way
@@ -120,7 +258,7 @@ Symptom != root cause. "Long" is not the same as "stuck."
 
 ---
 
-## 3. One run at a time (concurrency group)
+## 4. One run at a time (concurrency group)
 
 All three workflows now share the GitHub Actions concurrency group
 `daily-automation` with `cancel-in-progress: false`:
@@ -155,7 +293,7 @@ and the digest renders identically to before.
 
 ---
 
-## 4. Runner workspace hygiene
+## 5. Runner workspace hygiene
 
 When `actions/checkout@v4` fails with `terminal prompts disabled` or hangs on
 `git submodule foreach`, the workspace is in a bad state. Nuke it:
@@ -178,7 +316,7 @@ or any time the checkout step throws prompt/submodule errors.
 
 ---
 
-## 5. Gitconfig note — `insteadOf` rule
+## 6. Gitconfig note — `insteadOf` rule
 
 The user's `~/.gitconfig` currently has:
 
@@ -200,7 +338,7 @@ git config --global --unset url."https://github.com/".insteadOf
 
 ---
 
-## 6. Monday morning checklist
+## 7. Monday morning checklist
 
 Run this every Monday before stakeholders check Slack. ~5 minutes.
 
@@ -231,5 +369,5 @@ Run this every Monday before stakeholders check Slack. ~5 minutes.
 5. **Last week's golden-smoke** — confirm Monday's `golden-smoke` run was green.
    (Monday-only workflow; quick sanity check on the golden set.)
 
-If any of (2)–(5) fail, start with §2 (don't cancel anything) and check the
+If any of (2)–(5) fail, start with §3 (don't cancel anything) and check the
 most recent run's logs in the Actions UI.
