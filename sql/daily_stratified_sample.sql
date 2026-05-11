@@ -1,5 +1,11 @@
 -- Daily stratified eval sample for v8 judge runner
 -- =============================================================================
+-- Target: ~1,000 total rows (down from previous ~3,650 cap, ~2,400 typical).
+-- Rationale: at ~4 judges/min throughput, 1,000 rows = ~4h wall-clock,
+-- which fits the 04:00–09:00 IST window before the runner network reconnects.
+-- Distribution preserved: downvote 350 / no_vote 350 / upvote 250 / outlier_long <=50.
+-- Per-chapter densities halved alongside global caps so chapter diversity holds.
+-- =============================================================================
 -- Dialect: Trino (json_extract_scalar, window functions).
 -- Metabase Question 33193 — POST /api/card/{id}/query/json
 --
@@ -100,8 +106,8 @@ downvote_final AS (
     FROM enriched e
     WHERE e.rating = 0
   ) dv
-  WHERE dv.rn_chapter <= 50
-    AND dv.rn_global <= 1500
+  WHERE dv.rn_chapter <= 25
+    AND dv.rn_global <= 350
 ),
 
 outlier_long_final AS (
@@ -211,8 +217,8 @@ upvote_final AS (
         x.answer_len,
         x.n_day,
         GREATEST(
-          LEAST(30, x.chapter_total),
-          CAST(CEIL(0.03 * x.chapter_total) AS INTEGER)
+          LEAST(15, x.chapter_total),
+          CAST(CEIL(0.015 * x.chapter_total) AS INTEGER)
         ) AS chapter_target,
         ROW_NUMBER() OVER (
           PARTITION BY x.chapter
@@ -223,9 +229,9 @@ upvote_final AS (
         FROM upvote_pool p
       ) x
     ) u
-    WHERE u.rn_chapter <= LEAST(30, u.chapter_target)
+    WHERE u.rn_chapter <= LEAST(15, u.chapter_target)
   ) u2
-  WHERE u2.rn_global <= 600
+  WHERE u2.rn_global <= 250
 ),
 
 taken_all AS (
@@ -296,8 +302,8 @@ no_vote_final AS (
         x.answer_len,
         x.n_day,
         GREATEST(
-          LEAST(30, x.chapter_total),
-          CAST(CEIL(0.15 * x.chapter_total) AS INTEGER)
+          LEAST(15, x.chapter_total),
+          CAST(CEIL(0.075 * x.chapter_total) AS INTEGER)
         ) AS chapter_target,
         ROW_NUMBER() OVER (
           PARTITION BY x.chapter
@@ -308,9 +314,9 @@ no_vote_final AS (
         FROM no_vote_pool p
       ) x
     ) n
-    WHERE n.rn_chapter <= LEAST(30, n.chapter_target)
+    WHERE n.rn_chapter <= LEAST(15, n.chapter_target)
   ) n2
-  WHERE n2.rn_global <= 1500
+  WHERE n2.rn_global <= 350
 )
 
 SELECT stratum, trace_id, doubt, ai_answer, transcript, ideal_answer,
