@@ -171,6 +171,16 @@ Mark not_judgable=true when:
 - Doubt is non-academic (greeting only, off-topic, PW product question, spam)
 - Doubt is unreadable due to encoding/formatting
 
+NOT_JUDGABLE — STRICT RULE FOR NON-ACADEMIC DOUBTS (highest precedence — apply BEFORE A/B/C/D/E):
+A doubt is non-academic (and therefore NOT_JUDGABLE) when ANY of the following holds:
+  • subject is empty, "unknown", or NOT one of the STEM subjects (Physics, Chemistry, Maths, Biology) — e.g. subject="PW Products", "Support", "Billing", "Account"
+  • chapter is empty AND subject is not a recognised STEM subject
+  • The doubt is about PW products/services/operations: refunds, batch enrolment, batch transfer, payment, login, app issues, course access, certificate, fee, scholarship process, support contact, etc.
+  • The doubt is a pure greeting / off-topic / spam (no academic content)
+In ALL such cases set not_judgable=true and overall_band="NOT_JUDGABLE", REGARDLESS of how well the AI handled the doubt. A polite, helpful, accurate handoff to PW support is STILL not academically judgable — it must not roll up as PASS, because the 5-axial rubric is undefined for non-STEM content. Do NOT score the AI's deflection quality on the academic rubric.
+
+Example: doubt="How do I get refund for my Lakshya batch?", subject="PW Products" → NOT_JUDGABLE (reason: "non-academic PW product question"), even if AI answer is perfect.
+
 DECISION LOGIC (apply exactly):
 1. If not_judgable: overall_band="NOT_JUDGABLE", overall_score=null
 2. Compute academic.passed = (no A1..A6 fired)
