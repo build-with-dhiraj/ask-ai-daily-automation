@@ -771,6 +771,79 @@ def load_eval_summary(summary_path: str) -> Optional[dict]:
         return None
 
 
+FEEDBACK_CLASSIFICATIONS_PATH = "/tmp/daily_feedback_classifications.json"
+
+
+def load_classifier_snapshot(path: str = FEEDBACK_CLASSIFICATIONS_PATH) -> Optional[dict]:
+    """Load the free-text classifier snapshot written by daily_feedback_classifier.py.
+
+    Returns None on any error (missing file, parse failure, wrong shape). The digest
+    treats None as "skip the section silently" — failures here must never block posting.
+    """
+    try:
+        with open(path) as _sf:
+            data = json.load(_sf)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def fmt_freetext_classification(snapshot: Optional[dict]) -> Optional[dict]:
+    """Render the free-text classifier Slack section block, or None to omit.
+
+    Omits silently when snapshot is missing or stopped_reason == "no_metabase_card"
+    (i.e. the feature is intentionally disabled).
+    """
+    if not snapshot:
+        return None
+    if snapshot.get("stopped_reason") == "no_metabase_card":
+        return None
+
+    n_classified = snapshot.get("n_classified") or 0
+    counts = snapshot.get("category_counts") or {}
+    other_samples = snapshot.get("other_samples") or []
+
+    if not isinstance(counts, dict) or not isinstance(other_samples, list):
+        return None
+
+    header = f"*Free-text feedback breakdown (yesterday)*  —  n={int(n_classified):,}"
+
+    sorted_counts = sorted(
+        ((str(k), int(v)) for k, v in counts.items() if isinstance(v, (int, float)) and v > 0),
+        key=lambda x: (-x[1], x[0]),
+    )
+    if sorted_counts:
+        count_lines = "\n".join(
+            f"  • {_slack_escape(cat)}: {cnt:,}" for cat, cnt in sorted_counts
+        )
+    else:
+        count_lines = "  _(no classified rows)_"
+
+    sample_lines = []
+    for s in other_samples[:3]:
+        if not isinstance(s, dict):
+            continue
+        subj = str(s.get("subject") or "").strip()
+        ch = str(s.get("chapter") or "").strip()
+        ft = str(s.get("free_text") or "").strip()
+        if not ft:
+            continue
+        ctx_bits = [b for b in (subj, ch) if b]
+        ctx = f" _({_slack_escape(' / '.join(ctx_bits))})_" if ctx_bits else ""
+        sample_lines.append(f"  • \"{_slack_escape(ft)}\"{ctx}")
+
+    body = f"{header}\n{count_lines}"
+    if sample_lines:
+        body += "\n*Sample \"Other\" feedback:*\n" + "\n".join(sample_lines)
+
+    return {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": _truncate_section(body)},
+    }
+
+
 def _eval_sample_counts(eval_summary: dict) -> Tuple[Optional[int], Optional[int]]:
     """M = Metabase pull size, N = judged count (`n_sampled` alias if present)."""
 
@@ -1081,7 +1154,7 @@ def build_blocks(
     divider: dict = {"type": "divider"}
 
     # Order: system health + student voice first (stakeholder onboarding); then context blocks.
-    return [
+    blocks: list = [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": f"\U0001f4ca Ask AI Daily Digest — {today_str}", "emoji": True},
@@ -1094,6 +1167,20 @@ def build_blocks(
         ),
         divider,
         section(f":speech_balloon: *User Comments on Downvotes (Langfuse, last 24h)*\n{scores_block}"),
+    ]
+
+    # Optional free-text classifier section — fail-soft: any error in this path is swallowed
+    # and the digest continues without it. The classifier job runs independently in CI.
+    try:
+        snap = load_classifier_snapshot()
+        ft_block = fmt_freetext_classification(snap)
+        if ft_block:
+            blocks.append(divider)
+            blocks.append(ft_block)
+    except Exception as e:
+        print(f"[warn] freetext classifier section skipped: {e}", file=sys.stderr)
+
+    blocks.extend([
         divider,
         section(f":thumbsdown: *Downvote Reasons — Academic (rolling 21d)*\n{academic_block}"),
         divider,
@@ -1117,7 +1204,8 @@ def build_blocks(
                 }
             ],
         },
-    ]
+    ])
+    return blocks
 
 
 def post_to_slack(blocks: list, fallback_text: str) -> bool:

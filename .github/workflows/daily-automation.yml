@@ -126,9 +126,43 @@ jobs:
           if-no-files-found: ignore
           retention-days: 2
 
+  classifier:
+    name: Free-text Classifier
+    needs: eval
+    if: always()
+    runs-on: self-hosted
+    timeout-minutes: 30
+    env:
+      AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
+      AZURE_API_KEY: ${{ secrets.AZURE_API_KEY }}
+      AZURE_API_VERSION: ${{ secrets.AZURE_API_VERSION }}
+      DEPLOYMENT_NAME: ${{ secrets.DEPLOYMENT_NAME }}
+      METABASE_URL: ${{ secrets.METABASE_URL }}
+      METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
+      METABASE_FREETEXT_CARD_ID: ${{ secrets.METABASE_FREETEXT_CARD_ID }}
+      LANGFUSE_TIMEOUT: "20"
+      LANGFUSE_TRACING_ENABLED: "false"
+      JUDGE_CONCURRENCY: "8"
+      FEEDBACK_CLASSIFIER_HTTP_TIMEOUT_SEC: "30"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: pip3 install openai
+      - name: Run classifier
+        run: python3 daily_feedback_classifier.py
+        continue-on-error: true
+      - name: Upload classification snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedback-classifications
+          path: /tmp/daily_feedback_classifications.json
+          if-no-files-found: ignore
+          retention-days: 2
+
   digest:
     name: Daily Digest
-    needs: eval
+    needs: [eval, classifier]
     runs-on: self-hosted
     if: always()
     timeout-minutes: 180
@@ -151,6 +185,24 @@ jobs:
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "1"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download classification snapshot (optional)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: feedback-classifications
+          path: /tmp/feedback_classification_download
+      - name: Place classification snapshot for digest read
+        if: always()
+        shell: bash
+        run: |
+          src="/tmp/feedback_classification_download/daily_feedback_classifications.json"
+          if [[ -f "$src" ]]; then
+            cp "$src" "/tmp/daily_feedback_classifications.json"
+            echo "[info] Classifier snapshot placed at /tmp/daily_feedback_classifications.json"
+          else
+            echo "[info] No classifier snapshot — digest will skip the new section"
+          fi
 
       - name: Download eval summary
         # The eval job may be cancelled mid-run (e.g. runner network drops on VPN reconnect),
