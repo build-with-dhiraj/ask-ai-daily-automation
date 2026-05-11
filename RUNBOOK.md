@@ -16,7 +16,17 @@ runaway-job backstop, not a target.
 
 The single largest source of run failures has been the Mac dropping wifi or
 going to sleep mid-eval. Apply these every time, especially the night before
-the 04:00 IST scheduled run:
+the 08:30 IST scheduled run:
+
+**Why 08:30 IST (03:00 UTC)?** Verified empirically on 2026-05-11 across 4 days
+of historical data: silver ETL for `astracdc.silver_conversational_query_table`
+(used by eval Q33193) consistently lands at ~00:55 UTC each day, and
+`central.silver_stream_logs` (used by digest Q33285) lands at ~02:08 UTC. The
+03:00 UTC cron gives a ~125-minute buffer past the silver ETL and ~52-minute
+buffer past stream_logs, and it puts Python's `date.today() - 1` (Mac in IST)
+in the same calendar day as Trino's UTC `CURRENT_DATE - 1`. The previous 22:30
+UTC schedule fired before either ETL completed and crossed a timezone boundary,
+which caused stale/duplicate Slack posts.
 
 ~~~bash
 # 1. Disable display + system sleep on AC power
@@ -54,7 +64,7 @@ To stop caffeinate later: `kill $(cat /tmp/caffeinate.pid)`.
 
 The runner agent loses heartbeat when the Mac sleeps. GitHub then cancels the
 in-progress job and `upload-artifact` returns `403 Forbidden: job is completed`,
-which kills the downstream digest. Keep the Mac awake during the **04:00–09:00
+which kills the downstream digest. Keep the Mac awake during the **08:30–13:00
 IST** run window every day.
 
 **System Settings**
@@ -124,7 +134,7 @@ is **not** cancelled. You can never have two of these competing for the single
 runner.
 
 Operator implication: if you fire a manual `workflow_dispatch` while the
-04:00 IST cron run is in progress, your manual run will sit in the queue until
+08:30 IST cron run is in progress, your manual run will sit in the queue until
 the cron run finishes. That's intentional. Don't fire dispatches expecting
 parallelism — there is one runner.
 
@@ -194,7 +204,7 @@ Run this every Monday before stakeholders check Slack. ~5 minutes.
    Expect the most recent **Daily Automation** = `success`.
 
 2. **Slack `#ask-ai-evals` (`C0B2KT5RQ0H`)** — open the channel.
-   Expect **two** messages timestamped between **04:00 and 08:00 IST today**:
+   Expect **two** messages timestamped between **08:30 and 12:00 IST today**:
    one eval scoreboard + one digest.
 
 3. **Digest health** — scroll today's digest message. None of these strings
