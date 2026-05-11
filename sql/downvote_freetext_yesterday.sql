@@ -1,7 +1,7 @@
--- Q<PENDING-ID> — Downvote Free-Text Feedback — last 2 days (Python filters to yesterday)
+-- Q33324 — Daily Downvote Free-Text Feedback (yesterday) — last 2 days (Python filters to yesterday)
 -- ============================================================
--- Prod Metabase: pending — set GitHub secret METABASE_FREETEXT_CARD_ID (digits only)
---                after creating this question and replace <PENDING-ID> in sql/README.md.
+-- Prod Metabase: https://metabase-prod.penpencil.co/question/33324
+-- GitHub secret: METABASE_FREETEXT_CARD_ID=33324
 -- Used by: daily_feedback_classifier.py (3rd job in Daily Automation)
 -- Time window: rolling 2 days in SQL; Python filters to feedback_date == yesterday
 --              (same robust pattern as Q23036 — wider net + Python filter survives TZ edges).
