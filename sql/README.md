@@ -13,7 +13,7 @@ All Metabase saved-question SQL used by Daily Eval and Daily Digest lives here. 
 | [Q33282](https://metabase-prod.penpencil.co/question/33282) — Behavior Followup | [`behavior_followup_burst.sql`](behavior_followup_burst.sql) | Daily Digest (silent-failure proxy: multi-turn burst) | yesterday |
 | [Q33283](https://metabase-prod.penpencil.co/question/33283) — Behavior Rephrase | [`behavior_rephrase_keywords.sql`](behavior_rephrase_keywords.sql) | Daily Digest (silent-failure proxy: rephrase/lang-switch rate) | yesterday |
 | [Q33285](https://metabase-prod.penpencil.co/question/33285) — VCP Stream Logs Summary | [`vcp_stream_logs_digest_summary.sql`](vcp_stream_logs_digest_summary.sql) | Daily Digest (API health) | yesterday |
-| Q&lt;PENDING-ID&gt; — Downvote Free-Text Feedback | [`downvote_freetext_yesterday.sql`](downvote_freetext_yesterday.sql) | Daily Feedback Classifier (`daily_feedback_classifier.py`) | rolling 2d (Python filters to yesterday) |
+| [Q33324](https://metabase-prod.penpencil.co/question/33324) — Daily Downvote Free-Text Feedback (yesterday) | [`downvote_freetext_yesterday.sql`](downvote_freetext_yesterday.sql) | Daily Feedback Classifier (`daily_feedback_classifier.py`) | rolling 2d (Python filters to yesterday) |
 
 ## Conventions
 
