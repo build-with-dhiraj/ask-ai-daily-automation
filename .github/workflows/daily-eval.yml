@@ -45,8 +45,8 @@ jobs:
           LANGFUSE_TRACING_ENABLED: "false"
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           # Per-request LLM HTTP timeout (seconds); after this, sample is logged ERROR and run continues
-          JUDGE_HTTP_TIMEOUT_SEC: "300"
-          JUDGE_CONCURRENCY: "8"
+          JUDGE_HTTP_TIMEOUT_SEC: "90"
+          JUDGE_CONCURRENCY: "16"
           # 0 = no soft cap; run to completion. The job's timeout-minutes: 600 (10h)
           # is the runaway backstop. Previously 14400 (4h), but daily-eval has no
           # hard duration requirement.

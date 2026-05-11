@@ -35,6 +35,14 @@ jobs:
 
       - name: Run daily eval
         run: python3 daily_eval.py
+        # Tuning rationale (set 2026-05-11):
+        # - JUDGE_CONCURRENCY=16: doubles parallel judges to ~8 judges/min throughput
+        #   (was 8 → ~4/min). If Azure deployment 429s appear in run logs, drop to 12.
+        # - JUDGE_HTTP_TIMEOUT_SEC=90: most calls return in 10-30s; a 300s timeout means
+        #   one stuck call holds a worker for 5min. 90s frees workers 3x faster.
+        # - LANGFUSE_TIMEOUT=20: covers both score-REST writes and any residual OTLP.
+        # - LANGFUSE_TRACING_ENABLED=false: disables unused OTLP exporter (SDK v3).
+        # - EVAL_MAX_RUNTIME_SEC=0: no soft cap; eval runs to completion (or GH 10h kill).
         env:
           AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
           AZURE_API_KEY: ${{ secrets.AZURE_API_KEY }}
@@ -57,9 +65,9 @@ jobs:
           # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
           LANGFUSE_TRACING_ENABLED: "false"
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          JUDGE_HTTP_TIMEOUT_SEC: "300"
+          JUDGE_HTTP_TIMEOUT_SEC: "90"
           # Concurrent LLM calls on this runner (ThreadPoolExecutor); raise to speed up large daily samples.
-          JUDGE_CONCURRENCY: "8"
+          JUDGE_CONCURRENCY: "16"
           # 0 = no soft cap; run until all rows judged. The job's timeout-minutes: 600
           # (10h) above is the runaway backstop, not a target. Previously 14400 (4h),
           # but daily-eval has no hard duration requirement — let it run to completion.
