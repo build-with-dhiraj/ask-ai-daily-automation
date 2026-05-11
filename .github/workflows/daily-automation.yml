@@ -60,8 +60,10 @@ jobs:
           JUDGE_HTTP_TIMEOUT_SEC: "300"
           # Concurrent LLM calls on this runner (ThreadPoolExecutor); raise to speed up large daily samples.
           JUDGE_CONCURRENCY: "8"
-          # Soft wall (4h) before Actions hard kill: finalize, flush Langfuse, write snapshot + Slack.
-          EVAL_MAX_RUNTIME_SEC: "14400"
+          # 0 = no soft cap; run until all rows judged. The job's timeout-minutes: 600
+          # (10h) above is the runaway backstop, not a target. Previously 14400 (4h),
+          # but daily-eval has no hard duration requirement — let it run to completion.
+          EVAL_MAX_RUNTIME_SEC: "0"
 
       # Guarantee a digest-readable JSON on disk so the artifact is never stale/missing keys
       # (digest C12 + upload both rely on this path).
