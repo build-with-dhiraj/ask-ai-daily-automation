@@ -48,8 +48,14 @@ jobs:
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
           # SDK HTTP timeout (seconds). Default is 5s, which is too tight under
           # transient Langfuse Cloud slowness — bump to 20s. Applies to score
-          # REST writes and any OTLP export.
+          # REST writes (OTLP export is disabled below).
           LANGFUSE_TIMEOUT: "20"
+          # Disable the SDK's auto-initialised OTLP trace exporter. We never call
+          # @observe() so it produces no useful signal, only "Failed to export
+          # span batch due to timeout (read timeout=4.999s)" noise. Score writes
+          # via langfuse.create_score() use a separate REST path and are unaffected.
+          # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
+          LANGFUSE_TRACING_ENABLED: "false"
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           JUDGE_HTTP_TIMEOUT_SEC: "300"
           # Concurrent LLM calls on this runner (ThreadPoolExecutor); raise to speed up large daily samples.
@@ -119,6 +125,8 @@ jobs:
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
       # SDK HTTP timeout (seconds) — see eval job env above for rationale.
       LANGFUSE_TIMEOUT: "20"
+      # Disable OTLP trace exporter — see eval job env above for rationale.
+      LANGFUSE_TRACING_ENABLED: "false"
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
