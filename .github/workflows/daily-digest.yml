@@ -35,6 +35,14 @@ jobs:
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+      # SDK HTTP timeout (seconds) — bump from default 5s to 20s for transient
+      # Langfuse Cloud slowness on REST endpoints.
+      LANGFUSE_TIMEOUT: "20"
+      # Disable the SDK's auto-initialised OTLP trace exporter. We never call
+      # @observe(), so the exporter only produces noise. Langfuse REST reads
+      # (observations, scores) are unaffected.
+      # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
+      LANGFUSE_TRACING_ENABLED: "false"
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       EVAL_SUMMARY_PATH: /tmp/daily_eval_yesterday_summary.json
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}

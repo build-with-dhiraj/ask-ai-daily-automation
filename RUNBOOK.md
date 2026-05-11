@@ -5,9 +5,48 @@ reliable on the single self-hosted Mac runner. Only covers what the **operator**
 do. Python internals and workflow internals live in code/comments.
 
 The runner: a Mac that hosts the GitHub Actions agent. Workspace lives at
-`/Users/pw/actions-runner/_work/ask-ai-daily-automation/`. The Daily Eval job
-intentionally runs up to **4 hours** (`EVAL_MAX_RUNTIME_SEC=14400`); the job
-timeout is **600 minutes** to leave headroom for finalize + artifact upload.
+`/Users/pw/actions-runner/_work/ask-ai-daily-automation/`. The Daily Eval job has
+**no preset runtime** — it stops when all stratified rows have been judged
+(`EVAL_MAX_RUNTIME_SEC=0`). The job's `timeout-minutes: 600` (10h) is a
+runaway-job backstop, not a target.
+
+---
+
+## 0. Pre-run checklist (Mac runner) — run BEFORE every scheduled cron or manual dispatch
+
+The single largest source of run failures has been the Mac dropping wifi or
+going to sleep mid-eval. Apply these every time, especially the night before
+the 04:00 IST scheduled run:
+
+~~~bash
+# 1. Disable display + system sleep on AC power
+sudo pmset -c displaysleep 0 disksleep 0 sleep 0
+
+# 2. Disable App Nap / Power Nap globally
+sudo pmset -a powernap 0
+
+# 3. Confirm Wake-for-Network-Access is ON
+sudo pmset -a womp 1
+
+# 4. Verify all settings
+pmset -g | grep -E 'sleep|disksleep|displaysleep|powernap|womp'
+# Expect: displaysleep 0, disksleep 0, sleep 0, powernap 0, womp 1
+
+# 5. Run caffeinate as a 24h background daemon
+caffeinate -d -i -m -s -t 86400 &
+echo $! > /tmp/caffeinate.pid
+
+# 6. Confirm runner agent is alive
+launchctl list | grep actions.runner
+# Should show: <pid>  0  actions.runner.<repo>.<runner-name>
+
+# 7. Prefer ethernet over wifi for the runner Mac.
+#    System Settings → Network → drag Ethernet above Wi-Fi in service order.
+~~~
+
+If `caffeinate` is already running, that's fine — multiple instances are harmless.
+
+To stop caffeinate later: `kill $(cat /tmp/caffeinate.pid)`.
 
 ---
 
@@ -47,23 +86,25 @@ Battery panel or rerun `caffeinate`.
 
 ---
 
-## 2. Do NOT manually cancel runs
+## 2. Don't manually cancel runs
 
-Daily Eval intentionally runs up to **4 hours**. A run that has been "stuck" for
-30, 60, or 90 minutes is almost certainly **fine, just slow** — the judge stage
-is sequential LLM calls across hundreds of samples. The `finalize_eval_run` path
-always posts a partial-sample Slack message when it hits the soft cap, so even a
-slow run produces output.
+Daily Eval runs to completion. There is no preset duration — it stops only
+when all stratified rows have been judged. With ~2,500 rows at 8-way
+concurrency this is currently **~50min–6h** depending on Azure throughput
+and per-call latency.
 
-Cancelling mid-run kills the `upload-artifact` step → no `eval-summary`
-artifact → downstream digest has nothing to read.
+Don't cancel mid-run unless the run logs show **no progress markers for
+>10 minutes** (the script logs `[N/M] stratum trace_id verdict +K scores`
+every few seconds). Cancelling kills the `upload-artifact` step, which in
+turn kills the downstream digest (no artifact = no digest). Make a note of
+the run ID and the last log line before cancelling, and open a GitHub
+issue so the failure has a trail.
 
-**If a run genuinely looks stuck** (no new log line for **>5 minutes** in the
-GitHub Actions live log, not just "running for a while"):
-
-1. Copy the run ID (e.g. `25655569039`).
-2. Copy the last log line shown.
-3. Open a GitHub issue with both. Then — only then — cancel.
+The workflow's `timeout-minutes: 600` (10h) is a runaway-job backstop,
+not a goal. `EVAL_MAX_RUNTIME_SEC=0` (default since
+`cleanup-mess/eval-env-tuning`) means the script does **not** impose its
+own soft cap — the only stop conditions are "all rows judged" or the 10h
+backstop.
 
 Symptom != root cause. "Long" is not the same as "stuck."
 

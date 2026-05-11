@@ -35,8 +35,19 @@ jobs:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+          # SDK HTTP timeout (seconds). Default 5s is too tight under transient
+          # Langfuse Cloud slowness — bump to 20s for score REST writes.
+          LANGFUSE_TIMEOUT: "20"
+          # Disable the SDK's auto-initialised OTLP trace exporter. We never call
+          # @observe(), so the exporter only produces "Failed to export span batch"
+          # noise. Score writes (create_score) use REST and are unaffected.
+          # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
+          LANGFUSE_TRACING_ENABLED: "false"
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           # Per-request LLM HTTP timeout (seconds); after this, sample is logged ERROR and run continues
           JUDGE_HTTP_TIMEOUT_SEC: "300"
           JUDGE_CONCURRENCY: "8"
-          EVAL_MAX_RUNTIME_SEC: "14400"
+          # 0 = no soft cap; run to completion. The job's timeout-minutes: 600 (10h)
+          # is the runaway backstop. Previously 14400 (4h), but daily-eval has no
+          # hard duration requirement.
+          EVAL_MAX_RUNTIME_SEC: "0"

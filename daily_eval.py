@@ -111,13 +111,23 @@ def _judge_concurrency() -> int:
 
 
 def _eval_max_runtime_sec() -> float | None:
+    """Read EVAL_MAX_RUNTIME_SEC. Returns None for missing/blank/"0"/negative
+    (interpreted as "no soft cap, run to completion"). Positive values are
+    floored at 60s to avoid pathological tiny budgets.
+
+    Workflow default is "0" (no cap); the job's GitHub Actions
+    `timeout-minutes: 600` (10h) is the runaway backstop.
+    """
     raw = os.environ.get("EVAL_MAX_RUNTIME_SEC", "").strip()
     if not raw:
         return None
     try:
-        return max(60.0, float(raw))
+        val = float(raw)
     except ValueError:
         return None
+    if val <= 0:
+        return None
+    return max(60.0, val)
 
 
 def _judge_chunk_size(concurrency: int) -> int:
