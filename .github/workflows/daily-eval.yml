@@ -35,6 +35,9 @@ jobs:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+          # SDK HTTP timeout (seconds). Default 5s is too tight under transient
+          # Langfuse Cloud slowness — bump to 20s for score REST writes.
+          LANGFUSE_TIMEOUT: "20"
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           # Per-request LLM HTTP timeout (seconds); after this, sample is logged ERROR and run continues
           JUDGE_HTTP_TIMEOUT_SEC: "300"

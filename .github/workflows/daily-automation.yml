@@ -46,6 +46,10 @@ jobs:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+          # SDK HTTP timeout (seconds). Default is 5s, which is too tight under
+          # transient Langfuse Cloud slowness — bump to 20s. Applies to score
+          # REST writes and any OTLP export.
+          LANGFUSE_TIMEOUT: "20"
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           JUDGE_HTTP_TIMEOUT_SEC: "300"
           # Concurrent LLM calls on this runner (ThreadPoolExecutor); raise to speed up large daily samples.
@@ -113,6 +117,8 @@ jobs:
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+      # SDK HTTP timeout (seconds) — see eval job env above for rationale.
+      LANGFUSE_TIMEOUT: "20"
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
