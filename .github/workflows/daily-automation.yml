@@ -16,8 +16,10 @@ jobs:
   eval:
     name: Daily Eval
     runs-on: self-hosted
-    # Eval soft-stops via EVAL_MAX_RUNTIME_SEC between chunks; extra margin avoids losing Slack/snapshot on_kill.
-    timeout-minutes: 300
+    # Hard cap for the WHOLE job (all steps). Must exceed EVAL_MAX_RUNTIME_SEC/60 plus Metabase,
+    # finalize, Langfuse flush, normalize, and artifact upload—or GitHub ends the job and
+    # upload-artifact fails with: (403) Forbidden: job is completed.
+    timeout-minutes: 600
     steps:
       - uses: actions/checkout@v4
 
