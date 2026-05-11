@@ -22,7 +22,7 @@ Optional tuning:
   METABASE_CARD_RETRIES (default 3) — all Metabase card queries
   LANGFUSE_OBSERVATION_PAGE_SIZE (default 500)
   LANGFUSE_ERROR_MAX_ITEMS / LANGFUSE_SCORE_MAX_ITEMS (default 500000)
-  LANGFUSE_ERROR_MAX_PAGES / LANGFUSE_SCORE_MAX_PAGES (0 = unlimited pages)
+  LANGFUSE_ERROR_MAX_PAGES / LANGFUSE_SCORE_MAX_PAGES (default 60 pages; 0 = unlimited)
   DIGEST_MIN_SCORE_ROWS_FOR_RATE (default 500) — sparse Langfuse scores: hide misleading rate vs all traces
   DIGEST_FAIL_ON_LANGFUSE_ERROR — set to 0/false/no to allow posting when Langfuse fetches fail.
       In GitHub Actions the default is strict: bad Langfuse config fails the job before Slack.
@@ -104,8 +104,8 @@ METABASE_CARD_RETRIES = max(1, _env_int("METABASE_CARD_RETRIES", 3))
 LANGFUSE_PAGE_SIZE = max(1, min(1000, _env_int("LANGFUSE_OBSERVATION_PAGE_SIZE", 500)))
 LANGFUSE_ERROR_MAX_ITEMS = max(1000, _env_int("LANGFUSE_ERROR_MAX_ITEMS", 500_000))
 LANGFUSE_SCORE_MAX_ITEMS = max(1000, _env_int("LANGFUSE_SCORE_MAX_ITEMS", 500_000))
-LANGFUSE_ERROR_MAX_PAGES = _env_int("LANGFUSE_ERROR_MAX_PAGES", 0)
-LANGFUSE_SCORE_MAX_PAGES = _env_int("LANGFUSE_SCORE_MAX_PAGES", 0)
+LANGFUSE_ERROR_MAX_PAGES = _env_int("LANGFUSE_ERROR_MAX_PAGES", 60)
+LANGFUSE_SCORE_MAX_PAGES = _env_int("LANGFUSE_SCORE_MAX_PAGES", 60)
 
 # Downvotes: hide misleading "rate vs all traces" when Langfuse score rows are sparse.
 DIGEST_MIN_SCORE_ROWS_FOR_RATE = max(0, _env_int("DIGEST_MIN_SCORE_ROWS_FOR_RATE", 500))
@@ -176,7 +176,9 @@ def _http_get_langfuse(url: str, headers: dict, timeout: int = 90) -> dict:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
             last_err = exc
-            if exc.code in (429, 502, 503) and attempt < 4:
+            # 408/504 added: Langfuse Cloud returns gateway timeouts past ~page 50
+            # under heavy 24h pagination; without retry, one bad page kills the fetch.
+            if exc.code in (408, 429, 502, 503, 504) and attempt < 4:
                 time.sleep(min(30.0, 2.0**attempt))
                 continue
             raise
@@ -218,6 +220,27 @@ def _preflight_langfuse_or_exit() -> None:
     except Exception as exc:
         print(f"[error] Langfuse preflight failed: {exc!r}", file=sys.stderr)
         sys.exit(1)
+
+
+def _assert_langfuse_or_exit(ok: bool, where: str, detail: str = "") -> None:
+    """Fail-fast post-fetch gate.
+
+    Under the strict gate (`DIGEST_FAIL_ON_LANGFUSE_ERROR=1`, default in CI),
+    abort with exit code 1 the moment any individual Langfuse fetch fails, so
+    we never assemble a degraded Slack post with `_fetch failed_` filler text.
+    Emits one structured log line for one-shot diagnosis.
+    """
+    if not _digest_fail_on_langfuse_error():
+        return
+    if ok:
+        return
+    extra = f" {detail}" if detail else ""
+    print(
+        f"[error] langfuse_fetch_failed where={where}{extra} "
+        "(set DIGEST_FAIL_ON_LANGFUSE_ERROR=0 to allow degraded post)",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def _http_post_json(
@@ -1143,23 +1166,35 @@ def main() -> int:
 
     _warn_metabase_card_env_var("METABASE_BEHAVIOR_FOLLOWUP_CARD_ID", BEHAVIOR_FOLLOWUP_CARD_ID)
     _warn_metabase_card_env_var("METABASE_BEHAVIOR_REPHRASE_CARD_ID", BEHAVIOR_REPHRASE_CARD_ID)
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        if not BEHAVIOR_FOLLOWUP_CARD_ID.strip() and not BEHAVIOR_REPHRASE_CARD_ID.strip():
-            print(
-                "[warn] METABASE_BEHAVIOR_* are empty in this job. If secrets exist under "
-                "Settings → Actions, ensure `.github/workflows/daily-digest.yml` passes "
-                "`METABASE_BEHAVIOR_FOLLOWUP_CARD_ID` and `METABASE_BEHAVIOR_REPHRASE_CARD_ID` "
-                "into the digest step `env:` block.",
-                file=sys.stderr,
-            )
+    # Per-var diagnostic: name exactly which behaviour card env var was empty/unset.
+    # The env reads at module scope already `.strip()`, so whitespace-only secrets
+    # are treated as empty here. If a digest shows "behaviour cards not configured",
+    # these lines tell the operator which GitHub Actions secret needs fixing.
+    if not BEHAVIOR_FOLLOWUP_CARD_ID:
+        print(
+            "[warn] METABASE_BEHAVIOR_FOLLOWUP_CARD_ID is empty after strip — "
+            "check the secret exists in GitHub Settings → Secrets and is wired "
+            "into the digest workflow `env:` block.",
+            file=sys.stderr,
+        )
+    if not BEHAVIOR_REPHRASE_CARD_ID:
+        print(
+            "[warn] METABASE_BEHAVIOR_REPHRASE_CARD_ID is empty after strip — "
+            "check the secret exists in GitHub Settings → Secrets and is wired "
+            "into the digest workflow `env:` block.",
+            file=sys.stderr,
+        )
 
     academic_rows = fetch_metabase_card(24973, retries=METABASE_CARD_RETRIES)
     nonacademic_rows = fetch_metabase_card(24974, retries=METABASE_CARD_RETRIES)
     dump_rows = fetch_metabase_card(23036, retries=METABASE_CARD_RETRIES)
 
     score_items, dv_in_sample, scores_ok, scores_hit_cap = fetch_langfuse_scores()
+    _assert_langfuse_or_exit(scores_ok, "fetch_langfuse_scores")
     error_obs, total_errors, errors_ok, errors_hit_cap = fetch_langfuse_errors()
+    _assert_langfuse_or_exit(errors_ok, "fetch_langfuse_errors")
     total_traces, traces_ok = fetch_langfuse_traces_total()
+    _assert_langfuse_or_exit(traces_ok, "fetch_langfuse_traces_total")
 
     follow_cfg = BEHAVIOR_FOLLOWUP_CARD_ID.isdigit()
     follow_rows = (
@@ -1175,23 +1210,9 @@ def main() -> int:
     )
     eval_summary = load_eval_summary(EVAL_SUMMARY_PATH)
 
-    if _digest_fail_on_langfuse_error() and (not errors_ok or not scores_ok or not traces_ok):
-        bad = [
-            name
-            for name, ok in (
-                ("errors", errors_ok),
-                ("scores", scores_ok),
-                ("traces", traces_ok),
-            )
-            if not ok
-        ]
-        print(
-            "[error] Langfuse fetch failed for: "
-            + ", ".join(bad)
-            + " — not posting digest (fix credentials/host or set DIGEST_FAIL_ON_LANGFUSE_ERROR=0).",
-            file=sys.stderr,
-        )
-        return 1
+    # Per-fetch fail-fast gating is handled by `_assert_langfuse_or_exit` immediately
+    # after each fetch above — by this point all three Langfuse fetches succeeded
+    # (or the strict gate is off and we accept degraded blocks).
 
     sl_cfg = STREAM_LOGS_CARD_ID.isdigit()
     stream_logs_rows: Optional[List] = None
