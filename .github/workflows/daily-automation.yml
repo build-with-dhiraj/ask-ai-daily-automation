@@ -8,8 +8,14 @@ name: Daily Automation
 
 on:
   schedule:
-    # 22:30 UTC == 04:00 IST (UTC+5:30); digest runs after eval on same workflow.
-    - cron: '30 22 * * *'
+    # 03:00 UTC == 08:30 IST (UTC+5:30); digest runs after eval on same workflow.
+    # Why 03:00 UTC: silver ETL for astracdc.silver_conversational_query_table
+    # (used by eval Q33193) lands at ~00:55 UTC each day; central.silver_stream_logs
+    # (used by digest Q33285) lands at ~02:08 UTC. 03:00 UTC gives 125-min buffer
+    # on silver and 52-min on stream_logs, and Trino UTC `CURRENT_DATE - 1` aligns
+    # with Python `date.today() - 1` (Mac in IST) at this hour. Verified empirically
+    # 2026-05-11 across 4 days of historical cdp_ingested_at timestamps.
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
 # Single-queue across Daily Automation + Daily Eval + Daily Digest so the one

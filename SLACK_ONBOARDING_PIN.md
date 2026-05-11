@@ -1,6 +1,6 @@
 # `#ask-ai-evals` — channel onboarding (pin this)
 
-**Ops:** **Daily Automation** runs on **`main`** on a **self-hosted** runner (keep the machine online). Schedule: **~04:00 IST** (`30 22 * * *` UTC). Both **Daily Eval** and **Daily Digest** are **one workflow**: eval first, then digest. Eval writes a small **snapshot JSON**; the workflow uploads it as an **artifact** so digest always picks up judge hotspots for the cross-check. Expect the heaviest work in **eval** (LLM judges + optional **4h** soft time budget); digest usually follows shortly after unless eval runs long.
+**Ops:** **Daily Automation** runs on **`main`** on a **self-hosted** runner (keep the machine online). Schedule: **~08:30 IST** (`0 3 * * *` UTC). Both **Daily Eval** and **Daily Digest** are **one workflow**: eval first, then digest. Eval writes a small **snapshot JSON**; the workflow uploads it as an **artifact** so digest always picks up judge hotspots for the cross-check. Expect the heaviest work in **eval** (LLM judges + optional **4h** soft time budget); digest usually follows shortly after unless eval runs long.
 
 ---
 
@@ -66,7 +66,7 @@ Copy into a pinned message.
 ```
 *#ask-ai-evals — daily evaluation feed*
 
-This channel is the *automated* quality stream for *Ask AI*: two posts per *Daily Automation* run (~04:00 IST start, self-hosted runner). *Product* owns what the eval program measures; the posts are the source of truth for the daily snapshot.
+This channel is the *automated* quality stream for *Ask AI*: two posts per *Daily Automation* run (~08:30 IST start, self-hosted runner). *Product* owns what the eval program measures; the posts are the source of truth for the daily snapshot.
 
 *Post 1 — Daily Eval*  
 *Metabase* hands a *stratified sample* of traces for *calendar yesterday*. An *LLM judge* (fixed rubric on *Azure*) scores each row; optional writebacks to *Langfuse*. You get pass/neutral/fail-style health, strata, and cost. If the run hits a *time budget*, numbers reflect *N judgements completed*—by design.
