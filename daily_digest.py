@@ -22,7 +22,7 @@ Optional tuning:
   METABASE_CARD_RETRIES (default 3) — all Metabase card queries
   LANGFUSE_OBSERVATION_PAGE_SIZE (default 500)
   LANGFUSE_ERROR_MAX_ITEMS / LANGFUSE_SCORE_MAX_ITEMS (default 500000)
-  LANGFUSE_ERROR_MAX_PAGES / LANGFUSE_SCORE_MAX_PAGES (0 = unlimited pages)
+  LANGFUSE_ERROR_MAX_PAGES / LANGFUSE_SCORE_MAX_PAGES (default 60 pages; 0 = unlimited)
   DIGEST_MIN_SCORE_ROWS_FOR_RATE (default 500) — sparse Langfuse scores: hide misleading rate vs all traces
   DIGEST_FAIL_ON_LANGFUSE_ERROR — set to 0/false/no to allow posting when Langfuse fetches fail.
       In GitHub Actions the default is strict: bad Langfuse config fails the job before Slack.
@@ -104,8 +104,8 @@ METABASE_CARD_RETRIES = max(1, _env_int("METABASE_CARD_RETRIES", 3))
 LANGFUSE_PAGE_SIZE = max(1, min(1000, _env_int("LANGFUSE_OBSERVATION_PAGE_SIZE", 500)))
 LANGFUSE_ERROR_MAX_ITEMS = max(1000, _env_int("LANGFUSE_ERROR_MAX_ITEMS", 500_000))
 LANGFUSE_SCORE_MAX_ITEMS = max(1000, _env_int("LANGFUSE_SCORE_MAX_ITEMS", 500_000))
-LANGFUSE_ERROR_MAX_PAGES = _env_int("LANGFUSE_ERROR_MAX_PAGES", 0)
-LANGFUSE_SCORE_MAX_PAGES = _env_int("LANGFUSE_SCORE_MAX_PAGES", 0)
+LANGFUSE_ERROR_MAX_PAGES = _env_int("LANGFUSE_ERROR_MAX_PAGES", 60)
+LANGFUSE_SCORE_MAX_PAGES = _env_int("LANGFUSE_SCORE_MAX_PAGES", 60)
 
 # Downvotes: hide misleading "rate vs all traces" when Langfuse score rows are sparse.
 DIGEST_MIN_SCORE_ROWS_FOR_RATE = max(0, _env_int("DIGEST_MIN_SCORE_ROWS_FOR_RATE", 500))
@@ -176,7 +176,9 @@ def _http_get_langfuse(url: str, headers: dict, timeout: int = 90) -> dict:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
             last_err = exc
-            if exc.code in (429, 502, 503) and attempt < 4:
+            # 408/504 added: Langfuse Cloud returns gateway timeouts past ~page 50
+            # under heavy 24h pagination; without retry, one bad page kills the fetch.
+            if exc.code in (408, 429, 502, 503, 504) and attempt < 4:
                 time.sleep(min(30.0, 2.0**attempt))
                 continue
             raise
