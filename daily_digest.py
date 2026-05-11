@@ -1166,15 +1166,24 @@ def main() -> int:
 
     _warn_metabase_card_env_var("METABASE_BEHAVIOR_FOLLOWUP_CARD_ID", BEHAVIOR_FOLLOWUP_CARD_ID)
     _warn_metabase_card_env_var("METABASE_BEHAVIOR_REPHRASE_CARD_ID", BEHAVIOR_REPHRASE_CARD_ID)
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        if not BEHAVIOR_FOLLOWUP_CARD_ID.strip() and not BEHAVIOR_REPHRASE_CARD_ID.strip():
-            print(
-                "[warn] METABASE_BEHAVIOR_* are empty in this job. If secrets exist under "
-                "Settings → Actions, ensure `.github/workflows/daily-digest.yml` passes "
-                "`METABASE_BEHAVIOR_FOLLOWUP_CARD_ID` and `METABASE_BEHAVIOR_REPHRASE_CARD_ID` "
-                "into the digest step `env:` block.",
-                file=sys.stderr,
-            )
+    # Per-var diagnostic: name exactly which behaviour card env var was empty/unset.
+    # The env reads at module scope already `.strip()`, so whitespace-only secrets
+    # are treated as empty here. If a digest shows "behaviour cards not configured",
+    # these lines tell the operator which GitHub Actions secret needs fixing.
+    if not BEHAVIOR_FOLLOWUP_CARD_ID:
+        print(
+            "[warn] METABASE_BEHAVIOR_FOLLOWUP_CARD_ID is empty after strip — "
+            "check the secret exists in GitHub Settings → Secrets and is wired "
+            "into the digest workflow `env:` block.",
+            file=sys.stderr,
+        )
+    if not BEHAVIOR_REPHRASE_CARD_ID:
+        print(
+            "[warn] METABASE_BEHAVIOR_REPHRASE_CARD_ID is empty after strip — "
+            "check the secret exists in GitHub Settings → Secrets and is wired "
+            "into the digest workflow `env:` block.",
+            file=sys.stderr,
+        )
 
     academic_rows = fetch_metabase_card(24973, retries=METABASE_CARD_RETRIES)
     nonacademic_rows = fetch_metabase_card(24974, retries=METABASE_CARD_RETRIES)
