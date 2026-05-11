@@ -222,6 +222,27 @@ def _preflight_langfuse_or_exit() -> None:
         sys.exit(1)
 
 
+def _assert_langfuse_or_exit(ok: bool, where: str, detail: str = "") -> None:
+    """Fail-fast post-fetch gate.
+
+    Under the strict gate (`DIGEST_FAIL_ON_LANGFUSE_ERROR=1`, default in CI),
+    abort with exit code 1 the moment any individual Langfuse fetch fails, so
+    we never assemble a degraded Slack post with `_fetch failed_` filler text.
+    Emits one structured log line for one-shot diagnosis.
+    """
+    if not _digest_fail_on_langfuse_error():
+        return
+    if ok:
+        return
+    extra = f" {detail}" if detail else ""
+    print(
+        f"[error] langfuse_fetch_failed where={where}{extra} "
+        "(set DIGEST_FAIL_ON_LANGFUSE_ERROR=0 to allow degraded post)",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _http_post_json(
     url: str,
     headers: Dict,
@@ -1160,8 +1181,11 @@ def main() -> int:
     dump_rows = fetch_metabase_card(23036, retries=METABASE_CARD_RETRIES)
 
     score_items, dv_in_sample, scores_ok, scores_hit_cap = fetch_langfuse_scores()
+    _assert_langfuse_or_exit(scores_ok, "fetch_langfuse_scores")
     error_obs, total_errors, errors_ok, errors_hit_cap = fetch_langfuse_errors()
+    _assert_langfuse_or_exit(errors_ok, "fetch_langfuse_errors")
     total_traces, traces_ok = fetch_langfuse_traces_total()
+    _assert_langfuse_or_exit(traces_ok, "fetch_langfuse_traces_total")
 
     follow_cfg = BEHAVIOR_FOLLOWUP_CARD_ID.isdigit()
     follow_rows = (
@@ -1177,23 +1201,9 @@ def main() -> int:
     )
     eval_summary = load_eval_summary(EVAL_SUMMARY_PATH)
 
-    if _digest_fail_on_langfuse_error() and (not errors_ok or not scores_ok or not traces_ok):
-        bad = [
-            name
-            for name, ok in (
-                ("errors", errors_ok),
-                ("scores", scores_ok),
-                ("traces", traces_ok),
-            )
-            if not ok
-        ]
-        print(
-            "[error] Langfuse fetch failed for: "
-            + ", ".join(bad)
-            + " — not posting digest (fix credentials/host or set DIGEST_FAIL_ON_LANGFUSE_ERROR=0).",
-            file=sys.stderr,
-        )
-        return 1
+    # Per-fetch fail-fast gating is handled by `_assert_langfuse_or_exit` immediately
+    # after each fetch above — by this point all three Langfuse fetches succeeded
+    # (or the strict gate is off and we accept degraded blocks).
 
     sl_cfg = STREAM_LOGS_CARD_ID.isdigit()
     stream_logs_rows: Optional[List] = None
