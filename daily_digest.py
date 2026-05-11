@@ -101,7 +101,9 @@ def _env_int(name: str, default: int) -> int:
 METABASE_CARD_RETRIES = max(1, _env_int("METABASE_CARD_RETRIES", 3))
 
 # Langfuse public API — page until empty or caps. LANGFUSE_*_MAX_PAGES=0 means no page cap.
-LANGFUSE_PAGE_SIZE = max(1, min(1000, _env_int("LANGFUSE_OBSERVATION_PAGE_SIZE", 500)))
+# Cloud Langfuse caps `limit` at 100 on /api/public/observations and /api/public/scores
+# (Zod validator: "Too big: expected number to be <=100"); sending limit>100 → HTTP 400.
+LANGFUSE_PAGE_SIZE = max(1, min(100, _env_int("LANGFUSE_OBSERVATION_PAGE_SIZE", 100)))
 LANGFUSE_ERROR_MAX_ITEMS = max(1000, _env_int("LANGFUSE_ERROR_MAX_ITEMS", 500_000))
 LANGFUSE_SCORE_MAX_ITEMS = max(1000, _env_int("LANGFUSE_SCORE_MAX_ITEMS", 500_000))
 LANGFUSE_ERROR_MAX_PAGES = _env_int("LANGFUSE_ERROR_MAX_PAGES", 60)
