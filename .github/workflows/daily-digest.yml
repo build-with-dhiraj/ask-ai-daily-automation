@@ -17,6 +17,13 @@ on:
   # Schedule moved to daily-automation.yml. Use workflow_dispatch for ad-hoc runs.
   workflow_dispatch:
 
+# Shares the queue with daily-automation.yml + daily-eval.yml so the single
+# self-hosted Mac runner never has two of these in flight at once. A second
+# dispatch QUEUES; it does not cancel an in-progress run. See RUNBOOK.md.
+concurrency:
+  group: daily-automation
+  cancel-in-progress: false
+
 jobs:
   digest:
     runs-on: self-hosted
