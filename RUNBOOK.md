@@ -141,6 +141,18 @@ parallelism — there is one runner.
 `golden-smoke.yml` and `github-hosted-connectivity-smoke.yml` are deliberately
 **not** in this group (Monday-only / GitHub-hosted ubuntu-latest).
 
+### Free-text feedback classifier (third job)
+
+Daily Automation runs a third job — **Free-text Classifier** — between `eval` and
+`digest`. It classifies yesterday's free-text downvote comments into 11 categories
+and uploads a JSON artifact the digest reads. **Failure of this job does NOT block
+the digest.** The digest's `actions/download-artifact` step is `continue-on-error`,
+and the in-process read (`load_classifier_snapshot`) returns `None` on any error —
+the new Slack section is silently omitted. To disable the classifier cleanly, omit
+the `METABASE_FREETEXT_CARD_ID` secret: the job logs `[info] … skipping
+classification`, writes a minimal snapshot with `stopped_reason="no_metabase_card"`,
+and the digest renders identically to before.
+
 ---
 
 ## 4. Runner workspace hygiene
