@@ -335,6 +335,18 @@ def normalize_metabase_rows(rows: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def post_to_slack(webhook_url: str, text: str, timeout: float = 15.0) -> None:
+    # Production-only Slack post. GitHub Actions sets GITHUB_ACTIONS=true on every
+    # job (github-hosted AND self-hosted). Local shells do not. This guard prevents
+    # accidental Slack posts from `python3 daily_eval.py` runs on developer
+    # machines (which may have SLACK_WEBHOOK_URL in .env for testing).
+    # To force a local post (rare; debugging only): export GITHUB_ACTIONS=true.
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
+        print(
+            "[info] Not running in GitHub Actions — skipping Slack post. "
+            "Set GITHUB_ACTIONS=true to override (debugging only).",
+            file=sys.stderr,
+        )
+        return
     import urllib.request
     body = json.dumps({"text": text}).encode("utf-8")
     req = urllib.request.Request(

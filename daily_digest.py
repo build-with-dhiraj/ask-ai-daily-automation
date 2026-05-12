@@ -1209,6 +1209,18 @@ def build_blocks(
 
 
 def post_to_slack(blocks: list, fallback_text: str) -> bool:
+    # Production-only Slack post. GitHub Actions sets GITHUB_ACTIONS=true on every
+    # job (github-hosted AND self-hosted). Local shells do not. This guard prevents
+    # accidental Slack posts from `python3 daily_digest.py` runs on developer
+    # machines (which may have SLACK_WEBHOOK_URL in .env for testing).
+    # To force a local post (rare; debugging only): export GITHUB_ACTIONS=true.
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
+        print(
+            "[info] Not running in GitHub Actions — skipping Slack post. "
+            "Set GITHUB_ACTIONS=true to override (debugging only).",
+            file=sys.stderr,
+        )
+        return False
     if not SLACK_WEBHOOK:
         print("[warn] SLACK_WEBHOOK_URL not set — skipping Slack post.", file=sys.stderr)
         return False
