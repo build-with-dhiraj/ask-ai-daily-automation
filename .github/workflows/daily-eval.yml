@@ -44,7 +44,8 @@ jobs:
           # noise. Score writes (create_score) use REST and are unaffected.
           # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
           LANGFUSE_TRACING_ENABLED: "false"
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ github.event_name == 'schedule' && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
+          SLACK_TARGET: ${{ github.event_name == 'schedule' && 'prod' || 'staging' }}
           # Bumped 90 → 300s: per-LLM-call HTTP timeout. A 90s cap meant a
           # single sticky Azure call would error out (ERROR sample) rather than
           # ride out a transient slow response.

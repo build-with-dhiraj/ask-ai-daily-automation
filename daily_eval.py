@@ -87,7 +87,13 @@ def _eval_marker_path(prefix: str = "eval-posted") -> Path:
         or str(Path.home() / ".ask-ai-daily-automation" / "state")
     )
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return Path(base) / f"{prefix}-{today_utc}.marker"
+    # Scope the marker by SLACK_TARGET so a staging (workflow_dispatch) run
+    # cannot block the next prod (schedule) cron, and vice versa. Default to
+    # "prod" so locally-run posts use the safest fallback (skip same-day repost).
+    target = (os.environ.get("SLACK_TARGET") or "prod").strip().lower()
+    if target not in ("prod", "staging"):
+        target = "prod"
+    return Path(base) / f"{prefix}-{target}-{today_utc}.marker"
 
 
 def _eval_already_posted_today(prefix: str = "eval-posted") -> bool:

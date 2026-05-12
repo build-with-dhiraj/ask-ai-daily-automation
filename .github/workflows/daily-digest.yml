@@ -45,7 +45,8 @@ jobs:
       # (observations, scores) are unaffected.
       # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
       LANGFUSE_TRACING_ENABLED: "false"
-      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_WEBHOOK_URL: ${{ github.event_name == 'schedule' && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
+      SLACK_TARGET: ${{ github.event_name == 'schedule' && 'prod' || 'staging' }}
       EVAL_SUMMARY_PATH: /tmp/daily_eval_yesterday_summary.json
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}

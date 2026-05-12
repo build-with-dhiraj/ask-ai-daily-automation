@@ -36,6 +36,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Show Slack target
+        env:
+          SLACK_TARGET: ${{ github.event_name == 'schedule' && 'prod' || 'staging' }}
+        run: |
+          echo "📨 Slack target: $(echo "$SLACK_TARGET" | tr '[:lower:]' '[:upper:]') (event: ${{ github.event_name }})"
+
       - name: Install dependencies
         run: pip3 install openai langfuse
 
@@ -73,7 +79,8 @@ jobs:
           # via langfuse.create_score() use a separate REST path and are unaffected.
           # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
           LANGFUSE_TRACING_ENABLED: "false"
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ github.event_name == 'schedule' && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
+          SLACK_TARGET: ${{ github.event_name == 'schedule' && 'prod' || 'staging' }}
           # Bumped 90 → 300s: per-LLM-call HTTP timeout in judge_runner. A 90s
           # cap meant a single sticky Azure call would error out (ERROR sample)
           # rather than ride out a transient slow response. With 300s + the
@@ -200,7 +207,8 @@ jobs:
       LANGFUSE_TIMEOUT: "120"
       # Disable OTLP trace exporter — see eval job env above for rationale.
       LANGFUSE_TRACING_ENABLED: "false"
-      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_WEBHOOK_URL: ${{ github.event_name == 'schedule' && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
+      SLACK_TARGET: ${{ github.event_name == 'schedule' && 'prod' || 'staging' }}
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
@@ -211,6 +219,10 @@ jobs:
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show Slack target
+        run: |
+          echo "📨 Slack target: $(echo "$SLACK_TARGET" | tr '[:lower:]' '[:upper:]') (event: ${{ github.event_name }})"
 
       - name: Download classification snapshot (optional)
         continue-on-error: true
