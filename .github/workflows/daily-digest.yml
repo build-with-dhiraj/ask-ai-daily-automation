@@ -51,6 +51,13 @@ jobs:
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
+      # Phase 1 digest restructure: digest now calls Azure OpenAI gpt-4.1 for the
+      # "Top 3 Insights" section. Same secret names as eval/classifier — no new
+      # secrets needed. The LLM call is best-effort; any failure falls back to
+      # a placeholder and the digest still posts.
+      AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_API_KEY }}
+      DEPLOYMENT_NAME: ${{ secrets.DEPLOYMENT_NAME }}
       # Flipped 1 → 0 (2026-05-12): degraded post is preferred over silent miss.
       # Mirrors the change in daily-automation.yml; see commentary there.
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
@@ -76,5 +83,46 @@ jobs:
           check_digits_if_set METABASE_BEHAVIOR_REPHRASE_CARD_ID
           check_digits_if_set METABASE_STREAM_LOGS_CARD_ID
 
+      - name: Download yesterday's digest snapshot (optional)
+        # First-ever run: no artifact exists → continue-on-error keeps the job
+        # alive so the digest still posts (Top 3 Insights renders the
+        # "(insights begin tomorrow once a baseline exists)" placeholder).
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-snapshot
+          path: /tmp/digest_snapshot_download
+
+      - name: Place digest snapshot for digest read
+        if: always()
+        shell: bash
+        run: |
+          src="/tmp/digest_snapshot_download/daily_digest_yesterday_summary.json"
+          if [[ -f "$src" ]]; then
+            cp "$src" "/tmp/daily_digest_yesterday_summary.json"
+            echo "[info] Yesterday's digest snapshot placed at /tmp/daily_digest_yesterday_summary.json"
+          else
+            echo "[info] No yesterday digest snapshot — Top 3 Insights will use first-run placeholder"
+          fi
+
+      - name: Install Python deps for Top 3 Insights LLM call
+        # Phase 1 digest restructure: digest now uses the openai SDK for Azure
+        # OpenAI gpt-4.1 calls (Top 3 Insights). Mirrors the install in
+        # daily-automation.yml's eval job.
+        run: pip3 install openai langfuse
+
       - name: Run daily digest
         run: python3 daily_digest.py
+
+      - name: Upload today's digest snapshot for tomorrow
+        # Phase 1 digest restructure: today's digest writes a compact JSON
+        # snapshot which tomorrow's digest job downloads to compute Top 3
+        # Insights day-on-day deltas. `if: always()` so a failed Slack post
+        # still hands off the snapshot.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-snapshot
+          path: /tmp/daily_digest_yesterday_summary.json
+          if-no-files-found: ignore
+          retention-days: 2
