@@ -56,7 +56,49 @@ import urllib.error
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
+
+
+# ---------------------------------------------------------------------------
+# Idempotency guard — prevents duplicate Slack posts on the same UTC day.
+# The cron job is `0 3 * * *` UTC on a self-hosted runner; if the workflow is
+# retried, re-triggered, or accidentally invoked twice for the same UTC date,
+# the marker file makes the second invocation a no-op. Marker is written ONLY
+# after a successful Slack post (HTTP 200 "ok"), so a failed post can be
+# retried. Set FORCE_REPOST=1 to bypass (debugging only — do NOT set in cron).
+# ---------------------------------------------------------------------------
+
+def _idempotency_marker_path(prefix: str = "digest-posted") -> Path:
+    base = (
+        os.environ.get("DIGEST_STATE_DIR", "").strip()
+        or str(Path.home() / ".ask-ai-daily-automation" / "state")
+    )
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return Path(base) / f"{prefix}-{today_utc}.marker"
+
+
+def _already_posted_today(prefix: str = "digest-posted") -> bool:
+    if os.environ.get("FORCE_REPOST", "").strip() == "1":
+        return False
+    return _idempotency_marker_path(prefix).exists()
+
+
+def _write_posted_marker(prefix: str = "digest-posted") -> None:
+    marker = _idempotency_marker_path(prefix)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            datetime.now(timezone.utc).isoformat() + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        # Non-fatal: the Slack post already succeeded. Just log so the next
+        # invocation is not silently blocked by a stale/missing marker.
+        print(
+            f"[warn] Could not write idempotency marker {marker}: {repr(exc)}",
+            file=sys.stderr,
+        )
 
 # ---------------------------------------------------------------------------
 # Config
@@ -1390,10 +1432,26 @@ def main() -> int:
         )
         return 0
 
+    # Idempotency: skip the Slack post if we already posted for today's UTC
+    # date. The check runs only when we'd actually post (we're past --dry-run
+    # and intend to call the webhook), so cron retries on the same UTC day
+    # become no-ops. FORCE_REPOST=1 bypasses for debugging.
+    if _already_posted_today("digest-posted"):
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        print(
+            f"[info] already posted {today_utc}, skipping",
+            file=sys.stderr,
+        )
+        return 0
+
     posted = post_to_slack(blocks, fallback_text)
     exit_code = 0
     if not posted:
         exit_code = 1
+    else:
+        # Record the successful post so a second invocation on this UTC day
+        # is a no-op. Write AFTER 200 OK so failed posts can be retried.
+        _write_posted_marker("digest-posted")
     if not mb_academic_ok and not mb_nonacademic_ok and not mb_dump_ok:
         exit_code = 1
     if DIGEST_STRICT_STREAM_LOGS and sl_cfg and stream_logs_rows is None:
