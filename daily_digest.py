@@ -164,6 +164,13 @@ LANGFUSE_SCORE_MAX_PAGES = _env_int("LANGFUSE_SCORE_MAX_PAGES", 60)
 # Downvotes: hide misleading "rate vs all traces" when Langfuse score rows are sparse.
 DIGEST_MIN_SCORE_ROWS_FOR_RATE = max(0, _env_int("DIGEST_MIN_SCORE_ROWS_FOR_RATE", 500))
 
+# Per-request socket timeout for Langfuse public REST GETs (seconds).
+# Bumped from a hard-coded 90s to env-controlled (default 300, clamp 30..900) —
+# Langfuse Cloud /api/public/observations slows to 60–120s past page ~50 under
+# heavy 24h pagination, and the hardcoded 90s sometimes tripped before the
+# retry loop got a chance to back off.
+LANGFUSE_GET_TIMEOUT_SEC = max(30, min(900, _env_int("LANGFUSE_GET_TIMEOUT_SEC", 300)))
+
 # If true, workflow fails when METABASE_STREAM_LOGS_CARD_ID is set but Metabase fetch fails.
 DIGEST_STRICT_STREAM_LOGS = os.environ.get("DIGEST_STRICT_STREAM_LOGS", "").strip().lower() in (
     "1",
@@ -220,10 +227,16 @@ def _langfuse_auth_header() -> str:
     return f"Basic {token}"
 
 
-def _http_get_langfuse(url: str, headers: dict, timeout: int = 90) -> dict:
-    """GET with backoff on rate-limit / transient server errors."""
+def _http_get_langfuse(url: str, headers: dict, timeout: Optional[int] = None) -> dict:
+    """GET with backoff on rate-limit / transient server errors.
+
+    Defaults to env-controlled LANGFUSE_GET_TIMEOUT_SEC (default 300s).
+    8 total attempts with bounded exponential backoff (10/20/40/80/120/120/120/120s).
+    """
+    if timeout is None:
+        timeout = LANGFUSE_GET_TIMEOUT_SEC
     last_err: Optional[BaseException] = None
-    for attempt in range(5):
+    for attempt in range(8):
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -232,8 +245,9 @@ def _http_get_langfuse(url: str, headers: dict, timeout: int = 90) -> dict:
             last_err = exc
             # 408/504 added: Langfuse Cloud returns gateway timeouts past ~page 50
             # under heavy 24h pagination; without retry, one bad page kills the fetch.
-            if exc.code in (408, 429, 502, 503, 504) and attempt < 4:
-                time.sleep(min(30.0, 2.0**attempt))
+            # Cumulative max sleep over 7 retries: 10+20+40+80+120+120+120 = 510s ~ 8.5 min.
+            if exc.code in (408, 429, 502, 503, 504) and attempt < 7:
+                time.sleep(min(120.0, 10.0 * 2.0**attempt))
                 continue
             raise
     if last_err:
@@ -257,7 +271,10 @@ def _preflight_langfuse_or_exit() -> None:
         f"?fromTimestamp={urllib.parse.quote(from_24h)}&limit=1"
     )
     try:
-        _http_get_langfuse(url, {"Authorization": _langfuse_auth_header()}, timeout=45)
+        # Preflight: bumped 45 → 120s. Single trace lookup should be fast,
+        # but a slow first connect to Langfuse Cloud during a partial outage
+        # used to fail this gate before any retry could fire.
+        _http_get_langfuse(url, {"Authorization": _langfuse_auth_header()}, timeout=120)
     except urllib.error.HTTPError as exc:
         body = ""
         try:
