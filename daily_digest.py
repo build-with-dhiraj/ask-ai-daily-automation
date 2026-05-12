@@ -1307,33 +1307,73 @@ def post_to_slack(blocks: list, fallback_text: str) -> bool:
             "unfurl_media": False,
         }
     ).encode()
-    req = urllib.request.Request(
-        SLACK_WEBHOOK,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            status = resp.getcode()
-            raw = resp.read().decode().strip()
-    except Exception as exc:
-        print(f"[error] Slack request failed: {repr(exc)}", file=sys.stderr)
-        return False
-    if status != 200:
-        print(f"[error] Slack HTTP {status}: {raw}", file=sys.stderr)
-        return False
-    if raw == "ok":
-        return True
-    try:
-        body = json.loads(raw)
-        if body.get("ok") is True:
+
+    # Retry policy: at most 1 retry (so worst case is 2 POSTs). We deliberately
+    # cap retries here because urllib cannot tell us whether a read-timeout
+    # happened before or after Slack received the bytes; a wider retry window
+    # turns "Slack post failed" into "two daily digests in #channel". The brief
+    # accepts a missed post over a duplicate.
+    retryable_codes = (429, 502, 503, 504)
+
+    for attempt in range(2):
+        req = urllib.request.Request(
+            SLACK_WEBHOOK,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            # Bumped 60 → 180 to absorb Slack edge-node slow first-byte under
+            # incident conditions; matches the patience we already grant
+            # Metabase and Langfuse.
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                status = resp.getcode()
+                raw = resp.read().decode().strip()
+        except urllib.error.HTTPError as exc:
+            if exc.code in retryable_codes and attempt == 0:
+                print(
+                    f"[warn] Slack HTTP {exc.code} on attempt {attempt + 1}; "
+                    "sleeping 5s before single retry",
+                    file=sys.stderr,
+                )
+                time.sleep(5)
+                continue
+            print(f"[error] Slack request failed: {exc!r}", file=sys.stderr)
+            return False
+        except urllib.error.URLError as exc:
+            # Pre-send / handshake failure on attempt 0 → retry once. After
+            # attempt 1, give up; a second connect failure within 5s usually
+            # means Slack is genuinely unreachable, not flaky.
+            if attempt == 0:
+                print(
+                    f"[warn] Slack URLError on attempt {attempt + 1}: {exc!r}; "
+                    "sleeping 5s before single retry",
+                    file=sys.stderr,
+                )
+                time.sleep(5)
+                continue
+            print(f"[error] Slack request failed after retry: {exc!r}", file=sys.stderr)
+            return False
+        except Exception as exc:
+            print(f"[error] Slack request failed: {repr(exc)}", file=sys.stderr)
+            return False
+
+        if status != 200:
+            print(f"[error] Slack HTTP {status}: {raw}", file=sys.stderr)
+            return False
+        if raw == "ok":
             return True
-        print(f"[error] Slack webhook response: {raw}", file=sys.stderr)
-        return False
-    except json.JSONDecodeError:
-        print(f"[error] Slack unexpected response body: {raw}", file=sys.stderr)
-        return False
+        try:
+            body = json.loads(raw)
+            if body.get("ok") is True:
+                return True
+            print(f"[error] Slack webhook response: {raw}", file=sys.stderr)
+            return False
+        except json.JSONDecodeError:
+            print(f"[error] Slack unexpected response body: {raw}", file=sys.stderr)
+            return False
+
+    return False
 
 
 def main() -> int:
