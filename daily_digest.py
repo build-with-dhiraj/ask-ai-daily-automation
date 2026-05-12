@@ -1198,12 +1198,54 @@ def fmt_top_insights(
 
     Returns a string suitable for embedding under a "Top 3 Insights" header.
     Failure modes:
+      • Azure creds missing/empty   → "(insights unavailable today)" placeholder
+                                      (must run BEFORE the snapshot check —
+                                       missing creds is a digest-config error,
+                                       not a first-run state)
       • yesterday_snapshot is None  → first-run placeholder (no Azure call)
       • Azure call raises           → "(insights unavailable today)" placeholder
       • Output has zero digit chars → same fallback (proxy for missing number citations)
 
     NEVER raises; always returns a string. The digest must keep posting.
     """
+    # SRE review fix: judge_runner.get_openai_client() calls sys.exit(...) when
+    # required Azure env vars are missing — sys.exit raises SystemExit, which
+    # is BaseException, NOT Exception. Our `except Exception` wrapper below
+    # would NOT catch it, and the digest job would hard-crash with no Slack
+    # post. Pre-check here so a future credential rotation to empty values
+    # degrades to the placeholder instead of taking the digest down.
+    #
+    # Names mirror judge_runner.get_openai_client: api_key from either
+    # AZURE_API_KEY or AZURE_OPENAI_API_KEY; endpoint from either
+    # AZURE_ENDPOINT or AZURE_OPENAI_ENDPOINT; deployment from DEPLOYMENT_NAME
+    # or AZURE_DEPLOYMENT_NAME. We do NOT modify judge_runner — eval and
+    # classifier callers legitimately want the loud sys.exit on missing creds.
+    api_key_present = bool(
+        (os.environ.get("AZURE_API_KEY") or os.environ.get("AZURE_OPENAI_API_KEY") or "").strip()
+    )
+    endpoint_present = bool(
+        (os.environ.get("AZURE_ENDPOINT") or os.environ.get("AZURE_OPENAI_ENDPOINT") or "").strip()
+    )
+    deployment_present = bool(
+        (os.environ.get("DEPLOYMENT_NAME") or os.environ.get("AZURE_DEPLOYMENT_NAME") or "").strip()
+    )
+    missing = [
+        name
+        for name, present in (
+            ("AZURE_API_KEY", api_key_present),
+            ("AZURE_ENDPOINT", endpoint_present),
+            ("DEPLOYMENT_NAME", deployment_present),
+        )
+        if not present
+    ]
+    if missing:
+        print(
+            f"[warn] Top 3 Insights skipped — Azure env vars missing or empty: "
+            f"{', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return "_(insights unavailable today)_"
+
     if yesterday_snapshot is None:
         return "_(insights begin tomorrow once a baseline exists)_"
 

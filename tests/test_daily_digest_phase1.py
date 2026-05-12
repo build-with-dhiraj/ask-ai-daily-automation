@@ -60,15 +60,28 @@ def _make_mock_openai_client(content: str):
 class TestFmtTopInsights(unittest.TestCase):
     def setUp(self) -> None:
         self.mod = _load_digest()
-        # Provide a deployment name so the call path doesn't bail early
+        # Provide all three Azure env vars so fmt_top_insights' SRE-fix
+        # pre-check passes and we exercise the LLM-call paths under test.
+        # The dedicated TestFmtTopInsightsMissingCreds class covers the
+        # missing-creds short-circuit separately.
+        self._saved_env = {
+            k: os.environ.get(k)
+            for k in ("DEPLOYMENT_NAME", "AZURE_API_KEY", "AZURE_ENDPOINT")
+        }
         os.environ["DEPLOYMENT_NAME"] = "gpt-4.1-test"
+        os.environ["AZURE_API_KEY"] = "test-key"
+        os.environ["AZURE_ENDPOINT"] = "https://test.openai.azure.com"
         # Patch sleep so retries are instant
         self._sleep_patch = mock.patch("time.sleep")
         self._sleep_patch.start()
 
     def tearDown(self) -> None:
         self._sleep_patch.stop()
-        os.environ.pop("DEPLOYMENT_NAME", None)
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     def test_first_run_no_snapshot_skips_llm(self) -> None:
         """yesterday_snapshot=None → placeholder, NO Azure call."""
@@ -470,6 +483,122 @@ class TestBuildBlocksPhase1Order(unittest.TestCase):
             isinstance(b, dict) and "fields" in b for b in blocks
         )
         self.assertTrue(has_fields_block, "Merged 21d table must use fields block")
+
+
+# ---------------------------------------------------------------------------
+# SRE-review regression — judge_runner.get_openai_client() calls sys.exit on
+# missing Azure creds. sys.exit raises SystemExit (BaseException), NOT
+# Exception, so the `except Exception` wrapper in fmt_top_insights /
+# _call_top_insights_llm would NOT catch it — the digest job would hard-crash
+# with no Slack post. fmt_top_insights now pre-checks the required Azure env
+# vars and short-circuits to the placeholder before reaching get_openai_client.
+# ---------------------------------------------------------------------------
+
+
+class TestFmtTopInsightsMissingCreds(unittest.TestCase):
+    """Pre-check Azure env vars to avoid SystemExit propagating from
+    judge_runner.get_openai_client when creds are missing/empty."""
+
+    def setUp(self) -> None:
+        self.mod = _load_digest()
+        # Snapshot env so we can restore in tearDown — we mutate broadly here.
+        self._saved_env = {
+            k: os.environ.get(k)
+            for k in (
+                "AZURE_API_KEY",
+                "AZURE_OPENAI_API_KEY",
+                "AZURE_ENDPOINT",
+                "AZURE_OPENAI_ENDPOINT",
+                "DEPLOYMENT_NAME",
+                "AZURE_DEPLOYMENT_NAME",
+            )
+        }
+
+    def tearDown(self) -> None:
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _clear_all_azure_env(self) -> None:
+        for k in self._saved_env:
+            os.environ.pop(k, None)
+
+    def test_missing_azure_creds_returns_placeholder_does_not_raise(self) -> None:
+        """The core SRE regression: with NO Azure env set and a yesterday
+        snapshot present (so we'd otherwise call the LLM), fmt_top_insights
+        must return the placeholder without raising SystemExit, and must
+        NOT have called _call_top_insights_llm at all."""
+        self._clear_all_azure_env()
+        with mock.patch.object(
+            self.mod, "_call_top_insights_llm"
+        ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
+            # If the bug were unfixed, this call would propagate SystemExit
+            # from judge_runner.get_openai_client via _call_top_insights_llm.
+            out = self.mod.fmt_top_insights({"x": 1}, {"date": "2026-05-12"})
+        self.assertIn("insights unavailable today", out)
+        self.assertEqual(
+            llm.call_count,
+            0,
+            "_call_top_insights_llm must NOT be called when Azure creds are missing",
+        )
+
+    def test_empty_string_creds_treated_as_missing(self) -> None:
+        """Whitespace-only / empty-string secret values (the rotation-gone-wrong
+        scenario the SRE flagged) must take the same short-circuit path."""
+        self._clear_all_azure_env()
+        os.environ["AZURE_API_KEY"] = "   "
+        os.environ["AZURE_ENDPOINT"] = ""
+        os.environ["DEPLOYMENT_NAME"] = "\t\n"
+        with mock.patch.object(
+            self.mod, "_call_top_insights_llm"
+        ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
+            out = self.mod.fmt_top_insights({"x": 1}, {"date": "2026-05-12"})
+        self.assertIn("insights unavailable today", out)
+        self.assertEqual(llm.call_count, 0)
+
+    def test_pre_check_runs_before_first_run_check(self) -> None:
+        """Missing creds + missing snapshot: the missing-creds branch wins
+        because it's a digest-config error, not a first-run state. The
+        operator should see the unavailable placeholder (with a warn log
+        naming the missing vars), not the first-run "begin tomorrow" line."""
+        self._clear_all_azure_env()
+        with mock.patch.object(
+            self.mod, "_call_top_insights_llm"
+        ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
+            out = self.mod.fmt_top_insights({"x": 1}, None)
+        self.assertIn("insights unavailable today", out)
+        self.assertNotIn("insights begin tomorrow", out)
+        self.assertEqual(llm.call_count, 0)
+
+    def test_partial_creds_only_endpoint_set_still_short_circuits(self) -> None:
+        """Endpoint set but api_key missing: get_openai_client would sys.exit
+        on the missing api_key. Pre-check must catch this."""
+        self._clear_all_azure_env()
+        os.environ["AZURE_ENDPOINT"] = "https://test.openai.azure.com"
+        os.environ["DEPLOYMENT_NAME"] = "gpt-4.1-test"
+        # AZURE_API_KEY left unset
+        with mock.patch.object(
+            self.mod, "_call_top_insights_llm"
+        ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
+            out = self.mod.fmt_top_insights({"x": 1}, {"date": "2026-05-12"})
+        self.assertIn("insights unavailable today", out)
+        self.assertEqual(llm.call_count, 0)
+
+    def test_fallback_endpoint_env_var_accepted(self) -> None:
+        """AZURE_OPENAI_ENDPOINT (fallback name in get_openai_client) should
+        also satisfy the pre-check, mirroring judge_runner's behaviour."""
+        self._clear_all_azure_env()
+        os.environ["AZURE_OPENAI_API_KEY"] = "test-key"
+        os.environ["AZURE_OPENAI_ENDPOINT"] = "https://test.openai.azure.com"
+        os.environ["DEPLOYMENT_NAME"] = "gpt-4.1-test"
+        with mock.patch.object(
+            self.mod, "_call_top_insights_llm", return_value="1. valid 100"
+        ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
+            out = self.mod.fmt_top_insights({"x": 1}, {"date": "2026-05-12"})
+        self.assertNotIn("insights unavailable today", out)
+        self.assertEqual(llm.call_count, 1)
 
 
 # ---------------------------------------------------------------------------
