@@ -402,30 +402,81 @@ def normalize_metabase_rows(rows: list[dict]) -> list[dict]:
 # Slack post (incoming webhook)
 # ---------------------------------------------------------------------------
 
-def post_to_slack(webhook_url: str, text: str, timeout: float = 15.0) -> None:
-    # Production-only Slack post. GitHub Actions sets GITHUB_ACTIONS=true on every
-    # job (github-hosted AND self-hosted). Local shells do not. This guard prevents
-    # accidental Slack posts from `python3 daily_eval.py` runs on developer
-    # machines (which may have SLACK_WEBHOOK_URL in .env for testing).
-    # To force a local post (rare; debugging only): export GITHUB_ACTIONS=true.
+def post_to_slack(webhook_url: str, text: str, timeout: float = 120.0) -> bool:
+    """Post to Slack incoming webhook with bounded retry. Returns True on success.
+
+    Returns False (rather than the previous silent `None`) when:
+      - the GITHUB_ACTIONS guard fires (local run, no post attempted)
+      - the webhook responds with a non-`ok` body (Slack validation error)
+      - a non-retryable error is raised
+      - the single retry is exhausted
+
+    Retry policy mirrors `daily_digest.post_to_slack`: at most one retry on
+    `URLError` (covers connect/handshake failures) or HTTPError code in
+    {429, 502, 503, 504}. We deliberately do NOT retry on read-timeout after
+    sending bytes: urllib can't distinguish "Slack got the payload" from "Slack
+    didn't", and a duplicate post is worse than a miss.
+
+    The bool return is a contract change from the previous `-> None`; the
+    marker write at the call site is now conditional on a True return so a
+    silent non-`ok` body no longer suppresses the next-day repost.
+    """
     if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
         print(
             "[info] Not running in GitHub Actions — skipping Slack post. "
             "Set GITHUB_ACTIONS=true to override (debugging only).",
             file=sys.stderr,
         )
-        return
+        return False
     import urllib.request
-    body = json.dumps({"text": text}).encode("utf-8")
-    req = urllib.request.Request(
-        webhook_url, data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read().decode("utf-8")
-        if body.strip() != "ok":
-            print(f"⚠️  Slack webhook returned non-ok: {body}")
+    import urllib.error
+
+    body_bytes = json.dumps({"text": text}).encode("utf-8")
+    retryable_codes = (429, 502, 503, 504)
+
+    for attempt in range(2):  # initial + at most 1 retry
+        req = urllib.request.Request(
+            webhook_url, data=body_bytes,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                resp_body = resp.read().decode("utf-8")
+            if resp_body.strip() == "ok":
+                return True
+            # 200 with a non-`ok` body == Slack validation error; never
+            # retryable (re-sending the same payload will fail identically).
+            print(f"⚠️  Slack webhook returned non-ok: {resp_body}")
+            return False
+        except urllib.error.HTTPError as exc:
+            if exc.code in retryable_codes and attempt == 0:
+                print(
+                    f"[warn] Slack HTTP {exc.code} on attempt {attempt + 1}; "
+                    "sleeping 5s before single retry",
+                    file=sys.stderr,
+                )
+                time.sleep(5)
+                continue
+            print(f"⚠️  Slack webhook HTTP {exc.code}: {exc!r}")
+            return False
+        except urllib.error.URLError as exc:
+            # Treat as pre-send connect/handshake failure — safe to retry.
+            # urllib does not distinguish before/after-send for URLError, but a
+            # duplicate Slack post on a connect-side flake is the lesser evil
+            # vs a silent miss; bounded to 1 retry caps duplicate risk.
+            if attempt == 0:
+                print(
+                    f"[warn] Slack URLError on attempt {attempt + 1}: {exc!r}; "
+                    "sleeping 5s before single retry",
+                    file=sys.stderr,
+                )
+                time.sleep(5)
+                continue
+            print(f"⚠️  Slack webhook failed after retry: {exc!r}")
+            return False
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -976,14 +1027,21 @@ def main() -> int:
         return 0
 
     try:
-        post_to_slack(webhook, block)
-        print("✅ Posted to Slack.")
-        # Record successful post so a second invocation on this UTC day is a
-        # no-op. Write AFTER the post returns without exception.
-        _eval_write_posted_marker("eval-posted")
+        posted = post_to_slack(webhook, block)
     except Exception as e:
         print(f"❌ Slack post failed: {e}")
         return 1
+    if not posted:
+        # post_to_slack already logged the reason (non-ok body, HTTP error,
+        # local-run guard, etc.). Mirror digest behaviour: exit 1 so the
+        # workflow surfaces a red run, and DO NOT write the idempotency
+        # marker — that way a same-day re-dispatch can actually retry.
+        print("❌ Slack post did not succeed (see warnings above).")
+        return 1
+    print("✅ Posted to Slack.")
+    # Record successful post so a second invocation on this UTC day is a
+    # no-op. Write AFTER post_to_slack returns True.
+    _eval_write_posted_marker("eval-posted")
 
     if judge_outcome.stopped_reason == "complete" and os.path.exists(checkpoint_file):
         try:
