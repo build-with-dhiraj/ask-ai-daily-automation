@@ -472,5 +472,97 @@ class TestBuildBlocksPhase1Order(unittest.TestCase):
         self.assertTrue(has_fields_block, "Merged 21d table must use fields block")
 
 
+# ---------------------------------------------------------------------------
+# Architect-review regression — snapshot must be written EVEN when the
+# idempotency-marker check fires the early return. Otherwise any same-day
+# rerun (staging test, cron retry, manual repost) silently leaves tomorrow's
+# Top 3 Insights without a baseline.
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotWrittenEvenWhenMarkerSkip(unittest.TestCase):
+    """End-to-end main() test with all upstream I/O mocked."""
+
+    def setUp(self) -> None:
+        self.mod = _load_digest()
+        # Mock every upstream so main() runs through to the marker check
+        # without hitting any real network or filesystem-state surface area.
+        self._patches = [
+            mock.patch.object(self.mod, "_preflight_langfuse_or_exit"),
+            mock.patch.object(self.mod, "fetch_metabase_card", return_value=[]),
+            mock.patch.object(
+                self.mod, "fetch_metabase_card_detailed", return_value=([], None)
+            ),
+            mock.patch.object(
+                self.mod,
+                "fetch_langfuse_scores",
+                return_value=([], 0, True, False),
+            ),
+            mock.patch.object(
+                self.mod,
+                "fetch_langfuse_errors",
+                return_value=([], 0, True, False),
+            ),
+            mock.patch.object(
+                self.mod, "fetch_langfuse_traces_total", return_value=(0, True)
+            ),
+            mock.patch.object(self.mod, "load_eval_summary", return_value=None),
+            mock.patch.object(self.mod, "load_classifier_snapshot", return_value=None),
+            # Force the LLM section to take the first-run path so no Azure
+            # client is constructed.
+            mock.patch.object(self.mod, "_load_yesterday_snapshot", return_value=None),
+            mock.patch.object(sys, "stderr", io.StringIO()),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self) -> None:
+        for p in self._patches:
+            p.stop()
+
+    def test_snapshot_written_even_when_marker_skip(self) -> None:
+        """Architect-caught regression: snapshot write must happen BEFORE the
+        marker-check early return, so a same-day rerun does not blank
+        tomorrow's Top 3 Insights baseline."""
+        with mock.patch.object(
+            self.mod, "_already_posted_today", return_value=True
+        ) as already, mock.patch.object(
+            self.mod, "_write_digest_snapshot"
+        ) as write_snap, mock.patch.object(
+            self.mod, "post_to_slack"
+        ) as post_slack:
+            rc = self.mod.main()
+        # main() returned 0 cleanly via the marker-skip early return
+        self.assertEqual(rc, 0)
+        # Marker check fired, post_to_slack was NOT called (early return)
+        self.assertEqual(already.call_count, 1)
+        self.assertEqual(post_slack.call_count, 0)
+        # CRITICAL: snapshot was still written exactly once
+        self.assertEqual(
+            write_snap.call_count,
+            1,
+            "Snapshot must be written even when same-day marker skips the post",
+        )
+
+    def test_snapshot_written_exactly_once_on_normal_post_path(self) -> None:
+        """Sibling assertion: when the post DOES happen, the snapshot is still
+        written exactly once (no duplicate write from the moved call site)."""
+        with mock.patch.object(
+            self.mod, "_already_posted_today", return_value=False
+        ), mock.patch.object(
+            self.mod, "_write_digest_snapshot"
+        ) as write_snap, mock.patch.object(
+            self.mod, "post_to_slack", return_value=True
+        ), mock.patch.object(
+            self.mod, "_write_posted_marker"
+        ):
+            self.mod.main()
+        self.assertEqual(
+            write_snap.call_count,
+            1,
+            "Snapshot must be written exactly once on the normal post path",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

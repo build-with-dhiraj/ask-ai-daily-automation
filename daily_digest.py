@@ -2101,6 +2101,14 @@ def main() -> int:
         )
         top_insights_text = "_(insights unavailable today)_"
 
+    # Phase 1 + architect-review fix: write today's snapshot UNCONDITIONALLY,
+    # before any early return (DRY_RUN, idempotency-marker skip) — the snapshot
+    # is data-only with no Slack side effect, idempotent, and is the ONLY input
+    # tomorrow's "Top 3 Insights" call will have. If we wrote it after the
+    # marker check, any same-day rerun (staging test, cron retry, manual repost)
+    # would silently leave tomorrow's insights without a baseline.
+    _write_digest_snapshot(today_summary)
+
     blocks = build_blocks(
         academic_rows,
         nonacademic_rows,
@@ -2131,9 +2139,9 @@ def main() -> int:
         import pprint
         pprint.pprint(blocks)
         print("\n[info] --dry-run: Slack post skipped.", file=sys.stderr)
-        # Still write the snapshot in dry-run so a manual local run primes
-        # tomorrow's "yesterday" data and the LLM call can be exercised end-to-end.
-        _write_digest_snapshot(today_summary)
+        # Snapshot already written above (unconditional write before early
+        # returns), so the dry-run path still primes tomorrow's "yesterday"
+        # data without a duplicate write here.
         print(
             f"[digest] metabase academic={'ok' if mb_academic_ok else 'fail'} "
             f"nonacademic={'ok' if mb_nonacademic_ok else 'fail'} dump={'ok' if mb_dump_ok else 'fail'} "
@@ -2169,11 +2177,8 @@ def main() -> int:
     if DIGEST_STRICT_STREAM_LOGS and sl_cfg and stream_logs_rows is None:
         exit_code = 1
 
-    # Phase 1: write today's snapshot so tomorrow's digest job can compute
-    # day-on-day deltas. Best-effort; the workflow uploads it as an artifact.
-    # We write regardless of post success so a Slack outage doesn't lose the
-    # snapshot — the snapshot's only consumer is tomorrow's run.
-    _write_digest_snapshot(today_summary)
+    # Snapshot already written above (unconditional write before early returns)
+    # so a same-day rerun does not blank tomorrow's insights baseline.
 
     print(
         f"[digest] metabase academic={'ok' if mb_academic_ok else 'fail'} "
