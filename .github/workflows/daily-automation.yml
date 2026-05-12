@@ -63,7 +63,10 @@ jobs:
           # SDK HTTP timeout (seconds). Default is 5s, which is too tight under
           # transient Langfuse Cloud slowness — bump to 20s. Applies to score
           # REST writes (OTLP export is disabled below).
-          LANGFUSE_TIMEOUT: "20"
+          # Bumped 20 → 120s: SDK HTTP timeout for score REST writes. The
+          # previous 20s was tight enough that incident-day Langfuse Cloud
+          # slowness (60–90s p95) caused score-write retries to compound.
+          LANGFUSE_TIMEOUT: "120"
           # Disable the SDK's auto-initialised OTLP trace exporter. We never call
           # @observe() so it produces no useful signal, only "Failed to export
           # span batch due to timeout (read timeout=4.999s)" noise. Score writes
@@ -71,7 +74,11 @@ jobs:
           # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
           LANGFUSE_TRACING_ENABLED: "false"
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          JUDGE_HTTP_TIMEOUT_SEC: "90"
+          # Bumped 90 → 300s: per-LLM-call HTTP timeout in judge_runner. A 90s
+          # cap meant a single sticky Azure call would error out (ERROR sample)
+          # rather than ride out a transient slow response. With 300s + the
+          # existing 16-way concurrency, one stuck worker holds for 5 min max.
+          JUDGE_HTTP_TIMEOUT_SEC: "300"
           # Concurrent LLM calls on this runner (ThreadPoolExecutor); raise to speed up large daily samples.
           JUDGE_CONCURRENCY: "16"
           # 0 = no soft cap; run until all rows judged. The job's timeout-minutes: 600
@@ -140,10 +147,19 @@ jobs:
       METABASE_URL: ${{ secrets.METABASE_URL }}
       METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
       METABASE_FREETEXT_CARD_ID: ${{ secrets.METABASE_FREETEXT_CARD_ID }}
-      LANGFUSE_TIMEOUT: "20"
+      LANGFUSE_TIMEOUT: "120"
       LANGFUSE_TRACING_ENABLED: "false"
       JUDGE_CONCURRENCY: "8"
-      FEEDBACK_CLASSIFIER_HTTP_TIMEOUT_SEC: "30"
+      # NOTE: the classifier imports `get_openai_client` from judge_runner, which
+      # reads JUDGE_HTTP_TIMEOUT_SEC (NOT the FEEDBACK_* var, which is currently
+      # dead — see daily_feedback_classifier._http_timeout_sec). The 240s default
+      # in judge_runner was effectively in force here; we now make it explicit
+      # at 300s so the classifier matches eval-job semantics.
+      JUDGE_HTTP_TIMEOUT_SEC: "300"
+      # Kept (and bumped 30 → 120) for future wire-up once the classifier
+      # threads its own timeout into the OpenAI client instead of inheriting
+      # the judge_runner default.
+      FEEDBACK_CLASSIFIER_HTTP_TIMEOUT_SEC: "120"
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -174,7 +190,7 @@ jobs:
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
       # SDK HTTP timeout (seconds) — see eval job env above for rationale.
-      LANGFUSE_TIMEOUT: "20"
+      LANGFUSE_TIMEOUT: "120"
       # Disable OTLP trace exporter — see eval job env above for rationale.
       LANGFUSE_TRACING_ENABLED: "false"
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

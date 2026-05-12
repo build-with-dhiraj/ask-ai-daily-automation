@@ -35,9 +35,9 @@ jobs:
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
-      # SDK HTTP timeout (seconds) — bump from default 5s to 20s for transient
-      # Langfuse Cloud slowness on REST endpoints.
-      LANGFUSE_TIMEOUT: "20"
+      # Bumped 20 → 120s: SDK HTTP timeout for score REST writes. The
+      # previous 20s tripped under incident-day Langfuse Cloud slowness.
+      LANGFUSE_TIMEOUT: "120"
       # Disable the SDK's auto-initialised OTLP trace exporter. We never call
       # @observe(), so the exporter only produces noise. Langfuse REST reads
       # (observations, scores) are unaffected.
