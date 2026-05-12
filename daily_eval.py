@@ -73,6 +73,43 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
+
+# ---------------------------------------------------------------------------
+# Idempotency guard — prevents duplicate eval Slack posts on the same UTC day.
+# Mirrors the guard in daily_digest.py. Marker is written ONLY after a
+# successful Slack post so failed posts can be retried. FORCE_REPOST=1
+# bypasses (debugging only).
+# ---------------------------------------------------------------------------
+
+def _eval_marker_path(prefix: str = "eval-posted") -> Path:
+    base = (
+        os.environ.get("DIGEST_STATE_DIR", "").strip()
+        or str(Path.home() / ".ask-ai-daily-automation" / "state")
+    )
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return Path(base) / f"{prefix}-{today_utc}.marker"
+
+
+def _eval_already_posted_today(prefix: str = "eval-posted") -> bool:
+    if os.environ.get("FORCE_REPOST", "").strip() == "1":
+        return False
+    return _eval_marker_path(prefix).exists()
+
+
+def _eval_write_posted_marker(prefix: str = "eval-posted") -> None:
+    marker = _eval_marker_path(prefix)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            datetime.now(timezone.utc).isoformat() + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(
+            f"[warn] Could not write idempotency marker {marker}: {repr(exc)}",
+            file=sys.stderr,
+        )
+
 # Ensure judge_runner is importable when called from Cowork or cron
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -890,9 +927,29 @@ def main() -> int:
                 pass
         return 0
 
+    # Idempotency: skip the Slack post if we already posted for today's UTC
+    # date. Cron retries on the same UTC day become no-ops. FORCE_REPOST=1
+    # bypasses for debugging.
+    if _eval_already_posted_today("eval-posted"):
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        print(f"[info] already posted {today_utc}, skipping")
+        if (
+            judge_outcome.stopped_reason == "complete"
+            and os.path.exists(checkpoint_file)
+        ):
+            try:
+                os.remove(checkpoint_file)
+                print(f"🗑️  Checkpoint cleaned up: {checkpoint_file}")
+            except Exception:
+                pass
+        return 0
+
     try:
         post_to_slack(webhook, block)
         print("✅ Posted to Slack.")
+        # Record successful post so a second invocation on this UTC day is a
+        # no-op. Write AFTER the post returns without exception.
+        _eval_write_posted_marker("eval-posted")
     except Exception as e:
         print(f"❌ Slack post failed: {e}")
         return 1
