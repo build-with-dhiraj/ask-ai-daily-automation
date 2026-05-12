@@ -276,7 +276,9 @@ def metabase_session_token(base_url: str, username: str, password: str,
                             timeout: float | None = None) -> str:
     import urllib.request
     if timeout is None:
-        timeout = float(os.environ.get("METABASE_SESSION_TIMEOUT_SEC", "30.0"))
+        # Bumped 30 → 120 to absorb transient TLS handshake / VPN reconnect
+        # latency seen in 2026-05-11 incident; auth endpoint normally <2s.
+        timeout = float(os.environ.get("METABASE_SESSION_TIMEOUT_SEC", "120.0"))
     body = json.dumps({"username": username, "password": password}).encode("utf-8")
     req = urllib.request.Request(
         urljoin(base_url, "/api/session"),
@@ -291,20 +293,47 @@ def metabase_session_token(base_url: str, username: str, password: str,
     return data["id"]
 
 
+def _metabase_eval_total_attempts() -> int:
+    """Total attempt count for the eval Metabase fetch.
+
+    Env semantics match digest's METABASE_CARD_RETRIES: the env value is the
+    number of TOTAL attempts (not retries-after-the-first). Internally we
+    convert to ``max_retries = total - 1`` for the existing range loop.
+
+    Default 5 (i.e. 4 retries) — yields 4 sleeps of 10/20/40/80s = 150s total
+    backoff budget, within the 600-min job cap.
+    """
+    raw = (os.environ.get("METABASE_EVAL_RETRIES") or "").strip()
+    try:
+        total = int(raw) if raw else 5
+    except ValueError:
+        total = 5
+    return max(1, min(10, total))
+
+
 def metabase_run_card(base_url: str, card_id: int, auth_header: dict,
                        timeout: float | None = None,
-                       max_retries: int = 2) -> list[dict]:
+                       max_retries: int | None = None) -> list[dict]:
     """Run a saved Metabase question and return rows as list[dict].
-    
-    Retries up to max_retries times on socket timeout with exponential backoff.
-    timeout defaults to METABASE_QUERY_TIMEOUT_SEC env var (default 600s).
+
+    Retries up to max_retries times on socket timeout with bounded exponential
+    backoff (10/20/40/80/120s, capped at 120s).
+
+    timeout defaults to METABASE_QUERY_TIMEOUT_SEC env var (default 1800s).
+    max_retries defaults to METABASE_EVAL_RETRIES-1 (env value is total attempts;
+    default env value 5 → max_retries=4).
     """
     import urllib.request
     import urllib.error
-    
+
     if timeout is None:
-        timeout = float(os.environ.get("METABASE_QUERY_TIMEOUT_SEC", "600.0"))
-    
+        # Bumped 600 → 1800 (30 min). Eval Metabase questions can take 15+ min
+        # when astracdc.silver_conversational_query_table is hot; the previous
+        # 10-min cap was the proximate cause of the 2026-05-11 silent miss.
+        timeout = float(os.environ.get("METABASE_QUERY_TIMEOUT_SEC", "1800.0"))
+    if max_retries is None:
+        max_retries = _metabase_eval_total_attempts() - 1
+
     for attempt in range(max_retries + 1):
         try:
             req = urllib.request.Request(
@@ -320,7 +349,9 @@ def metabase_run_card(base_url: str, card_id: int, auth_header: dict,
             return rows
         except (socket.timeout, urllib.error.URLError) as e:
             if attempt < max_retries:
-                wait_time = 2 ** attempt  # exponential backoff: 1s, 2s, 4s, ...
+                # Bounded exponential backoff: 10, 20, 40, 80, 120, 120…s.
+                # Capped at 120 so a long retry tail stays inside the job cap.
+                wait_time = min(120, 10 * 2 ** attempt)
                 print(f"⚠️  Metabase card query timeout (attempt {attempt + 1}/{max_retries + 1}, will retry in {wait_time}s): {e}")
                 time.sleep(wait_time)
             else:
