@@ -57,7 +57,7 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +129,16 @@ DRY_RUN = "--dry-run" in sys.argv
 
 # C11/C12 — optional Metabase cards + yesterday's eval snapshot (same path as daily_eval.py)
 EVAL_SUMMARY_PATH = os.environ.get("EVAL_SUMMARY_PATH", "/tmp/daily_eval_yesterday_summary.json")
+
+# Phase 1 digest restructure — yesterday's digest snapshot for the Top 3 Insights LLM call.
+# Mirrors the eval snapshot pattern: today's run writes it at end-of-run, tomorrow reads it
+# at start-of-run via the GitHub Actions artifact handoff.
+DIGEST_SNAPSHOT_PATH = os.environ.get(
+    "DIGEST_SUMMARY_PATH", "/tmp/daily_digest_yesterday_summary.json"
+)
+# Stale snapshots (>2 days old) are ignored so a long workflow gap doesn't pin
+# tomorrow's "deltas" to last week's numbers.
+DIGEST_SNAPSHOT_MAX_AGE_DAYS = 2
 BEHAVIOR_FOLLOWUP_CARD_ID = os.environ.get("METABASE_BEHAVIOR_FOLLOWUP_CARD_ID", "").strip()
 # Accept typo alias from GitHub secret name (missing _ID suffix)
 BEHAVIOR_REPHRASE_CARD_ID = os.environ.get("METABASE_BEHAVIOR_REPHRASE_CARD_ID", "").strip()
@@ -450,16 +460,18 @@ def fmt_downvote_dump(rows: Optional[List]) -> str:
                 rk = _slack_escape(reason)
                 reason_counts[rk] = reason_counts.get(rk, 0) + 1
 
+    # Phase 1 restructure: trim to top 5 (was top 10) — readers skim, the long tail
+    # added scroll without insight. Combos preserved (no dedupe across "A" vs "A, B").
     reason_lines = "\n".join(
         f"  • {r}: {c:,}"
-        for r, c in sorted(reason_counts.items(), key=lambda x: -x[1])[:10]
+        for r, c in sorted(reason_counts.items(), key=lambda x: -x[1])[:5]
     )
     if not reason_lines:
         reason_lines = "  _(no tagged reasons)_"
 
     return (
         f"{n:,} downvoted queries logged. Category split:\n{cat_lines}\n\n"
-        f"Top tagged reasons (yesterday only):\n{reason_lines}"
+        f"Top tagged reasons (yesterday only, top 5):\n{reason_lines}"
     )
 
 # ---------------------------------------------------------------------------
@@ -769,7 +781,15 @@ def fmt_scores(
     hit_score_cap: bool = False,
     scores_ok: bool = True,
 ) -> str:
-    """dv_in_sample = count of csat=0 within fetched score rows."""
+    """User Comments on Downvotes — TRIMMED stats line only (no verbatim samples).
+
+    Phase 1 restructure: dropped the "Sample free-text comments (verbatim)" list.
+    Verbatims now live elsewhere (or we surface them via the free-text classifier
+    section). Keep ONLY:
+      • Downvotes (csat=0): N (from M score rows); P% per trace
+      • Total-traces footer when score rows are sparse
+      • Sparse-coverage note when applicable
+    """
     if not scores_ok:
         return (
             "  _Langfuse *scores* fetch failed — empty or sparse-looking results may be an API error, "
@@ -777,63 +797,33 @@ def fmt_scores(
         )
     n_scores = len(score_items)
     downvote_line = (
-        f"Downvotes (csat=0) in Langfuse score fetch: *{dv_in_sample:,}* "
+        f"Downvotes (csat=0): *{dv_in_sample:,}* "
         f"(from *{n_scores:,}* score rows retrieved, last 24h)"
     )
 
     if n_scores >= DIGEST_MIN_SCORE_ROWS_FOR_RATE and total_traces > 0:
         rate = dv_in_sample / total_traces * 100
         rate_block = (
-            f"\nTotal traces (last 24h, Langfuse): *{total_traces:,}*  |  "
-            f"Downvotes per trace (using retrieved scores only): *{rate:.2f}%*\n\n"
+            f"; *{rate:.2f}%* per trace "
+            f"(of *{total_traces:,}* total traces, last 24h)"
         )
     elif total_traces > 0:
         rate_block = (
             f"\nTotal traces (last 24h, Langfuse): *{total_traces:,}*\n"
             f"_Rate vs all traces not shown — fewer than *{DIGEST_MIN_SCORE_ROWS_FOR_RATE}* score rows "
             f"in this API pull (*{n_scores:,}* retrieved). CSAT scores are sparse; "
-            "see Metabase downvote sections for volume._\n\n"
+            "see Metabase downvote sections for volume._"
         )
     else:
-        rate_block = "\n_Total traces (last 24h) unavailable from Langfuse._\n\n"
-
-    downvote_sample = [s for s in score_items if s.get("value") == 0]
-    comments = [
-        s.get("comment")
-        for s in downvote_sample
-        if s.get("comment") and str(s.get("comment")).strip()
-    ][:10]
-
-    if comments:
-        comment_lines = "\n".join(
-            f'  "{_slack_escape(str(c))}"' for c in comments
-        )
-    else:
-        comment_lines = "  _(no free-text comments)_"
+        rate_block = "\n_Total traces (last 24h) unavailable from Langfuse._"
 
     cap_note = ""
     if hit_score_cap:
         cap_note = (
-            f"\n\n_Stopped at {n_scores:,} score rows (LANGFUSE_SCORE_MAX_ITEMS cap)._"
+            f"\n_Stopped at {n_scores:,} score rows (LANGFUSE_SCORE_MAX_ITEMS cap)._"
         )
 
-    if (
-        dv_in_sample == 0
-        and not comments
-        and n_scores < DIGEST_MIN_SCORE_ROWS_FOR_RATE
-    ):
-        return (
-            f"{downvote_line}{rate_block}"
-            f"_No csat=0 scores with comments in this pull. Langfuse score coverage is thin; "
-            f"use Metabase downvote blocks for volume._"
-            f"{cap_note}"
-        )
-
-    return (
-        f"{downvote_line}{rate_block}"
-        f"Sample free-text comments (verbatim):\n{comment_lines}"
-        f"{cap_note}"
-    )
+    return f"{downvote_line}{rate_block}{cap_note}"
 
 
 def load_eval_summary(summary_path: str) -> Optional[dict]:
@@ -923,6 +913,531 @@ def fmt_freetext_classification(snapshot: Optional[dict]) -> Optional[dict]:
         "type": "section",
         "text": {"type": "mrkdwn", "text": _truncate_section(body)},
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — digest snapshot read/write (for Top 3 Insights day-on-day deltas)
+# ---------------------------------------------------------------------------
+
+
+def _write_digest_snapshot(today_data: dict, path: str = DIGEST_SNAPSHOT_PATH) -> None:
+    """Write today's digest snapshot for tomorrow's Top 3 Insights LLM call.
+
+    Mirrors `daily_eval.write_minimal_eval_snapshot`: best-effort, never raises.
+    Failure to write is logged but does NOT block the digest from posting.
+    """
+    payload = {
+        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        **{k: v for k, v in today_data.items() if k != "date"},
+    }
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        print(f"[info] Wrote digest snapshot to {path}", file=sys.stderr)
+    except Exception as exc:  # pragma: no cover - filesystem rare-path
+        print(f"[warn] failed to write digest snapshot: {exc!r}", file=sys.stderr)
+
+
+def _load_yesterday_snapshot(
+    path: str = DIGEST_SNAPSHOT_PATH,
+    *,
+    max_age_days: int = DIGEST_SNAPSHOT_MAX_AGE_DAYS,
+) -> Optional[dict]:
+    """Read yesterday's digest snapshot if present, valid, and recent.
+
+    Returns None gracefully when the file is missing, malformed, or its embedded
+    `date` field is more than `max_age_days` old. Stale loads emit a warning.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        print(f"[warn] digest snapshot read failed: {exc!r}", file=sys.stderr)
+        return None
+    if not isinstance(data, dict):
+        return None
+    raw_date = str(data.get("date") or "").strip()
+    if raw_date:
+        try:
+            snap_dt = datetime.strptime(raw_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - snap_dt
+            if age > timedelta(days=max_age_days):
+                print(
+                    f"[warn] digest snapshot at {path} is {age.days}d old "
+                    f"(>{max_age_days}d cap) — ignoring for Top 3 Insights",
+                    file=sys.stderr,
+                )
+                return None
+        except Exception as exc:  # malformed date → treat as stale
+            print(
+                f"[warn] digest snapshot date {raw_date!r} unparseable: {exc!r} — ignoring",
+                file=sys.stderr,
+            )
+            return None
+    return data
+
+
+def _summarise_today_for_snapshot(
+    *,
+    error_obs: List,
+    total_errors: int,
+    score_items: List,
+    dv_in_sample: int,
+    total_traces: int,
+    dump_rows: Optional[List],
+    academic_rows: Optional[List],
+    non_academic_rows: Optional[List],
+    behavior_follow_rows: Optional[List],
+    behavior_rephrase_rows: Optional[List],
+    classifier_snapshot: Optional[dict],
+) -> dict:
+    """Build a compact dict of today's digest data for snapshot + LLM input.
+
+    Includes ONLY numbers / structured counts — no verbatim text, no PII. Keeps
+    the JSON small (snapshot < 30 KB even on busy days).
+    """
+    # Langfuse error breakdown counts (top categories).
+    cat_counts: Dict[str, int] = {}
+    for obs in error_obs or []:
+        msg = obs.get("statusMessage") or obs.get("name") or ""
+        cat = _categorise_error(msg)
+        cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+    # Yesterday's downvoted-snapshot category split + top 10 raw tagged reasons.
+    snapshot_cat_counts: Dict[str, int] = {}
+    snapshot_reason_counts: Dict[str, int] = {}
+    if dump_rows:
+        yest_rows: List[dict] = []
+        for row in dump_rows:
+            for v in row.values():
+                if isinstance(v, str) and v.startswith(yesterday):
+                    yest_rows.append(row)
+                    break
+        for row in yest_rows:
+            cat = (
+                row.get("category")
+                or row.get("Category")
+                or row.get("type")
+                or "unknown"
+            )
+            snapshot_cat_counts[str(cat)] = snapshot_cat_counts.get(str(cat), 0) + 1
+            reason_raw = (
+                row.get("user_feedback")
+                or row.get("reason")
+                or row.get("Reason")
+                or row.get("feedback_text")
+                or row.get("tag")
+                or ""
+            )
+            reason = str(reason_raw).strip().rstrip(",").strip()
+            if reason:
+                snapshot_reason_counts[reason] = snapshot_reason_counts.get(reason, 0) + 1
+    top_reasons = sorted(snapshot_reason_counts.items(), key=lambda x: -x[1])[:10]
+
+    # Multi-turn burst + rephrase: top 5 chapter, pct, n_queries.
+    def _proxy_top_chapters(rows: Optional[List], k: int = 5) -> List[dict]:
+        if not rows:
+            return []
+        out = []
+        for row in rows[:k]:
+            ch = _row_chapter(row)
+            if not ch:
+                continue
+            out.append({
+                "chapter": ch,
+                "pct": round(_row_pct(row), 4),
+                "n_queries": _coerce_int(row.get("n_queries")),
+            })
+        return out
+
+    return {
+        "langfuse_errors_total": int(total_errors),
+        "langfuse_errors_breakdown": cat_counts,
+        "downvotes_csat0_count": int(dv_in_sample),
+        "score_rows_fetched": len(score_items or []),
+        "total_traces_24h": int(total_traces),
+        "snapshot_category_split": snapshot_cat_counts,
+        "snapshot_top_tagged_reasons": [
+            {"reason": r, "count": c} for r, c in top_reasons
+        ],
+        "academic_top_reasons": [
+            {"reason": r, "count": c}
+            for r, c in _downvote_reason_rows_filtered(academic_rows, top_k=6)
+        ],
+        "non_academic_top_reasons": [
+            {"reason": r, "count": c}
+            for r, c in _downvote_reason_rows_filtered(non_academic_rows, top_k=6)
+        ],
+        "multi_turn_burst_top": _proxy_top_chapters(behavior_follow_rows),
+        "rephrase_rate_top": _proxy_top_chapters(behavior_rephrase_rows),
+        "classifier_category_counts": (
+            (classifier_snapshot or {}).get("category_counts") or {}
+            if isinstance((classifier_snapshot or {}).get("category_counts"), dict)
+            else {}
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Top 3 Insights — Azure OpenAI gpt-4.1 day-on-day delta bullets
+# Reader-facing label is "Top 3 Insights" (NO "LLM" wording, no model surfaced).
+# ---------------------------------------------------------------------------
+
+_TOP_INSIGHTS_SYSTEM_PROMPT = (
+    "You are a data analyst summarising day-on-day deltas in an analytics digest.\n"
+    "Inputs:\n"
+    "  • TODAY: today's digest data (compact JSON).\n"
+    "  • YESTERDAY: yesterday's snapshot (compact JSON), or null if unavailable.\n"
+    "\n"
+    "Rules — follow exactly:\n"
+    "  1. Output exactly 3 numbered bullets, one per line, format `1. <text>` etc.\n"
+    "  2. Each bullet ≤180 characters.\n"
+    "  3. Cite EXACT numbers from the input — never invent metrics, percentages, or chapter names.\n"
+    "  4. Reference only chapters / categories / tags that appear in the input.\n"
+    "  5. If there is no actionable day-on-day delta, return ONLY this exact line:\n"
+    "     No significant day-on-day changes today; baseline behavior.\n"
+    "  6. No preamble, no closing line, no markdown headers.\n"
+)
+
+
+def _coerce_int(v: Any) -> Optional[int]:
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _http_post_slack_compatible(*args, **kwargs):  # pragma: no cover - tiny indirection
+    """Marker indirection; not used directly. Reserved for future Slack abstraction."""
+    raise NotImplementedError
+
+
+def _call_top_insights_llm(today_data: dict, yesterday_snapshot: dict) -> str:
+    """Call Azure OpenAI gpt-4.1 with 60s timeout + 1 retry on URLError/5xx.
+
+    Reuses `judge_runner.get_openai_client` so the credential/endpoint logic stays in
+    one place. Returns the raw text content of the first choice. Caller wraps in
+    try/except and validates the output.
+    """
+    # Lazy import: keep digest importable in environments without `openai` installed.
+    from judge_runner import get_openai_client  # noqa: WPS433 (lazy intentional)
+
+    deployment = (
+        os.environ.get("DEPLOYMENT_NAME")
+        or os.environ.get("AZURE_DEPLOYMENT_NAME")
+        or ""
+    ).strip()
+    if not deployment:
+        raise RuntimeError("DEPLOYMENT_NAME not set")
+
+    user_payload = json.dumps(
+        {"TODAY": today_data, "YESTERDAY": yesterday_snapshot},
+        ensure_ascii=False,
+        default=str,
+    )
+
+    last_exc: Optional[BaseException] = None
+    for attempt in range(2):  # initial + 1 retry
+        try:
+            # Per-instance timeout: 60s. The OpenAI/Azure SDK respects `timeout=`
+            # at construction; pass it explicitly via the env var the client
+            # factory consults so we don't need a new constructor signature.
+            prev_timeout = os.environ.get("JUDGE_HTTP_TIMEOUT_SEC")
+            os.environ["JUDGE_HTTP_TIMEOUT_SEC"] = "60"
+            try:
+                client = get_openai_client()
+            finally:
+                if prev_timeout is None:
+                    os.environ.pop("JUDGE_HTTP_TIMEOUT_SEC", None)
+                else:
+                    os.environ["JUDGE_HTTP_TIMEOUT_SEC"] = prev_timeout
+
+            resp = client.chat.completions.create(
+                model=deployment,
+                messages=[
+                    {"role": "system", "content": _TOP_INSIGHTS_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_payload},
+                ],
+                temperature=0,
+                max_tokens=400,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except urllib.error.URLError as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(5)
+                continue
+            raise
+        except Exception as exc:
+            # SDK wraps HTTP errors in its own classes; we treat anything with a
+            # 5xx-shaped status_code as retryable on first failure.
+            status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+            last_exc = exc
+            if attempt == 0 and isinstance(status, int) and 500 <= status < 600:
+                time.sleep(5)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Top insights LLM call exhausted retries")  # pragma: no cover
+
+
+def fmt_top_insights(
+    today_data: dict, yesterday_snapshot: Optional[dict]
+) -> str:
+    """Build the Top 3 Insights body. Reader sees no "LLM" wording.
+
+    Returns a string suitable for embedding under a "Top 3 Insights" header.
+    Failure modes:
+      • yesterday_snapshot is None  → first-run placeholder (no Azure call)
+      • Azure call raises           → "(insights unavailable today)" placeholder
+      • Output has zero digit chars → same fallback (proxy for missing number citations)
+
+    NEVER raises; always returns a string. The digest must keep posting.
+    """
+    if yesterday_snapshot is None:
+        return "_(insights begin tomorrow once a baseline exists)_"
+
+    try:
+        raw = _call_top_insights_llm(today_data, yesterday_snapshot)
+    except Exception as exc:
+        print(
+            f"[warn] Top 3 Insights LLM call failed; using fallback: {exc!r}",
+            file=sys.stderr,
+        )
+        return "_(insights unavailable today)_"
+
+    text = (raw or "").strip()
+    if not text:
+        print("[warn] Top 3 Insights returned empty; using fallback", file=sys.stderr)
+        return "_(insights unavailable today)_"
+
+    # Validation: bullets must cite numbers. The fixed "no significant change"
+    # sentence is the one allowed exception (no digits required).
+    if "No significant day-on-day changes today" in text:
+        return text
+    if not any(ch.isdigit() for ch in text):
+        print(
+            "[warn] Top 3 Insights output has no digit characters — failing validation",
+            file=sys.stderr,
+        )
+        return "_(insights unavailable today)_"
+
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — merged 21d Downvote Reasons table (Slack `fields` block)
+# ---------------------------------------------------------------------------
+
+# Case-insensitive denylist of junk tags surfaced by the rolling 21d Metabase
+# question. These come from copy-paste / single-keystroke feedback and add no
+# signal. Filter applied in addition to the count-floor below.
+_DOWNVOTE_REASON_JUNK = {
+    ".",
+    "..",
+    "...",
+    "nhi",
+    "bad",
+    "no",
+    "too long",
+}
+_DOWNVOTE_REASON_MIN_COUNT = 50
+
+
+def _downvote_reason_rows_filtered(
+    rows: Optional[List],
+    *,
+    min_count: int = _DOWNVOTE_REASON_MIN_COUNT,
+    top_k: int = 6,
+) -> List[Tuple[str, int]]:
+    """Return [(reason, count)] sorted desc, junk tags + sub-min-count rows filtered."""
+    if not rows:
+        return []
+    out: List[Tuple[str, int]] = []
+    for row in rows:
+        text_raw = (
+            row.get("feedback_text")
+            or row.get("reason")
+            or row.get("Reason")
+            or ""
+        )
+        text = str(text_raw).strip().rstrip(",").strip()
+        if not text:
+            continue
+        if text.lower() in _DOWNVOTE_REASON_JUNK:
+            continue
+        try:
+            count = int(row.get("downvotes") or row.get("count") or 0)
+        except (TypeError, ValueError):
+            continue
+        if count < min_count:
+            continue
+        out.append((text, count))
+    out.sort(key=lambda x: -x[1])
+    return out[:top_k]
+
+
+def fmt_downvote_reasons_table(
+    academic_rows: Optional[List],
+    non_academic_rows: Optional[List],
+) -> dict:
+    """Slack `section` block with two `fields` columns (Academic | Non-Academic).
+
+    Replaces the two separate `fmt_academic` / `fmt_nonacademic` sections.
+    Junk tags filtered (case-insensitive) and rows with count < 50 dropped.
+    """
+    academic = _downvote_reason_rows_filtered(academic_rows)
+    non_academic = _downvote_reason_rows_filtered(non_academic_rows)
+
+    def _fmt_col(rows: List[Tuple[str, int]], label: str) -> str:
+        if not rows:
+            return f"*{label}*\n_(no rows above min count)_"
+        lines = [f"*{label}*"]
+        for r, c in rows:
+            lines.append(f"{_slack_escape(r)}: {c:,}")
+        return "\n".join(lines)
+
+    fields = [
+        {"type": "mrkdwn", "text": _fmt_col(academic, "Academic")},
+        {"type": "mrkdwn", "text": _fmt_col(non_academic, "Non-Academic")},
+    ]
+
+    block: dict = {
+        "type": "section",
+        "fields": fields,
+    }
+    return block
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — split silent-failure proxies into two sections, each with a context
+#           explainer block.
+# ---------------------------------------------------------------------------
+
+
+def _behavior_proxy_body(
+    rows: Optional[List],
+    *,
+    card_configured: bool,
+    setting_name: str,
+    top_k: int,
+) -> str:
+    if not card_configured:
+        return (
+            f"  _(not configured — set Actions secret `{setting_name}` (digits only), "
+            "and pass it under `env:` on the digest workflow step.)_"
+        )
+    if rows is None:
+        return (
+            "  _(Metabase fetch failed for this behaviour card — see GitHub Actions logs "
+            "for `[warn] Metabase card`.)_"
+        )
+    if not rows:
+        return "  _(no rows)_"
+    lines = []
+    for row in rows[:top_k]:
+        ch = _row_chapter(row)
+        if not ch:
+            continue
+        pct = _row_pct(row)
+        nq = row.get("n_queries")
+        nq_s = f" _(n={nq})_" if nq is not None else ""
+        lines.append(f"  • *{_slack_escape(ch)}*: {pct:.2f}%{nq_s}")
+    if not lines:
+        return "  _(no chapter column in result — check SQL aliases)_"
+    return "\n".join(lines)
+
+
+def fmt_multi_turn_burst(
+    rows: Optional[List],
+    *,
+    card_configured: bool = True,
+    top_k: int = 5,
+) -> List[dict]:
+    """Slack blocks for the multi-turn burst proxy section (header + context + body).
+
+    Header text: ":brain: *Multi-turn burst (yesterday, academic VCP)*"
+    Context block: italic explainer of what the metric proxies for.
+    Body: top `top_k` chapters by burst rate.
+    """
+    body = _behavior_proxy_body(
+        rows,
+        card_configured=card_configured,
+        setting_name="METABASE_BEHAVIOR_FOLLOWUP_CARD_ID",
+        top_k=top_k,
+    )
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": _truncate_section(
+                    ":brain: *Multi-turn burst (yesterday, academic VCP)*\n" + body
+                ),
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        "_% of users firing 3+ queries in 60s — "
+                        "proxy for first-answer failure (users keep retrying)_"
+                    ),
+                }
+            ],
+        },
+    ]
+
+
+def fmt_rephrase_rate(
+    rows: Optional[List],
+    *,
+    card_configured: bool = True,
+    top_k: int = 5,
+) -> List[dict]:
+    """Slack blocks for the rephrase / language-switch keyword rate section."""
+    body = _behavior_proxy_body(
+        rows,
+        card_configured=card_configured,
+        setting_name="METABASE_BEHAVIOR_REPHRASE_CARD_ID",
+        top_k=top_k,
+    )
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": _truncate_section(
+                    ":repeat: *Rephrase / shorter / language-switch keyword rate (yesterday, academic VCP)*\n"
+                    + body
+                ),
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        "_% of follow-ups with rephrasing / simpler wording / translation — "
+                        "proxy for clarity failure (users compensating for unclear AI response)_"
+                    ),
+                }
+            ],
+        },
+    ]
 
 
 def _eval_sample_counts(eval_summary: dict) -> Tuple[Optional[int], Optional[int]]:
@@ -1027,7 +1542,7 @@ def fmt_eval_coverage_note(eval_summary: Optional[dict]) -> str:
     return ""
 
 
-def fmt_confirmed_regressions(
+def fmt_broken_chapter(
     follow_rows: Optional[List],
     rephrase_rows: Optional[List],
     eval_summary: Optional[dict],
@@ -1036,7 +1551,12 @@ def fmt_confirmed_regressions(
     *,
     eval_snapshot_path: str = "",
 ) -> str:
-    """C12 — chapters that are both formatting hotspots (judge) and behavioral spikes."""
+    """Plain-English broken-chapter signal (judge × behavior).
+
+    Was `fmt_confirmed_regressions`. Body rewritten to drop set-theory notation
+    (`∩`) and "Confirmed regression signal" jargon; uses everyday language so
+    a non-data-eng reader can act on it directly.
+    """
     if eval_summary is None:
         path = (eval_snapshot_path or "").strip()
         if not path:
@@ -1062,7 +1582,7 @@ def fmt_confirmed_regressions(
     if not fmt_hot:
         return (
             "  _Daily eval reported *no* formatting hotspot chapters in this run "
-            "(or snapshot predates the key — C12 cross-check uses an empty judge hotspot set)._"
+            "(or snapshot predates the key — broken-chapter cross-check uses an empty judge hotspot set)._"
         )
     behavioral: set[str] = set()
     for row in rephrase_rows or []:
@@ -1076,14 +1596,20 @@ def fmt_confirmed_regressions(
     both = sorted(fmt_hot & behavioral)
     if not both:
         return (
-            "  _No overlap today between judge *formatting* hotspots and behavioral "
-            "elevated chapters (thresholds: rephrase ≥ {:.1f}%, follow-up burst ≥ {:.1f}%)._"
-        ).format(rephrase_threshold, follow_threshold)
+            "(no chapter shows both AI quality issues AND user behavior spike today)"
+        )
     lines = "\n".join(
-        f"  • *{_slack_escape(c)}* — formatting FAIL hotspot ∩ behavioral spike"
+        f"• *{_slack_escape(c)}* — both AI output quality flagged AND users keep retrying "
+        "(likely fix candidate)."
         for c in both
     )
-    return f":rotating_light: *Confirmed regression signal* (judge × behavior)\n{lines}"
+    return lines
+
+
+# Backwards-compat alias so existing tests + callers keep working until the
+# next sweep removes them. Same signature, same return.
+def fmt_confirmed_regressions(*args, **kwargs):
+    return fmt_broken_chapter(*args, **kwargs)
 
 
 def _digest_footer_links(stream_logs_card_id: str) -> str:
@@ -1190,9 +1716,24 @@ def build_blocks(
     errors_ok: bool = True,
     scores_ok: bool = True,
     eval_snapshot_path: str = "",
+    top_insights_text: Optional[str] = None,
 ) -> list:
-    academic_block    = fmt_academic(academic_rows)
-    nonacademic_block = fmt_nonacademic(nonacademic_rows)
+    """Assemble the digest in Phase 1 order.
+
+    Order (top to bottom):
+      1. Header
+      2. Top 3 Insights (NEW)
+      3. Today's broken chapter (MOVED + RENAMED)
+      4. Langfuse Errors (24h)
+      5. Video co-pilot API health (stream_logs)
+      6. User Comments on Downvotes (TRIMMED — stats only)
+      7. Free-text feedback breakdown
+      8. Yesterday's Downvoted Queries Snapshot (TRIMMED — top 5 reasons)
+      9. Multi-turn burst (split + context)
+     10. Rephrase / language-switch (split + context)
+     11. Rolling 21d Downvote Reasons — merged 2-column fields block
+     12. Footer
+    """
     dump_block        = fmt_downvote_dump(dump_rows)
     scores_block      = fmt_scores(
         score_items,
@@ -1212,17 +1753,8 @@ def build_blocks(
         metabase_error_hint=stream_logs_error_hint,
     )
 
-    follow_txt = fmt_behavior_proxy(
-        behavior_follow_rows,
-        card_configured=follow_card_configured,
-        setting_name="METABASE_BEHAVIOR_FOLLOWUP_CARD_ID",
-    )
-    rephrase_txt = fmt_behavior_proxy(
-        behavior_rephrase_rows,
-        card_configured=rephrase_card_configured,
-        setting_name="METABASE_BEHAVIOR_REPHRASE_CARD_ID",
-    )
-    reg_txt = fmt_eval_coverage_note(eval_summary) + fmt_confirmed_regressions(
+    coverage_note = fmt_eval_coverage_note(eval_summary)
+    broken_chapter_body = fmt_broken_chapter(
         behavior_follow_rows,
         behavior_rephrase_rows,
         eval_summary,
@@ -1232,26 +1764,54 @@ def build_blocks(
     def section(text: str) -> dict:
         return {"type": "section", "text": {"type": "mrkdwn", "text": _truncate_section(text)}}
 
+    def header_block(text: str) -> dict:
+        return {"type": "header", "text": {"type": "plain_text", "text": text, "emoji": True}}
+
     divider: dict = {"type": "divider"}
 
-    # Order: system health + student voice first (stakeholder onboarding); then context blocks.
     blocks: list = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": f"\U0001f4ca Ask AI Daily Digest — {today_str}", "emoji": True},
-        },
+        header_block(f"\U0001f4ca Ask AI Daily Digest — {today_str}"),
+    ]
+
+    # 2. Top 3 Insights — NEW. Reader sees no "LLM" wording.
+    insights_text = (top_insights_text or "_(insights begin tomorrow once a baseline exists)_").strip()
+    blocks.extend([
+        divider,
+        section(f":dart: *Top 3 Insights*\n{insights_text}"),
+    ])
+
+    # 3. Today's broken chapter — moved up + renamed + plain English.
+    broken_block_body = (coverage_note + broken_chapter_body).strip()
+    blocks.extend([
+        divider,
+        section(
+            f":rotating_light: *Today's broken chapter (judge × behavior)*\n{broken_block_body}"
+        ),
+    ])
+
+    # 4. Langfuse Errors (24h)
+    blocks.extend([
         divider,
         section(f":rotating_light: *Langfuse Errors (last 24h)*\n{errors_block}"),
+    ])
+
+    # 5. Video co-pilot API health
+    blocks.extend([
         divider,
         section(
             f":gear: *Video co-pilot API health (stream_logs, yesterday)*\n{stream_logs_block}"
         ),
-        divider,
-        section(f":speech_balloon: *User Comments on Downvotes (Langfuse, last 24h)*\n{scores_block}"),
-    ]
+    ])
 
-    # Optional free-text classifier section — fail-soft: any error in this path is swallowed
-    # and the digest continues without it. The classifier job runs independently in CI.
+    # 6. User Comments on Downvotes — TRIMMED stats only
+    blocks.extend([
+        divider,
+        section(
+            f":speech_balloon: *User Comments on Downvotes (Langfuse, last 24h)*\n{scores_block}"
+        ),
+    ])
+
+    # 7. Free-text classifier (optional, fail-soft)
     try:
         snap = load_classifier_snapshot()
         ft_block = fmt_freetext_classification(snap)
@@ -1261,20 +1821,54 @@ def build_blocks(
     except Exception as e:
         print(f"[warn] freetext classifier section skipped: {e}", file=sys.stderr)
 
+    # 8. Yesterday's Downvoted Queries Snapshot — top 5 reasons
     blocks.extend([
         divider,
-        section(f":thumbsdown: *Downvote Reasons — Academic (rolling 21d)*\n{academic_block}"),
-        divider,
-        section(f":thumbsdown: *Downvote Reasons — Non-Academic (rolling 21d)*\n{nonacademic_block}"),
-        divider,
-        section(f":bar_chart: *Yesterday's Downvoted Queries Snapshot ({yesterday})*\n{dump_block}"),
-        divider,
         section(
-            f":brain: *Silent-failure proxies (yesterday, academic VCP)*\n"
-            f"*Multi-turn burst (≥3 queries in 60s / user):*\n{follow_txt}\n\n"
-            f"*Rephrase / shorter / language-switch keyword rate:*\n{rephrase_txt}\n\n"
-            f"{reg_txt}"
+            f":bar_chart: *Yesterday's Downvoted Queries Snapshot ({yesterday})*\n{dump_block}"
         ),
+    ])
+
+    # 9. Multi-turn burst — split with context explainer
+    blocks.append(divider)
+    blocks.extend(
+        fmt_multi_turn_burst(
+            behavior_follow_rows,
+            card_configured=follow_card_configured,
+        )
+    )
+
+    # 10. Rephrase / language-switch — split with context explainer
+    blocks.append(divider)
+    blocks.extend(
+        fmt_rephrase_rate(
+            behavior_rephrase_rows,
+            card_configured=rephrase_card_configured,
+        )
+    )
+
+    # 11. Rolling 21d table — merged 2-column fields block
+    blocks.extend([
+        divider,
+        section(":thumbsdown: *Downvote Reasons (rolling 21d)*"),
+        fmt_downvote_reasons_table(academic_rows, nonacademic_rows),
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        "_Junk tags filtered: "
+                        ". / nhi / bad / no / too long / ... ; "
+                        f"rows below {_DOWNVOTE_REASON_MIN_COUNT} count dropped._"
+                    ),
+                }
+            ],
+        },
+    ])
+
+    # 12. Footer
+    blocks.extend([
         divider,
         {
             "type": "context",
@@ -1286,6 +1880,7 @@ def build_blocks(
             ],
         },
     ])
+
     return blocks
 
 
@@ -1472,6 +2067,40 @@ def main() -> int:
         rephrase_ok=rephrase_ok,
     )
 
+    # Phase 1: build today's compact summary, load yesterday's snapshot,
+    # and call Top 3 Insights LLM (best-effort — never blocks the digest).
+    classifier_snap_for_summary: Optional[dict] = None
+    try:
+        classifier_snap_for_summary = load_classifier_snapshot()
+    except Exception:
+        classifier_snap_for_summary = None
+
+    today_summary = _summarise_today_for_snapshot(
+        error_obs=error_obs,
+        total_errors=total_errors,
+        score_items=score_items,
+        dv_in_sample=dv_in_sample,
+        total_traces=total_traces,
+        dump_rows=dump_rows,
+        academic_rows=academic_rows,
+        non_academic_rows=nonacademic_rows,
+        behavior_follow_rows=follow_rows,
+        behavior_rephrase_rows=rephrase_rows,
+        classifier_snapshot=classifier_snap_for_summary,
+    )
+
+    yesterday_snapshot = _load_yesterday_snapshot()
+    try:
+        top_insights_text = fmt_top_insights(today_summary, yesterday_snapshot)
+    except Exception as exc:
+        # fmt_top_insights is documented to never raise, but defence-in-depth:
+        # any unexpected raise here MUST NOT block the rest of the digest.
+        print(
+            f"[warn] fmt_top_insights raised unexpectedly; using fallback: {exc!r}",
+            file=sys.stderr,
+        )
+        top_insights_text = "_(insights unavailable today)_"
+
     blocks = build_blocks(
         academic_rows,
         nonacademic_rows,
@@ -1494,6 +2123,7 @@ def main() -> int:
         errors_ok=errors_ok,
         scores_ok=scores_ok,
         eval_snapshot_path=EVAL_SUMMARY_PATH,
+        top_insights_text=top_insights_text,
     )
     print(f"[info] {fallback_text.splitlines()[0]}\n[{len(blocks)} blocks]", file=sys.stderr)
 
@@ -1501,6 +2131,9 @@ def main() -> int:
         import pprint
         pprint.pprint(blocks)
         print("\n[info] --dry-run: Slack post skipped.", file=sys.stderr)
+        # Still write the snapshot in dry-run so a manual local run primes
+        # tomorrow's "yesterday" data and the LLM call can be exercised end-to-end.
+        _write_digest_snapshot(today_summary)
         print(
             f"[digest] metabase academic={'ok' if mb_academic_ok else 'fail'} "
             f"nonacademic={'ok' if mb_nonacademic_ok else 'fail'} dump={'ok' if mb_dump_ok else 'fail'} "
@@ -1535,6 +2168,12 @@ def main() -> int:
         exit_code = 1
     if DIGEST_STRICT_STREAM_LOGS and sl_cfg and stream_logs_rows is None:
         exit_code = 1
+
+    # Phase 1: write today's snapshot so tomorrow's digest job can compute
+    # day-on-day deltas. Best-effort; the workflow uploads it as an artifact.
+    # We write regardless of post success so a Slack outage doesn't lose the
+    # snapshot — the snapshot's only consumer is tomorrow's run.
+    _write_digest_snapshot(today_summary)
 
     print(
         f"[digest] metabase academic={'ok' if mb_academic_ok else 'fail'} "
