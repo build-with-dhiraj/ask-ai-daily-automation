@@ -27,7 +27,9 @@ concurrency:
 jobs:
   digest:
     runs-on: self-hosted
-    timeout-minutes: 180
+    # Bumped 180 → 240 to match daily-automation.yml — accommodates the new
+    # retry-tail budget across Metabase + Langfuse + Slack.
+    timeout-minutes: 240
     env:
       PYTHONUNBUFFERED: "1"
       METABASE_URL: ${{ secrets.METABASE_URL }}
@@ -48,7 +50,9 @@ jobs:
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
-      DIGEST_FAIL_ON_LANGFUSE_ERROR: "1"
+      # Flipped 1 → 0 (2026-05-12): degraded post is preferred over silent miss.
+      # Mirrors the change in daily-automation.yml; see commentary there.
+      DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
     steps:
       - uses: actions/checkout@v4
 

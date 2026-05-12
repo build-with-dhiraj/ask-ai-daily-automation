@@ -138,7 +138,10 @@ jobs:
     needs: eval
     if: always()
     runs-on: self-hosted
-    timeout-minutes: 30
+    # Bumped 30 → 60 to match the bumped FEEDBACK/JUDGE timeouts: a single
+    # stuck Azure call can now hold a worker for up to 5 min, and the
+    # classifier fans out across 8 workers; 30 min was tight under that load.
+    timeout-minutes: 60
     env:
       AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
       AZURE_API_KEY: ${{ secrets.AZURE_API_KEY }}
@@ -181,7 +184,11 @@ jobs:
     needs: [eval, classifier]
     runs-on: self-hosted
     if: always()
-    timeout-minutes: 180
+    # Bumped 180 → 240 to absorb the new max retry-tail budget: digest-card
+    # backoff (~5 min) × multiple Metabase cards + Langfuse 8-attempt loop
+    # (~8.5 min cumulative) + Slack 5s retry could push a degraded run past
+    # 3h on a bad day. 240 min keeps slack while still bounded.
+    timeout-minutes: 240
     env:
       PYTHONUNBUFFERED: "1"
       METABASE_URL: ${{ secrets.METABASE_URL }}
@@ -197,8 +204,11 @@ jobs:
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
-      # Fail the job (no Slack) if Langfuse API is misconfigured — avoids “fetch failed” noise in-channel.
-      DIGEST_FAIL_ON_LANGFUSE_ERROR: "1"
+      # Flipped 1 → 0 (2026-05-12): the strict gate was the proximate cause of
+      # yesterday's silent miss — one slow Langfuse page fail-fasted the whole
+      # job. We now PREFER a degraded Slack post (with `_fetch failed_` filler)
+      # over no post. Worst-case landing slips from ~10:00 IST to ~11:30 IST.
+      DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
     steps:
       - uses: actions/checkout@v4
 
