@@ -27,7 +27,9 @@ concurrency:
 jobs:
   digest:
     runs-on: self-hosted
-    timeout-minutes: 180
+    # Bumped 180 → 240 to match daily-automation.yml — accommodates the new
+    # retry-tail budget across Metabase + Langfuse + Slack.
+    timeout-minutes: 240
     env:
       PYTHONUNBUFFERED: "1"
       METABASE_URL: ${{ secrets.METABASE_URL }}
@@ -35,20 +37,23 @@ jobs:
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
-      # SDK HTTP timeout (seconds) — bump from default 5s to 20s for transient
-      # Langfuse Cloud slowness on REST endpoints.
-      LANGFUSE_TIMEOUT: "20"
+      # Bumped 20 → 120s: SDK HTTP timeout for score REST writes. The
+      # previous 20s tripped under incident-day Langfuse Cloud slowness.
+      LANGFUSE_TIMEOUT: "120"
       # Disable the SDK's auto-initialised OTLP trace exporter. We never call
       # @observe(), so the exporter only produces noise. Langfuse REST reads
       # (observations, scores) are unaffected.
       # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
       LANGFUSE_TRACING_ENABLED: "false"
-      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      SLACK_WEBHOOK_URL: ${{ github.event_name == 'schedule' && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
+      SLACK_TARGET: ${{ github.event_name == 'schedule' && 'prod' || 'staging' }}
       EVAL_SUMMARY_PATH: /tmp/daily_eval_yesterday_summary.json
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
-      DIGEST_FAIL_ON_LANGFUSE_ERROR: "1"
+      # Flipped 1 → 0 (2026-05-12): degraded post is preferred over silent miss.
+      # Mirrors the change in daily-automation.yml; see commentary there.
+      DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
     steps:
       - uses: actions/checkout@v4
 

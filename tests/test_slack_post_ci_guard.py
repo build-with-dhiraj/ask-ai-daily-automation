@@ -54,12 +54,15 @@ class TestDigestSlackCIGuard(unittest.TestCase):
 
 class TestEvalSlackCIGuard(unittest.TestCase):
     def test_eval_post_skipped_when_not_in_actions(self) -> None:
+        # Contract change (2026-05-12): post_to_slack now returns bool (False
+        # on the local-run guard) instead of None, so the call site can
+        # branch on success. Old assertion was `assertIsNone(result)`.
         with patch.dict("os.environ", {"GITHUB_ACTIONS": ""}, clear=False):
             mod = _load("daily_eval", "daily_eval.py")
             buf = io.StringIO()
             with patch.object(sys, "stderr", buf), patch("urllib.request.urlopen") as mock_url:
                 result = mod.post_to_slack("https://example.com/x", "test")
-            self.assertIsNone(result)  # function signature is -> None
+            self.assertIs(result, False)
             self.assertIn("Not running in GitHub Actions", buf.getvalue())
             mock_url.assert_not_called()
 
@@ -75,7 +78,8 @@ class TestEvalSlackCIGuard(unittest.TestCase):
             mod = _load("daily_eval", "daily_eval.py")
             buf = io.StringIO()
             with patch.object(sys, "stderr", buf), patch("urllib.request.urlopen", return_value=_FakeResp()) as mock_url:
-                mod.post_to_slack("https://example.com/x", "test")
+                result = mod.post_to_slack("https://example.com/x", "test")
+            self.assertIs(result, True)
             self.assertNotIn("Not running in GitHub Actions", buf.getvalue())
             mock_url.assert_called_once()
 

@@ -107,25 +107,71 @@ def _empty_snapshot(stopped_reason: str) -> dict:
 # --- Metabase fetch (mirrors daily_digest.fetch_metabase_card) -------------
 
 
+_CLASSIFIER_RETRYABLE_HTTP_CODES = (408, 429, 500, 502, 503, 504)
+
+
 def _fetch_metabase_rows(card_id: int) -> Tuple[Optional[List[dict]], Optional[str]]:
+    """Fetch Metabase rows with bounded retries on transient failures.
+
+    Mirrors the loop shape used by `daily_digest.fetch_metabase_card_detailed`:
+    `range(N)` = N total attempts, with the last attempt not followed by a sleep.
+    Default 6 attempts, 5 sleeps of 10/20/40/80/120/120s capped at 120s, per-request
+    socket timeout 1800s (matches digest).
+
+    Retryable: `urllib.error.URLError` (covers socket.timeout) and
+    `urllib.error.HTTPError` whose `code` is one of 408/429/500/502/503/504.
+    Any other exception falls through to the outer `except Exception` and returns
+    `(None, err_repr)` exactly as the previous best-effort behaviour.
+    """
     base = os.environ.get("METABASE_URL", "").rstrip("/")
     api_key = os.environ.get("METABASE_API_KEY", "")
     if not base or not api_key:
         return None, "METABASE_URL or METABASE_API_KEY not set"
     url = f"{base}/api/card/{card_id}/query/json"
-    req = urllib.request.Request(
-        url,
-        method="POST",
-        headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
-        data=b"{}",
-    )
+
+    last_repr: Optional[str] = None
     try:
-        with urllib.request.urlopen(req) as resp:  # no timeout — match daily_digest
-            payload = resp.read()
-        result = json.loads(payload)
-        if isinstance(result, list):
-            return result, None
-        return None, "Metabase returned non-list JSON"
+        for attempt in range(6):
+            req = urllib.request.Request(
+                url,
+                method="POST",
+                headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+                data=b"{}",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=1800) as resp:
+                    payload = resp.read()
+                result = json.loads(payload)
+                if isinstance(result, list):
+                    return result, None
+                return None, "Metabase returned non-list JSON"
+            except urllib.error.HTTPError as exc:
+                last_repr = repr(exc)
+                if exc.code in _CLASSIFIER_RETRYABLE_HTTP_CODES and attempt < 5:
+                    wait = min(120, 10 * 2 ** attempt)
+                    print(
+                        f"[warn] Metabase card {card_id} HTTP {exc.code} "
+                        f"(attempt {attempt + 1}/6, retry in {wait}s)",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+                # Non-retryable HTTP code (e.g. 401/403/404) — bubble out to
+                # the outer except for the historic best-effort return shape.
+                raise
+            except urllib.error.URLError as exc:
+                last_repr = repr(exc)
+                if attempt < 5:
+                    wait = min(120, 10 * 2 ** attempt)
+                    print(
+                        f"[warn] Metabase card {card_id} URLError "
+                        f"(attempt {attempt + 1}/6, retry in {wait}s): {exc!r}",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
+        return None, last_repr or "unknown error"
     except Exception as exc:
         return None, repr(exc)
 

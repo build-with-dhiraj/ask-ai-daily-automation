@@ -75,7 +75,13 @@ def _idempotency_marker_path(prefix: str = "digest-posted") -> Path:
         or str(Path.home() / ".ask-ai-daily-automation" / "state")
     )
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return Path(base) / f"{prefix}-{today_utc}.marker"
+    # Scope the marker by SLACK_TARGET so a staging (workflow_dispatch) run
+    # cannot block the next prod (schedule) cron, and vice versa. Default to
+    # "prod" so locally-run posts use the safest fallback (skip same-day repost).
+    target = (os.environ.get("SLACK_TARGET") or "prod").strip().lower()
+    if target not in ("prod", "staging"):
+        target = "prod"
+    return Path(base) / f"{prefix}-{target}-{today_utc}.marker"
 
 
 def _already_posted_today(prefix: str = "digest-posted") -> bool:
@@ -140,7 +146,17 @@ def _env_int(name: str, default: int) -> int:
 
 
 # Metabase: retry all saved-question fetches (stream_logs uses the same count).
-METABASE_CARD_RETRIES = max(1, _env_int("METABASE_CARD_RETRIES", 3))
+# Bumped 3 → 6 (clamped 1..10) so a string of upstream timeouts doesn't kill the
+# digest. Combined with the 10/20/40/80/120/120s backoff below, six attempts give
+# ~5 min of cumulative wait — well within the 240-min job cap and worth the
+# tradeoff vs a silent 10:00 IST miss.
+METABASE_CARD_RETRIES = max(1, min(10, _env_int("METABASE_CARD_RETRIES", 6)))
+
+# Per-request socket timeout for Metabase digest card POSTs (seconds).
+# Default 1800 (30 min) — Metabase prod questions occasionally take 10+ min when
+# central.silver_stream_logs is slow; previous value of None (wait forever) meant
+# a hung Metabase node would block the digest indefinitely. Clamped 60..3600.
+METABASE_DIGEST_TIMEOUT_SEC = max(60, min(3600, _env_int("METABASE_DIGEST_TIMEOUT_SEC", 1800)))
 
 # Langfuse public API — page until empty or caps. LANGFUSE_*_MAX_PAGES=0 means no page cap.
 # Cloud Langfuse caps `limit` at 100 on /api/public/observations and /api/public/scores
@@ -153,6 +169,13 @@ LANGFUSE_SCORE_MAX_PAGES = _env_int("LANGFUSE_SCORE_MAX_PAGES", 60)
 
 # Downvotes: hide misleading "rate vs all traces" when Langfuse score rows are sparse.
 DIGEST_MIN_SCORE_ROWS_FOR_RATE = max(0, _env_int("DIGEST_MIN_SCORE_ROWS_FOR_RATE", 500))
+
+# Per-request socket timeout for Langfuse public REST GETs (seconds).
+# Bumped from a hard-coded 90s to env-controlled (default 300, clamp 30..900) —
+# Langfuse Cloud /api/public/observations slows to 60–120s past page ~50 under
+# heavy 24h pagination, and the hardcoded 90s sometimes tripped before the
+# retry loop got a chance to back off.
+LANGFUSE_GET_TIMEOUT_SEC = max(30, min(900, _env_int("LANGFUSE_GET_TIMEOUT_SEC", 300)))
 
 # If true, workflow fails when METABASE_STREAM_LOGS_CARD_ID is set but Metabase fetch fails.
 DIGEST_STRICT_STREAM_LOGS = os.environ.get("DIGEST_STRICT_STREAM_LOGS", "").strip().lower() in (
@@ -210,10 +233,16 @@ def _langfuse_auth_header() -> str:
     return f"Basic {token}"
 
 
-def _http_get_langfuse(url: str, headers: dict, timeout: int = 90) -> dict:
-    """GET with backoff on rate-limit / transient server errors."""
+def _http_get_langfuse(url: str, headers: dict, timeout: Optional[int] = None) -> dict:
+    """GET with backoff on rate-limit / transient server errors.
+
+    Defaults to env-controlled LANGFUSE_GET_TIMEOUT_SEC (default 300s).
+    8 total attempts with bounded exponential backoff (10/20/40/80/120/120/120/120s).
+    """
+    if timeout is None:
+        timeout = LANGFUSE_GET_TIMEOUT_SEC
     last_err: Optional[BaseException] = None
-    for attempt in range(5):
+    for attempt in range(8):
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -222,8 +251,9 @@ def _http_get_langfuse(url: str, headers: dict, timeout: int = 90) -> dict:
             last_err = exc
             # 408/504 added: Langfuse Cloud returns gateway timeouts past ~page 50
             # under heavy 24h pagination; without retry, one bad page kills the fetch.
-            if exc.code in (408, 429, 502, 503, 504) and attempt < 4:
-                time.sleep(min(30.0, 2.0**attempt))
+            # Cumulative max sleep over 7 retries: 10+20+40+80+120+120+120 = 510s ~ 8.5 min.
+            if exc.code in (408, 429, 502, 503, 504) and attempt < 7:
+                time.sleep(min(120.0, 10.0 * 2.0**attempt))
                 continue
             raise
     if last_err:
@@ -247,7 +277,10 @@ def _preflight_langfuse_or_exit() -> None:
         f"?fromTimestamp={urllib.parse.quote(from_24h)}&limit=1"
     )
     try:
-        _http_get_langfuse(url, {"Authorization": _langfuse_auth_header()}, timeout=45)
+        # Preflight: bumped 45 → 120s. Single trace lookup should be fast,
+        # but a slow first connect to Langfuse Cloud during a partial outage
+        # used to fail this gate before any retry could fire.
+        _http_get_langfuse(url, {"Authorization": _langfuse_auth_header()}, timeout=120)
     except urllib.error.HTTPError as exc:
         body = ""
         try:
@@ -327,7 +360,10 @@ def fetch_metabase_card_detailed(
     last_exc: Optional[BaseException] = None
     for attempt in range(retries):
         try:
-            result = _http_post_json(url, headers, timeout=None)
+            # METABASE_DIGEST_TIMEOUT_SEC (default 1800s) caps any single POST so a
+            # hung Metabase node can't deadlock the job; relies on the retry loop
+            # to recover when an attempt hits the cap.
+            result = _http_post_json(url, headers, timeout=METABASE_DIGEST_TIMEOUT_SEC)
             if isinstance(result, list):
                 return result, None
             return None, "Metabase returned non-list JSON"
@@ -338,7 +374,10 @@ def fetch_metabase_card_detailed(
                 file=sys.stderr,
             )
             if attempt + 1 < retries:
-                time.sleep(2**attempt)
+                # Backoff schedule: 10, 20, 40, 80, 120, 120s. Capped at 120 so
+                # six attempts cumulate to ~5 min of sleep, leaving ample budget
+                # within the 240-min job cap for the actual queries.
+                time.sleep(min(120, 10 * 2**attempt))
     return None, repr(last_exc) if last_exc else "unknown error"
 
 
@@ -1274,33 +1313,73 @@ def post_to_slack(blocks: list, fallback_text: str) -> bool:
             "unfurl_media": False,
         }
     ).encode()
-    req = urllib.request.Request(
-        SLACK_WEBHOOK,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            status = resp.getcode()
-            raw = resp.read().decode().strip()
-    except Exception as exc:
-        print(f"[error] Slack request failed: {repr(exc)}", file=sys.stderr)
-        return False
-    if status != 200:
-        print(f"[error] Slack HTTP {status}: {raw}", file=sys.stderr)
-        return False
-    if raw == "ok":
-        return True
-    try:
-        body = json.loads(raw)
-        if body.get("ok") is True:
+
+    # Retry policy: at most 1 retry (so worst case is 2 POSTs). We deliberately
+    # cap retries here because urllib cannot tell us whether a read-timeout
+    # happened before or after Slack received the bytes; a wider retry window
+    # turns "Slack post failed" into "two daily digests in #channel". The brief
+    # accepts a missed post over a duplicate.
+    retryable_codes = (429, 502, 503, 504)
+
+    for attempt in range(2):
+        req = urllib.request.Request(
+            SLACK_WEBHOOK,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            # Bumped 60 → 180 to absorb Slack edge-node slow first-byte under
+            # incident conditions; matches the patience we already grant
+            # Metabase and Langfuse.
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                status = resp.getcode()
+                raw = resp.read().decode().strip()
+        except urllib.error.HTTPError as exc:
+            if exc.code in retryable_codes and attempt == 0:
+                print(
+                    f"[warn] Slack HTTP {exc.code} on attempt {attempt + 1}; "
+                    "sleeping 5s before single retry",
+                    file=sys.stderr,
+                )
+                time.sleep(5)
+                continue
+            print(f"[error] Slack request failed: {exc!r}", file=sys.stderr)
+            return False
+        except urllib.error.URLError as exc:
+            # Pre-send / handshake failure on attempt 0 → retry once. After
+            # attempt 1, give up; a second connect failure within 5s usually
+            # means Slack is genuinely unreachable, not flaky.
+            if attempt == 0:
+                print(
+                    f"[warn] Slack URLError on attempt {attempt + 1}: {exc!r}; "
+                    "sleeping 5s before single retry",
+                    file=sys.stderr,
+                )
+                time.sleep(5)
+                continue
+            print(f"[error] Slack request failed after retry: {exc!r}", file=sys.stderr)
+            return False
+        except Exception as exc:
+            print(f"[error] Slack request failed: {repr(exc)}", file=sys.stderr)
+            return False
+
+        if status != 200:
+            print(f"[error] Slack HTTP {status}: {raw}", file=sys.stderr)
+            return False
+        if raw == "ok":
             return True
-        print(f"[error] Slack webhook response: {raw}", file=sys.stderr)
-        return False
-    except json.JSONDecodeError:
-        print(f"[error] Slack unexpected response body: {raw}", file=sys.stderr)
-        return False
+        try:
+            body = json.loads(raw)
+            if body.get("ok") is True:
+                return True
+            print(f"[error] Slack webhook response: {raw}", file=sys.stderr)
+            return False
+        except json.JSONDecodeError:
+            print(f"[error] Slack unexpected response body: {raw}", file=sys.stderr)
+            return False
+
+    return False
 
 
 def main() -> int:

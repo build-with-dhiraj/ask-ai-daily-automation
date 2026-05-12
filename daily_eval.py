@@ -87,7 +87,13 @@ def _eval_marker_path(prefix: str = "eval-posted") -> Path:
         or str(Path.home() / ".ask-ai-daily-automation" / "state")
     )
     today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return Path(base) / f"{prefix}-{today_utc}.marker"
+    # Scope the marker by SLACK_TARGET so a staging (workflow_dispatch) run
+    # cannot block the next prod (schedule) cron, and vice versa. Default to
+    # "prod" so locally-run posts use the safest fallback (skip same-day repost).
+    target = (os.environ.get("SLACK_TARGET") or "prod").strip().lower()
+    if target not in ("prod", "staging"):
+        target = "prod"
+    return Path(base) / f"{prefix}-{target}-{today_utc}.marker"
 
 
 def _eval_already_posted_today(prefix: str = "eval-posted") -> bool:
@@ -276,7 +282,9 @@ def metabase_session_token(base_url: str, username: str, password: str,
                             timeout: float | None = None) -> str:
     import urllib.request
     if timeout is None:
-        timeout = float(os.environ.get("METABASE_SESSION_TIMEOUT_SEC", "30.0"))
+        # Bumped 30 → 120 to absorb transient TLS handshake / VPN reconnect
+        # latency seen in 2026-05-11 incident; auth endpoint normally <2s.
+        timeout = float(os.environ.get("METABASE_SESSION_TIMEOUT_SEC", "120.0"))
     body = json.dumps({"username": username, "password": password}).encode("utf-8")
     req = urllib.request.Request(
         urljoin(base_url, "/api/session"),
@@ -291,20 +299,47 @@ def metabase_session_token(base_url: str, username: str, password: str,
     return data["id"]
 
 
+def _metabase_eval_total_attempts() -> int:
+    """Total attempt count for the eval Metabase fetch.
+
+    Env semantics match digest's METABASE_CARD_RETRIES: the env value is the
+    number of TOTAL attempts (not retries-after-the-first). Internally we
+    convert to ``max_retries = total - 1`` for the existing range loop.
+
+    Default 5 (i.e. 4 retries) — yields 4 sleeps of 10/20/40/80s = 150s total
+    backoff budget, within the 600-min job cap.
+    """
+    raw = (os.environ.get("METABASE_EVAL_RETRIES") or "").strip()
+    try:
+        total = int(raw) if raw else 5
+    except ValueError:
+        total = 5
+    return max(1, min(10, total))
+
+
 def metabase_run_card(base_url: str, card_id: int, auth_header: dict,
                        timeout: float | None = None,
-                       max_retries: int = 2) -> list[dict]:
+                       max_retries: int | None = None) -> list[dict]:
     """Run a saved Metabase question and return rows as list[dict].
-    
-    Retries up to max_retries times on socket timeout with exponential backoff.
-    timeout defaults to METABASE_QUERY_TIMEOUT_SEC env var (default 600s).
+
+    Retries up to max_retries times on socket timeout with bounded exponential
+    backoff (10/20/40/80/120s, capped at 120s).
+
+    timeout defaults to METABASE_QUERY_TIMEOUT_SEC env var (default 1800s).
+    max_retries defaults to METABASE_EVAL_RETRIES-1 (env value is total attempts;
+    default env value 5 → max_retries=4).
     """
     import urllib.request
     import urllib.error
-    
+
     if timeout is None:
-        timeout = float(os.environ.get("METABASE_QUERY_TIMEOUT_SEC", "600.0"))
-    
+        # Bumped 600 → 1800 (30 min). Eval Metabase questions can take 15+ min
+        # when astracdc.silver_conversational_query_table is hot; the previous
+        # 10-min cap was the proximate cause of the 2026-05-11 silent miss.
+        timeout = float(os.environ.get("METABASE_QUERY_TIMEOUT_SEC", "1800.0"))
+    if max_retries is None:
+        max_retries = _metabase_eval_total_attempts() - 1
+
     for attempt in range(max_retries + 1):
         try:
             req = urllib.request.Request(
@@ -320,7 +355,9 @@ def metabase_run_card(base_url: str, card_id: int, auth_header: dict,
             return rows
         except (socket.timeout, urllib.error.URLError) as e:
             if attempt < max_retries:
-                wait_time = 2 ** attempt  # exponential backoff: 1s, 2s, 4s, ...
+                # Bounded exponential backoff: 10, 20, 40, 80, 120, 120…s.
+                # Capped at 120 so a long retry tail stays inside the job cap.
+                wait_time = min(120, 10 * 2 ** attempt)
                 print(f"⚠️  Metabase card query timeout (attempt {attempt + 1}/{max_retries + 1}, will retry in {wait_time}s): {e}")
                 time.sleep(wait_time)
             else:
@@ -371,30 +408,81 @@ def normalize_metabase_rows(rows: list[dict]) -> list[dict]:
 # Slack post (incoming webhook)
 # ---------------------------------------------------------------------------
 
-def post_to_slack(webhook_url: str, text: str, timeout: float = 15.0) -> None:
-    # Production-only Slack post. GitHub Actions sets GITHUB_ACTIONS=true on every
-    # job (github-hosted AND self-hosted). Local shells do not. This guard prevents
-    # accidental Slack posts from `python3 daily_eval.py` runs on developer
-    # machines (which may have SLACK_WEBHOOK_URL in .env for testing).
-    # To force a local post (rare; debugging only): export GITHUB_ACTIONS=true.
+def post_to_slack(webhook_url: str, text: str, timeout: float = 120.0) -> bool:
+    """Post to Slack incoming webhook with bounded retry. Returns True on success.
+
+    Returns False (rather than the previous silent `None`) when:
+      - the GITHUB_ACTIONS guard fires (local run, no post attempted)
+      - the webhook responds with a non-`ok` body (Slack validation error)
+      - a non-retryable error is raised
+      - the single retry is exhausted
+
+    Retry policy mirrors `daily_digest.post_to_slack`: at most one retry on
+    `URLError` (covers connect/handshake failures) or HTTPError code in
+    {429, 502, 503, 504}. We deliberately do NOT retry on read-timeout after
+    sending bytes: urllib can't distinguish "Slack got the payload" from "Slack
+    didn't", and a duplicate post is worse than a miss.
+
+    The bool return is a contract change from the previous `-> None`; the
+    marker write at the call site is now conditional on a True return so a
+    silent non-`ok` body no longer suppresses the next-day repost.
+    """
     if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
         print(
             "[info] Not running in GitHub Actions — skipping Slack post. "
             "Set GITHUB_ACTIONS=true to override (debugging only).",
             file=sys.stderr,
         )
-        return
+        return False
     import urllib.request
-    body = json.dumps({"text": text}).encode("utf-8")
-    req = urllib.request.Request(
-        webhook_url, data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read().decode("utf-8")
-        if body.strip() != "ok":
-            print(f"⚠️  Slack webhook returned non-ok: {body}")
+    import urllib.error
+
+    body_bytes = json.dumps({"text": text}).encode("utf-8")
+    retryable_codes = (429, 502, 503, 504)
+
+    for attempt in range(2):  # initial + at most 1 retry
+        req = urllib.request.Request(
+            webhook_url, data=body_bytes,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                resp_body = resp.read().decode("utf-8")
+            if resp_body.strip() == "ok":
+                return True
+            # 200 with a non-`ok` body == Slack validation error; never
+            # retryable (re-sending the same payload will fail identically).
+            print(f"⚠️  Slack webhook returned non-ok: {resp_body}")
+            return False
+        except urllib.error.HTTPError as exc:
+            if exc.code in retryable_codes and attempt == 0:
+                print(
+                    f"[warn] Slack HTTP {exc.code} on attempt {attempt + 1}; "
+                    "sleeping 5s before single retry",
+                    file=sys.stderr,
+                )
+                time.sleep(5)
+                continue
+            print(f"⚠️  Slack webhook HTTP {exc.code}: {exc!r}")
+            return False
+        except urllib.error.URLError as exc:
+            # Treat as pre-send connect/handshake failure — safe to retry.
+            # urllib does not distinguish before/after-send for URLError, but a
+            # duplicate Slack post on a connect-side flake is the lesser evil
+            # vs a silent miss; bounded to 1 retry caps duplicate risk.
+            if attempt == 0:
+                print(
+                    f"[warn] Slack URLError on attempt {attempt + 1}: {exc!r}; "
+                    "sleeping 5s before single retry",
+                    file=sys.stderr,
+                )
+                time.sleep(5)
+                continue
+            print(f"⚠️  Slack webhook failed after retry: {exc!r}")
+            return False
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -945,14 +1033,21 @@ def main() -> int:
         return 0
 
     try:
-        post_to_slack(webhook, block)
-        print("✅ Posted to Slack.")
-        # Record successful post so a second invocation on this UTC day is a
-        # no-op. Write AFTER the post returns without exception.
-        _eval_write_posted_marker("eval-posted")
+        posted = post_to_slack(webhook, block)
     except Exception as e:
         print(f"❌ Slack post failed: {e}")
         return 1
+    if not posted:
+        # post_to_slack already logged the reason (non-ok body, HTTP error,
+        # local-run guard, etc.). Mirror digest behaviour: exit 1 so the
+        # workflow surfaces a red run, and DO NOT write the idempotency
+        # marker — that way a same-day re-dispatch can actually retry.
+        print("❌ Slack post did not succeed (see warnings above).")
+        return 1
+    print("✅ Posted to Slack.")
+    # Record successful post so a second invocation on this UTC day is a
+    # no-op. Write AFTER post_to_slack returns True.
+    _eval_write_posted_marker("eval-posted")
 
     if judge_outcome.stopped_reason == "complete" and os.path.exists(checkpoint_file):
         try:
