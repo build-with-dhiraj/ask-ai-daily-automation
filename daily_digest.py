@@ -140,7 +140,17 @@ def _env_int(name: str, default: int) -> int:
 
 
 # Metabase: retry all saved-question fetches (stream_logs uses the same count).
-METABASE_CARD_RETRIES = max(1, _env_int("METABASE_CARD_RETRIES", 3))
+# Bumped 3 → 6 (clamped 1..10) so a string of upstream timeouts doesn't kill the
+# digest. Combined with the 10/20/40/80/120/120s backoff below, six attempts give
+# ~5 min of cumulative wait — well within the 240-min job cap and worth the
+# tradeoff vs a silent 10:00 IST miss.
+METABASE_CARD_RETRIES = max(1, min(10, _env_int("METABASE_CARD_RETRIES", 6)))
+
+# Per-request socket timeout for Metabase digest card POSTs (seconds).
+# Default 1800 (30 min) — Metabase prod questions occasionally take 10+ min when
+# central.silver_stream_logs is slow; previous value of None (wait forever) meant
+# a hung Metabase node would block the digest indefinitely. Clamped 60..3600.
+METABASE_DIGEST_TIMEOUT_SEC = max(60, min(3600, _env_int("METABASE_DIGEST_TIMEOUT_SEC", 1800)))
 
 # Langfuse public API — page until empty or caps. LANGFUSE_*_MAX_PAGES=0 means no page cap.
 # Cloud Langfuse caps `limit` at 100 on /api/public/observations and /api/public/scores
@@ -327,7 +337,10 @@ def fetch_metabase_card_detailed(
     last_exc: Optional[BaseException] = None
     for attempt in range(retries):
         try:
-            result = _http_post_json(url, headers, timeout=None)
+            # METABASE_DIGEST_TIMEOUT_SEC (default 1800s) caps any single POST so a
+            # hung Metabase node can't deadlock the job; relies on the retry loop
+            # to recover when an attempt hits the cap.
+            result = _http_post_json(url, headers, timeout=METABASE_DIGEST_TIMEOUT_SEC)
             if isinstance(result, list):
                 return result, None
             return None, "Metabase returned non-list JSON"
@@ -338,7 +351,10 @@ def fetch_metabase_card_detailed(
                 file=sys.stderr,
             )
             if attempt + 1 < retries:
-                time.sleep(2**attempt)
+                # Backoff schedule: 10, 20, 40, 80, 120, 120s. Capped at 120 so
+                # six attempts cumulate to ~5 min of sleep, leaving ample budget
+                # within the 240-min job cap for the actual queries.
+                time.sleep(min(120, 10 * 2**attempt))
     return None, repr(last_exc) if last_exc else "unknown error"
 
 
