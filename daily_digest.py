@@ -396,6 +396,116 @@ def fetch_metabase_card(card_id: int, *, retries: int = 1) -> Optional[List]:
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Pre-flight: upstream data freshness check
+# ---------------------------------------------------------------------------
+#
+# Why: the cron fires at 03:00 UTC. Trino silver tables (e.g.
+# astracdc.silver_conversational_query_table, silver_prod_feedback_by_user_entity,
+# central.silver_stream_logs) sometimes haven't finished ingesting "yesterday"
+# (UTC) by then, which causes 3 cards (33282 follow-up, 33283 rephrase, 23036
+# downvote dump) to come back empty even though the SQL is correct.
+#
+# This probe uses card 33282 (Behavior Followup) as a canary: if it returns
+# >0 rows, the underlying silver_conversational_query_table has yesterday data,
+# which is a strong signal the other yesterday-dependent cards will too.
+#
+# Behaviour: poll every 5 min, up to 6 attempts (~30 min total budget). On
+# success → return True early. On budget exhausted or probe error → log and
+# return False — but the caller MUST NOT block the digest post; partial data
+# is better than no Slack message at all.
+
+UPSTREAM_PROBE_CARD_ID_DEFAULT = 33282  # Behavior Followup canary
+
+
+def _wait_for_upstream_yesterday_data(
+    *,
+    timeout_min: int = 30,
+    poll_interval_min: int = 5,
+    probe_card_id: Optional[int] = None,
+    sleep_fn=time.sleep,
+) -> bool:
+    """Poll a canary Metabase card until it has yesterday's data, or budget runs out.
+
+    Returns True if yesterday data is present, False if probe fails or budget
+    is exhausted. Never raises — callers expect a bool and must not be blocked
+    from posting the digest by a probe failure.
+    """
+    # Resolve which card to probe. Prefer the configured Behavior Followup card
+    # (filters on yesterday in SQL, so a row count >0 means upstream data is
+    # ingested). Fall back to the canary default if env not configured.
+    card_id = probe_card_id
+    if card_id is None:
+        if BEHAVIOR_FOLLOWUP_CARD_ID.isdigit():
+            card_id = int(BEHAVIOR_FOLLOWUP_CARD_ID)
+        else:
+            card_id = UPSTREAM_PROBE_CARD_ID_DEFAULT
+
+    # Budget math: ceil(timeout / interval), at least 1 attempt.
+    if poll_interval_min <= 0:
+        max_attempts = 1
+    else:
+        max_attempts = max(1, (timeout_min + poll_interval_min - 1) // poll_interval_min)
+
+    print(
+        f"[info] upstream-freshness probe: card={card_id}, "
+        f"budget={timeout_min}min, interval={poll_interval_min}min, "
+        f"max_attempts={max_attempts}",
+        file=sys.stderr,
+    )
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # retries=1 — the outer poll loop IS the retry mechanism here. We
+            # don't want each probe attempt to itself spend ~5min retrying;
+            # the goal is to fail fast and re-poll on the next interval.
+            rows = fetch_metabase_card(card_id, retries=1)
+        except Exception as exc:
+            # Defensive: fetch_metabase_card swallows exceptions and returns
+            # None, but if some future change re-raises, never crash the digest.
+            print(
+                f"[warn] upstream-freshness probe attempt {attempt}/{max_attempts} "
+                f"raised: {exc!r} — treating as not-ready",
+                file=sys.stderr,
+            )
+            rows = None
+
+        if rows is None:
+            print(
+                f"[warn] upstream-freshness probe attempt {attempt}/{max_attempts}: "
+                f"card {card_id} fetch failed (Metabase down? auth?). "
+                "Proceeding without further wait.",
+                file=sys.stderr,
+            )
+            # Probe itself broken (not just "no rows yet") — no point in waiting
+            # 30 min; return False and let the digest proceed best-effort.
+            return False
+
+        if len(rows) > 0:
+            print(
+                f"[info] upstream-freshness probe ok on attempt {attempt}: "
+                f"card {card_id} returned {len(rows)} rows — proceeding.",
+                file=sys.stderr,
+            )
+            return True
+
+        if attempt < max_attempts:
+            print(
+                f"[warn] upstream-freshness probe attempt {attempt}/{max_attempts}: "
+                f"card {card_id} returned 0 rows — sleeping {poll_interval_min}min before retry.",
+                file=sys.stderr,
+            )
+            sleep_fn(poll_interval_min * 60)
+
+    print(
+        f"[error] upstream silver table has no yesterday data after "
+        f"{timeout_min} min wait — digest will likely show empty sections "
+        f"(canary card {card_id} returned 0 rows on all {max_attempts} attempts)",
+        file=sys.stderr,
+    )
+    return False
+
+
 def fmt_academic(rows: Optional[List]) -> str:
     if rows is None:
         return "  _(unavailable)_"
@@ -2045,8 +2155,27 @@ def main() -> int:
             file=sys.stderr,
         )
 
+    # Pre-flight upstream data-freshness check. Cron fires at 03:00 UTC and
+    # Trino silver tables sometimes lag past midnight UTC, leaving the
+    # yesterday-dependent cards (33282, 33283, 23036) returning 0 rows. Probe
+    # the canary card and, if empty, poll 6× over 30 min before giving up.
+    # NEVER blocks the digest post — this is best-effort; partial data > silence.
+    try:
+        _wait_for_upstream_yesterday_data(timeout_min=30, poll_interval_min=5)
+    except Exception as exc:
+        print(
+            f"[warn] upstream-freshness probe raised unexpectedly: {exc!r} — "
+            "proceeding with digest fetch best-effort.",
+            file=sys.stderr,
+        )
+
     academic_rows = fetch_metabase_card(24973, retries=METABASE_CARD_RETRIES)
     nonacademic_rows = fetch_metabase_card(24974, retries=METABASE_CARD_RETRIES)
+    # Card 23036 (Downvote Dump) is known-slow due to its 4-way JOIN over a
+    # 15-day window. The METABASE_DIGEST_TIMEOUT_SEC ceiling (default 1800s /
+    # 30 min, applied per attempt in fetch_metabase_card_detailed) keeps any
+    # single hung attempt bounded. Bumping further is rarely useful — if 30 min
+    # isn't enough, the upstream silver table is the real problem.
     dump_rows = fetch_metabase_card(23036, retries=METABASE_CARD_RETRIES)
 
     score_items, dv_in_sample, scores_ok, scores_hit_cap = fetch_langfuse_scores()
