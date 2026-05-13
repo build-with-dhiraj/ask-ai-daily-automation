@@ -227,6 +227,11 @@ jobs:
       # job. We now PREFER a degraded Slack post (with `_fetch failed_` filler)
       # over no post. Worst-case landing slips from ~10:00 IST to ~11:30 IST.
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
+      # Cost & Latency section thresholds (per-percentile latency regression vs
+      # day-before, per-model cost spike vs day-before). The renderer flags 🔴
+      # in the Slack body when crossed. Tweak here without a code deploy.
+      LATENCY_REGRESSION_PCT: "20"
+      COST_SPIKE_PCT: "30"
     steps:
       - uses: actions/checkout@v4
 
