@@ -659,64 +659,6 @@ def _safe_pct_delta(today: Optional[float], prior: Optional[float]) -> Optional[
     return (t - p) / p * 100.0
 
 
-def fetch_langfuse_metrics(
-    measures: List[str],
-    aggregations: List[str],
-    dimensions: List[str],
-    from_ts: str,
-    to_ts: str,
-    granularity: str = "day",
-    view: str = "observations",
-) -> List[dict]:
-    """Generic Langfuse Metrics API caller.
-
-    Builds a query like:
-        {"view": "observations",
-         "metrics": [{"measure": "timeToFirstToken", "aggregation": "p50"}, ...],
-         "dimensions": [{"field": "providedModelName"}],
-         "fromTimestamp": "...", "toTimestamp": "...",
-         "timeDimension": {"granularity": "day"}}
-    URL-encodes the JSON as a `query` query-string param, calls
-    `/api/public/metrics`, and returns the `data` array (list of dicts with
-    keys `<aggregation>_<measureName>` plus each dimension field plus
-    `time_dimension`).
-
-    Reuses `_http_get_langfuse` for the same retry/timeout behaviour as the
-    existing fetchers (8 attempts, bounded backoff, env-tunable timeout). On
-    any exception returns `[]` and logs a warning — section will be omitted.
-
-    `measures` and `aggregations` must be the same length and are zipped 1:1.
-    """
-    if len(measures) != len(aggregations):
-        raise ValueError(
-            "fetch_langfuse_metrics: measures and aggregations must have equal length"
-        )
-    query: Dict[str, Any] = {
-        "view": view,
-        "metrics": [
-            {"measure": m, "aggregation": a} for m, a in zip(measures, aggregations)
-        ],
-        "dimensions": [{"field": d} for d in dimensions],
-        "fromTimestamp": from_ts,
-        "toTimestamp": to_ts,
-        "timeDimension": {"granularity": granularity},
-    }
-    qs = urllib.parse.urlencode({"query": json.dumps(query)})
-    url = f"{LANGFUSE_HOST}/api/public/metrics?{qs}"
-    try:
-        data = _http_get_langfuse(url, {"Authorization": _langfuse_auth_header()})
-    except Exception as exc:
-        print(
-            f"[warn] Langfuse metrics fetch failed ({measures}/{aggregations}): {repr(exc)}",
-            file=sys.stderr,
-        )
-        return []
-    rows = data.get("data") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        return []
-    return rows
-
-
 def _two_day_window_utc() -> Tuple[str, str, str, str]:
     """Return ISO-Z timestamps and day labels for (day_before, yesterday).
 
@@ -1019,12 +961,7 @@ def _fmt_tokens(n: Optional[int]) -> str:
     return f"{int(v)}"
 
 
-def fmt_cost_and_latency(
-    data: dict,
-    *,
-    regression_pct: int = 20,  # retained for API back-compat; unused (no D-on-D deltas)
-    spike_pct: int = 30,       # retained for API back-compat; unused
-) -> str:
+def fmt_cost_and_latency(data: dict) -> str:
     """Render the Cost & Latency section body, sourced from stream_logs.
 
     `data` shape (from `fetch_yesterday_cost_and_latency_from_stream_logs`):
@@ -1043,8 +980,8 @@ def fmt_cost_and_latency(
       • Cost: per-model + classifier + total
 
     No day-on-day deltas in this iteration — the new data source doesn't carry
-    yesterday-vs-day-before yet. `regression_pct` / `spike_pct` kwargs are kept
-    in the signature for compatibility with the build_blocks call site.
+    yesterday-vs-day-before yet, so the old `regression_pct` / `spike_pct`
+    thresholds aren't applicable.
     """
     if not isinstance(data, dict) or data.get("ok") is False:
         return (
@@ -2424,8 +2361,6 @@ def build_blocks(
     try:
         cost_latency_block = fmt_cost_and_latency(
             cost_latency_data or {"ok": False, "answer_by_model": {}, "classifier": None},
-            regression_pct=LATENCY_REGRESSION_PCT,
-            spike_pct=COST_SPIKE_PCT,
         )
     except Exception as exc:  # pragma: no cover — defence-in-depth only
         print(
