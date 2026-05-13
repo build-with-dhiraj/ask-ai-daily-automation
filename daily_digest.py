@@ -600,6 +600,114 @@ def fetch_langfuse_traces_total() -> Tuple[int, bool]:
         print(f"[warn] Langfuse traces failed: {repr(exc)}", file=sys.stderr)
         return 0, False
 
+
+# ---------------------------------------------------------------------------
+# Cost + Latency section (Langfuse Metrics API)
+#
+# The Metrics API (`GET /api/public/metrics`) accepts a URL-encoded JSON `query`
+# parameter and returns server-side-aggregated rows. We use it for two purposes:
+#   (a) per-model TTFT percentiles (p50/p90/p95), day-on-day
+#   (b) per-model total cost (USD), day-on-day
+# Both calls are best-effort: if the API errors, the section is omitted from
+# the digest with a placeholder; the rest of the digest still posts.
+#
+# IMPORTANT — verified live against cloud.langfuse.com on 2026-05-13:
+#   • The TTFT measure name is `timeToFirstToken` (camelCase), NOT
+#     `time_to_first_token` (snake_case — that errors HTTP 400). Values are
+#     returned in milliseconds, not seconds.
+#   • The cost measure is `totalCost`, aggregation `sum`. Returns USD.
+#   • The response shape is:
+#       {"data": [
+#         {"providedModelName": "gpt-4.1", "time_dimension": "2026-05-12",
+#          "p50_timeToFirstToken": 2495, "p90_timeToFirstToken": 3567.9, ...},
+#         {"providedModelName": null, ...},   # non-LLM observations — we skip
+#         ...
+#       ]}
+#     Field names are `<aggregation>_<measureName>` (e.g. `p50_timeToFirstToken`,
+#     `sum_totalCost`). Time grouping field is `time_dimension`.
+# ---------------------------------------------------------------------------
+
+# Anomaly thresholds — overridable via env so we can tune without a deploy.
+LATENCY_REGRESSION_PCT = max(0, _env_int("LATENCY_REGRESSION_PCT", 20))
+COST_SPIKE_PCT = max(0, _env_int("COST_SPIKE_PCT", 30))
+
+
+def _safe_pct_delta(today: Optional[float], prior: Optional[float]) -> Optional[float]:
+    """Compute (today - prior) / prior * 100 with NaN/None/zero guards.
+
+    Returns None when the delta is undefined (missing day, zero baseline, or
+    non-numeric input). Callers render `—` for None.
+    """
+    if today is None or prior is None:
+        return None
+    try:
+        t = float(today)
+        p = float(prior)
+    except (TypeError, ValueError):
+        return None
+    if p == 0:
+        return None
+    return (t - p) / p * 100.0
+
+
+def fetch_langfuse_metrics(
+    measures: List[str],
+    aggregations: List[str],
+    dimensions: List[str],
+    from_ts: str,
+    to_ts: str,
+    granularity: str = "day",
+    view: str = "observations",
+) -> List[dict]:
+    """Generic Langfuse Metrics API caller.
+
+    Builds a query like:
+        {"view": "observations",
+         "metrics": [{"measure": "timeToFirstToken", "aggregation": "p50"}, ...],
+         "dimensions": [{"field": "providedModelName"}],
+         "fromTimestamp": "...", "toTimestamp": "...",
+         "timeDimension": {"granularity": "day"}}
+    URL-encodes the JSON as a `query` query-string param, calls
+    `/api/public/metrics`, and returns the `data` array (list of dicts with
+    keys `<aggregation>_<measureName>` plus each dimension field plus
+    `time_dimension`).
+
+    Reuses `_http_get_langfuse` for the same retry/timeout behaviour as the
+    existing fetchers (8 attempts, bounded backoff, env-tunable timeout). On
+    any exception returns `[]` and logs a warning — section will be omitted.
+
+    `measures` and `aggregations` must be the same length and are zipped 1:1.
+    """
+    if len(measures) != len(aggregations):
+        raise ValueError(
+            "fetch_langfuse_metrics: measures and aggregations must have equal length"
+        )
+    query: Dict[str, Any] = {
+        "view": view,
+        "metrics": [
+            {"measure": m, "aggregation": a} for m, a in zip(measures, aggregations)
+        ],
+        "dimensions": [{"field": d} for d in dimensions],
+        "fromTimestamp": from_ts,
+        "toTimestamp": to_ts,
+        "timeDimension": {"granularity": granularity},
+    }
+    qs = urllib.parse.urlencode({"query": json.dumps(query)})
+    url = f"{LANGFUSE_HOST}/api/public/metrics?{qs}"
+    try:
+        data = _http_get_langfuse(url, {"Authorization": _langfuse_auth_header()})
+    except Exception as exc:
+        print(
+            f"[warn] Langfuse metrics fetch failed ({measures}/{aggregations}): {repr(exc)}",
+            file=sys.stderr,
+        )
+        return []
+    rows = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Error categorisation
 # ---------------------------------------------------------------------------
