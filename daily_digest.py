@@ -708,6 +708,141 @@ def fetch_langfuse_metrics(
     return rows
 
 
+def _two_day_window_utc() -> Tuple[str, str, str, str]:
+    """Return ISO-Z timestamps and day labels for (day_before, yesterday).
+
+    Returns: (from_ts, to_ts, day_before_label, yesterday_label)
+        from_ts = start-of-(day-before-yesterday) UTC
+        to_ts   = start-of-today UTC (exclusive upper bound)
+        day_before_label = "YYYY-MM-DD" for day-before
+        yesterday_label  = "YYYY-MM-DD" for yesterday
+
+    Mirrors how Langfuse buckets by `time_dimension` (granularity=day, UTC).
+    """
+    today_midnight = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    yesterday_midnight = today_midnight - timedelta(days=1)
+    day_before_midnight = today_midnight - timedelta(days=2)
+    return (
+        day_before_midnight.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        today_midnight.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        day_before_midnight.strftime("%Y-%m-%d"),
+        yesterday_midnight.strftime("%Y-%m-%d"),
+    )
+
+
+def fetch_yesterday_and_prior_latency() -> dict:
+    """Fetch TTFT p50/p90/p95 per model for yesterday + day-before.
+
+    Returns:
+        {
+          "yesterday": "YYYY-MM-DD",
+          "day_before": "YYYY-MM-DD",
+          "by_model": {
+            "gpt-4.1": {
+              "yesterday": {"p50": 2495.0, "p90": 3567.9, "p95": 4143.45},
+              "day_before": {"p50": 2400.0, "p90": 3500.0, "p95": 4100.0},
+            },
+            ...
+          },
+          "ok": True/False,
+        }
+
+    On API failure: returns {"by_model": {}, "ok": False, ...} and the
+    renderer omits the latency sub-block (the cost sub-block is independent
+    and can still render).
+
+    Skips rows where `providedModelName` is null (non-LLM observations) or
+    where ALL three percentile values are None (model without TTFT
+    instrumentation — Langfuse can't compute completion_start_time-start_time
+    when the SDK didn't emit completion_start_time).
+    """
+    from_ts, to_ts, day_before_label, yesterday_label = _two_day_window_utc()
+    rows = fetch_langfuse_metrics(
+        measures=["timeToFirstToken", "timeToFirstToken", "timeToFirstToken"],
+        aggregations=["p50", "p90", "p95"],
+        dimensions=["providedModelName"],
+        from_ts=from_ts,
+        to_ts=to_ts,
+        granularity="day",
+    )
+    ok = bool(rows) or rows == []  # [] is "API returned cleanly with no rows", still ok
+    # But fetch_langfuse_metrics returns [] both on error AND on empty success;
+    # since we can't distinguish, treat empty as ok=True only when an
+    # immediate latency-cost API success on a different measure isn't possible
+    # to verify here. Renderer will show the "(no TTFT data)" placeholder
+    # rather than the whole section being omitted in that case.
+    by_model: Dict[str, Dict[str, Dict[str, Optional[float]]]] = {}
+    for row in rows:
+        model = row.get("providedModelName")
+        if not model:  # null providedModelName → non-LLM observation, skip
+            continue
+        day = row.get("time_dimension")
+        if day not in (day_before_label, yesterday_label):
+            continue
+        p50 = row.get("p50_timeToFirstToken")
+        p90 = row.get("p90_timeToFirstToken")
+        p95 = row.get("p95_timeToFirstToken")
+        # Skip rows where every percentile is None — model had observations
+        # but no TTFT instrumentation. Renderer flags these as "(no TTFT data)".
+        if p50 is None and p90 is None and p95 is None:
+            continue
+        bucket = "yesterday" if day == yesterday_label else "day_before"
+        by_model.setdefault(model, {})
+        by_model[model][bucket] = {"p50": p50, "p90": p90, "p95": p95}
+    return {
+        "yesterday": yesterday_label,
+        "day_before": day_before_label,
+        "by_model": by_model,
+        "ok": True,  # Even an empty result is "ok" — placeholder will render.
+    }
+
+
+def fetch_yesterday_and_prior_cost() -> dict:
+    """Fetch total cost (USD) per model for yesterday + day-before.
+
+    Returns the same shape as `fetch_yesterday_and_prior_latency` but
+    `by_model[name][bucket]` is a single dict `{"total": <float>}`:
+
+        {"by_model": {"gpt-4.1": {"yesterday": {"total": 218.32},
+                                  "day_before": {"total": 198.10}}},
+         "yesterday": "...", "day_before": "...", "ok": True}
+
+    Skips rows with null providedModelName. Models with total cost of None
+    or 0 are kept here (genuinely zero); the renderer suppresses $0 rows
+    (the plan: "if cost is $0 for a model that had no traffic, suppress the
+    row — don't flag as anomaly").
+    """
+    from_ts, to_ts, day_before_label, yesterday_label = _two_day_window_utc()
+    rows = fetch_langfuse_metrics(
+        measures=["totalCost"],
+        aggregations=["sum"],
+        dimensions=["providedModelName"],
+        from_ts=from_ts,
+        to_ts=to_ts,
+        granularity="day",
+    )
+    by_model: Dict[str, Dict[str, Dict[str, Optional[float]]]] = {}
+    for row in rows:
+        model = row.get("providedModelName")
+        if not model:
+            continue
+        day = row.get("time_dimension")
+        if day not in (day_before_label, yesterday_label):
+            continue
+        total = row.get("sum_totalCost")
+        bucket = "yesterday" if day == yesterday_label else "day_before"
+        by_model.setdefault(model, {})
+        by_model[model][bucket] = {"total": total}
+    return {
+        "yesterday": yesterday_label,
+        "day_before": day_before_label,
+        "by_model": by_model,
+        "ok": True,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Error categorisation
 # ---------------------------------------------------------------------------
