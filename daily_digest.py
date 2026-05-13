@@ -645,6 +645,10 @@ def _safe_pct_delta(today: Optional[float], prior: Optional[float]) -> Optional[
         p = float(prior)
     except (TypeError, ValueError):
         return None
+    # NaN poisons every comparison downstream (NaN >= 20 is False, but NaN
+    # printed with _fmt_delta_arrow still leaks "↑nan%") — treat as undefined.
+    if t != t or p != p:  # NaN check via self-inequality (stdlib-only)
+        return None
     if p == 0:
         return None
     return (t - p) / p * 100.0
