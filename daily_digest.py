@@ -1384,6 +1384,8 @@ def _summarise_today_for_snapshot(
     behavior_follow_rows: Optional[List],
     behavior_rephrase_rows: Optional[List],
     classifier_snapshot: Optional[dict],
+    latency_data: Optional[dict] = None,
+    cost_data: Optional[dict] = None,
 ) -> dict:
     """Build a compact dict of today's digest data for snapshot + LLM input.
 
@@ -1444,6 +1446,32 @@ def _summarise_today_for_snapshot(
             })
         return out
 
+    # Latency + cost — yesterday-only flat shape for Top 3 Insights LLM.
+    # The LLM input shouldn't lug around day-before values too — only yesterday
+    # numbers per model. Tomorrow's run can compare against tomorrow's
+    # yesterday-vs-day-before fetch directly from the Metrics API.
+    model_latency_yesterday: Dict[str, Dict[str, Optional[float]]] = {}
+    if isinstance(latency_data, dict):
+        for model, buckets in (latency_data.get("by_model") or {}).items():
+            y = (buckets or {}).get("yesterday") or {}
+            model_latency_yesterday[model] = {
+                "p50_ms": y.get("p50"),
+                "p90_ms": y.get("p90"),
+                "p95_ms": y.get("p95"),
+            }
+    model_cost_yesterday: Dict[str, Optional[float]] = {}
+    if isinstance(cost_data, dict):
+        for model, buckets in (cost_data.get("by_model") or {}).items():
+            y_total = ((buckets or {}).get("yesterday") or {}).get("total")
+            if y_total is None:
+                continue
+            try:
+                cost_val = float(y_total)
+            except (TypeError, ValueError):
+                continue
+            if cost_val > 0:
+                model_cost_yesterday[model] = round(cost_val, 4)
+
     return {
         "langfuse_errors_total": int(total_errors),
         "langfuse_errors_breakdown": cat_counts,
@@ -1469,6 +1497,10 @@ def _summarise_today_for_snapshot(
             if isinstance((classifier_snapshot or {}).get("category_counts"), dict)
             else {}
         ),
+        # NEW: per-model latency + cost for tomorrow's Top 3 Insights LLM call.
+        # Latency in ms (matches Langfuse Metrics API). Cost in USD.
+        "model_latency_yesterday": model_latency_yesterday,
+        "model_cost_yesterday": model_cost_yesterday,
     }
 
 
@@ -2150,6 +2182,8 @@ def build_blocks(
     scores_ok: bool = True,
     eval_snapshot_path: str = "",
     top_insights_text: Optional[str] = None,
+    latency_data: Optional[dict] = None,
+    cost_data: Optional[dict] = None,
 ) -> list:
     """Assemble the digest in Phase 1 order.
 
@@ -2157,15 +2191,16 @@ def build_blocks(
       1. Header
       2. Top 3 Insights (NEW)
       3. Today's broken chapter (MOVED + RENAMED)
-      4. Langfuse Errors (24h)
-      5. Video co-pilot API health (stream_logs)
-      6. User Comments on Downvotes (TRIMMED — stats only)
-      7. Free-text feedback breakdown
-      8. Yesterday's Downvoted Queries Snapshot (TRIMMED — top 5 reasons)
-      9. Multi-turn burst (split + context)
-     10. Rephrase / language-switch (split + context)
-     11. Rolling 21d Downvote Reasons — merged 2-column fields block
-     12. Footer
+      4. Cost & Latency (yesterday) — NEW
+      5. Langfuse Errors (24h)
+      6. Video co-pilot API health (stream_logs)
+      7. User Comments on Downvotes (TRIMMED — stats only)
+      8. Free-text feedback breakdown
+      9. Yesterday's Downvoted Queries Snapshot (TRIMMED — top 5 reasons)
+     10. Multi-turn burst (split + context)
+     11. Rephrase / language-switch (split + context)
+     12. Rolling 21d Downvote Reasons — merged 2-column fields block
+     13. Footer
     """
     dump_block        = fmt_downvote_dump(dump_rows)
     scores_block      = fmt_scores(
@@ -2222,7 +2257,32 @@ def build_blocks(
         ),
     ])
 
-    # 4. Langfuse Errors (24h)
+    # 4. Cost & Latency (yesterday) — NEW. Best-effort: any unexpected error
+    # in the renderer is caught here so a misshaped latency/cost dict can never
+    # block the rest of the digest from posting.
+    try:
+        cost_latency_block = fmt_cost_and_latency(
+            latency_data or {"ok": False, "by_model": {}},
+            cost_data or {"ok": False, "by_model": {}},
+            regression_pct=LATENCY_REGRESSION_PCT,
+            spike_pct=COST_SPIKE_PCT,
+        )
+    except Exception as exc:  # pragma: no cover — defence-in-depth only
+        print(
+            f"[warn] fmt_cost_and_latency raised unexpectedly: {exc!r}",
+            file=sys.stderr,
+        )
+        cost_latency_block = (
+            "_(cost/latency unavailable — Langfuse fetch failed)_"
+        )
+    blocks.extend([
+        divider,
+        section(
+            f":money_with_wings: *Cost & Latency (yesterday)*\n{cost_latency_block}"
+        ),
+    ])
+
+    # 5. Langfuse Errors (24h)
     blocks.extend([
         divider,
         section(f":rotating_light: *Langfuse Errors (last 24h)*\n{errors_block}"),
@@ -2447,6 +2507,20 @@ def main() -> int:
     total_traces, traces_ok = fetch_langfuse_traces_total()
     _assert_langfuse_or_exit(traces_ok, "fetch_langfuse_traces_total")
 
+    # Cost + latency are BEST-EFFORT — never gated by the strict Langfuse fail-fast.
+    # If the Metrics API errors, the section renders as a placeholder; the rest
+    # of the digest still posts.
+    try:
+        latency_data = fetch_yesterday_and_prior_latency()
+    except Exception as exc:
+        print(f"[warn] latency fetch raised: {exc!r}", file=sys.stderr)
+        latency_data = {"ok": False, "by_model": {}}
+    try:
+        cost_data = fetch_yesterday_and_prior_cost()
+    except Exception as exc:
+        print(f"[warn] cost fetch raised: {exc!r}", file=sys.stderr)
+        cost_data = {"ok": False, "by_model": {}}
+
     follow_cfg = BEHAVIOR_FOLLOWUP_CARD_ID.isdigit()
     follow_rows = (
         fetch_metabase_card(int(BEHAVIOR_FOLLOWUP_CARD_ID), retries=METABASE_CARD_RETRIES)
@@ -2520,6 +2594,8 @@ def main() -> int:
         behavior_follow_rows=follow_rows,
         behavior_rephrase_rows=rephrase_rows,
         classifier_snapshot=classifier_snap_for_summary,
+        latency_data=latency_data,
+        cost_data=cost_data,
     )
 
     yesterday_snapshot = _load_yesterday_snapshot()
@@ -2565,6 +2641,8 @@ def main() -> int:
         scores_ok=scores_ok,
         eval_snapshot_path=EVAL_SUMMARY_PATH,
         top_insights_text=top_insights_text,
+        latency_data=latency_data,
+        cost_data=cost_data,
     )
     print(f"[info] {fallback_text.splitlines()[0]}\n[{len(blocks)} blocks]", file=sys.stderr)
 
