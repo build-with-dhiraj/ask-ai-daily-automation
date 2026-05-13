@@ -8,16 +8,9 @@ name: Daily Automation
 
 on:
   schedule:
-    # 03:00 UTC == 08:30 IST (UTC+5:30); digest runs after eval on same workflow.
-    # Why 03:00 UTC: silver ETL for astracdc.silver_conversational_query_table
-    # (used by eval Q33193) lands at ~00:55 UTC each day; central.silver_stream_logs
-    # (used by digest Q33285) lands at ~02:08 UTC. 03:00 UTC gives 125-min buffer
-    # on silver and 52-min on stream_logs, and Trino UTC `CURRENT_DATE - 1` aligns
-    # with Python `date.today() - 1` (Mac in IST) at this hour. Verified empirically
-    # 2026-05-11 across 4 days of historical cdp_ingested_at timestamps.
     - cron: '0 3 * * *'
-    workflow_dispatch:
-    inputs:
+  workflow_dispatch:      # ✅ CORRECT: at the same level as schedule
+    inputs:               # ✅ CORRECT: proper indentation
       force_prod_slack:
         description: 'Force production Slack channel (for manual triggers)'
         required: false
@@ -88,8 +81,8 @@ jobs:
           # via langfuse.create_score() use a separate REST path and are unaffected.
           # See https://github.com/langfuse/langfuse-python/blob/v3.7.0/langfuse/_client/environment_variables.py
           LANGFUSE_TRACING_ENABLED: "false"
-          SLACK_WEBHOOK_URL: ${{ github.event_name == 'schedule' && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
-          SLACK_TARGET: ${{ github.event_name == 'schedule' && 'prod' || 'staging' }}
+          SLACK_WEBHOOK_URL: ${{ (github.event_name == 'schedule' || github.event.inputs.force_prod_slack == 'true') && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
+          SLACK_TARGET: ${{ (github.event_name == 'schedule' || github.event.inputs.force_prod_slack == 'true') && 'prod' || 'staging' }}
           # Bumped 90 → 300s: per-LLM-call HTTP timeout in judge_runner. A 90s
           # cap meant a single sticky Azure call would error out (ERROR sample)
           # rather than ride out a transient slow response. With 300s + the
@@ -216,8 +209,8 @@ jobs:
       LANGFUSE_TIMEOUT: "120"
       # Disable OTLP trace exporter — see eval job env above for rationale.
       LANGFUSE_TRACING_ENABLED: "false"
-      SLACK_WEBHOOK_URL: ${{ github.event_name == 'schedule' && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
-      SLACK_TARGET: ${{ github.event_name == 'schedule' && 'prod' || 'staging' }}
+      SLACK_WEBHOOK_URL: ${{ (github.event_name == 'schedule' || github.event.inputs.force_prod_slack == 'true') && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
+      SLACK_TARGET: ${{ (github.event_name == 'schedule' || github.event.inputs.force_prod_slack == 'true') && 'prod' || 'staging' }}
       METABASE_BEHAVIOR_FOLLOWUP_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_FOLLOWUP_CARD_ID }}
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
