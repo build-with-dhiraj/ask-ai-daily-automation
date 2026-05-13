@@ -16,7 +16,16 @@ on:
     # with Python `date.today() - 1` (Mac in IST) at this hour. Verified empirically
     # 2026-05-11 across 4 days of historical cdp_ingested_at timestamps.
     - cron: '0 3 * * *'
-  workflow_dispatch:
+    workflow_dispatch:
+    inputs:
+      force_prod_slack:
+        description: 'Force production Slack channel (for manual triggers)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 # Single-queue across Daily Automation + Daily Eval + Daily Digest so the one
 # self-hosted Mac runner never has overlapping work. A second dispatch QUEUES;
