@@ -631,12 +631,10 @@ def fetch_langfuse_traces_total() -> Tuple[int, bool]:
 LATENCY_REGRESSION_PCT = max(0, _env_int("LATENCY_REGRESSION_PCT", 20))
 COST_SPIKE_PCT = max(0, _env_int("COST_SPIKE_PCT", 30))
 
-# Models acting as the classifier role. Membership in this set is currently
-# the *only* role discriminator — until the model record gains an explicit
-# `role` field, exact name match here is how the renderer decides whether a
-# model row belongs in the Classifier Latency sub-block (with `avg`) or the
-# Answer TTFT sub-block (percentiles only).
-_CLASSIFIER_MODELS = {"gpt-5-nano"}
+# NOTE: `_CLASSIFIER_MODELS` was removed when the cost/latency section moved
+# from Langfuse to `cdp.central.silver_stream_logs`. The classifier model name
+# is not present in stream_logs, so classifier is rendered as a single
+# aggregate row (no per-model breakdown). See `fetch_yesterday_cost_and_latency_from_stream_logs`.
 
 
 def _safe_pct_delta(today: Optional[float], prior: Optional[float]) -> Optional[float]:
@@ -743,120 +741,224 @@ def _two_day_window_utc() -> Tuple[str, str, str, str]:
     )
 
 
-def fetch_yesterday_and_prior_latency() -> dict:
-    """Fetch TTFT p50/p90/p95 per model for yesterday + day-before.
+# ---------------------------------------------------------------------------
+# Cost & Latency — sourced from cdp.central.silver_stream_logs (Metabase)
+# ---------------------------------------------------------------------------
+# Replaces the prior Langfuse-Metrics-API-backed fetchers. Two native queries
+# run via Metabase /api/dataset (Trino-Prod DB 895): one per-model answer
+# metrics block, one aggregate classifier block. Both filter to SUCCESS rows
+# on /v1/nebula/video-co-pilot for yesterday in UTC.
 
-    Returns:
+_ANSWER_METRICS_SQL = """
+WITH base AS (
+  SELECT
+    json_extract_scalar(additional_metadata, '$.llm_model_name')                           AS llm_model_name,
+    CAST(json_extract_scalar(additional_metadata, '$.time_to_first_token_ms') AS DOUBLE)   AS ttft_ms,
+    CAST(json_extract_scalar(additional_metadata, '$.student_ttft')           AS DOUBLE) * 1000.0 AS student_ttft_ms,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_ttft')               AS DOUBLE) * 1000.0 AS llm_ttft_ms,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_cost')               AS DOUBLE)   AS llm_cost,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_input_tokens')       AS BIGINT)   AS llm_input_tokens,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_output_tokens')      AS BIGINT)   AS llm_output_tokens,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_cached_tokens')      AS BIGINT)   AS llm_cached_tokens
+  FROM cdp.central.silver_stream_logs
+  WHERE status = 'SUCCESS'
+    AND endpoint = '/v1/nebula/video-co-pilot'
+    AND created_at >= cast({{start_ts}} AS timestamp with time zone)
+    AND created_at <  cast({{end_ts}}   AS timestamp with time zone)
+    AND json_extract_scalar(additional_metadata, '$.llm_model_name') IS NOT NULL
+)
+SELECT
+  llm_model_name,
+  COUNT(*)                                            AS request_count,
+  approx_percentile(ttft_ms,         0.50)            AS ttft_ms_p50,
+  approx_percentile(ttft_ms,         0.90)            AS ttft_ms_p90,
+  approx_percentile(ttft_ms,         0.95)            AS ttft_ms_p95,
+  approx_percentile(student_ttft_ms, 0.50)            AS student_ttft_ms_p50,
+  approx_percentile(student_ttft_ms, 0.90)            AS student_ttft_ms_p90,
+  approx_percentile(student_ttft_ms, 0.95)            AS student_ttft_ms_p95,
+  approx_percentile(llm_ttft_ms,     0.50)            AS llm_ttft_ms_p50,
+  approx_percentile(llm_ttft_ms,     0.90)            AS llm_ttft_ms_p90,
+  approx_percentile(llm_ttft_ms,     0.95)            AS llm_ttft_ms_p95,
+  SUM(llm_cost)                                       AS llm_cost_usd,
+  SUM(llm_input_tokens)                               AS llm_input_tokens,
+  SUM(llm_output_tokens)                              AS llm_output_tokens,
+  SUM(llm_cached_tokens)                              AS llm_cached_tokens
+FROM base
+GROUP BY llm_model_name
+ORDER BY request_count DESC
+""".strip()
+
+
+_CLASSIFIER_METRICS_SQL = """
+WITH base AS (
+  SELECT
+    CAST(json_extract_scalar(additional_metadata, '$.classification_time') AS DOUBLE) * 1000.0 AS classification_ms,
+    CAST(json_extract_scalar(additional_metadata, '$.classification_cost') AS DOUBLE)         AS classification_cost
+  FROM cdp.central.silver_stream_logs
+  WHERE status = 'SUCCESS'
+    AND endpoint = '/v1/nebula/video-co-pilot'
+    AND created_at >= cast({{start_ts}} AS timestamp with time zone)
+    AND created_at <  cast({{end_ts}}   AS timestamp with time zone)
+    AND json_extract_scalar(additional_metadata, '$.classification_time') IS NOT NULL
+)
+SELECT
+  COUNT(*)                                       AS request_count,
+  AVG(classification_ms)                         AS avg_ms,
+  approx_percentile(classification_ms, 0.50)     AS classification_ms_p50,
+  approx_percentile(classification_ms, 0.90)     AS classification_ms_p90,
+  approx_percentile(classification_ms, 0.95)     AS classification_ms_p95,
+  SUM(classification_cost)                       AS classification_cost_usd
+FROM base
+""".strip()
+
+
+def _yesterday_utc_window() -> Tuple[str, str]:
+    """Return (start_ts, end_ts) ISO-Z strings for yesterday in UTC.
+
+    Half-open `[yesterday_00:00:00Z, today_00:00:00Z)`. Re-derived locally to
+    keep this fetcher self-contained (the older `_two_day_window_utc` returned
+    a two-day span tailored for the prior Langfuse fetchers).
+    """
+    today_midnight = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    yesterday_midnight = today_midnight - timedelta(days=1)
+    return (
+        yesterday_midnight.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        today_midnight.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+def _coerce_float(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int_or_none(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return None
+
+
+def fetch_yesterday_cost_and_latency_from_stream_logs() -> dict:
+    """Fetch per-model answer + aggregate classifier metrics for yesterday.
+
+    Sources `cdp.central.silver_stream_logs` (Trino-Prod, DB 895) via Metabase
+    `/api/dataset`. Returns:
+
         {
-          "yesterday": "YYYY-MM-DD",
-          "day_before": "YYYY-MM-DD",
-          "by_model": {
-            "gpt-4.1": {
-              "yesterday": {"p50": 2495.0, "p90": 3567.9, "p95": 4143.45},
-              "day_before": {"p50": 2400.0, "p90": 3500.0, "p95": 4100.0},
-            },
-            ...
-          },
           "ok": True/False,
+          "yesterday": "YYYY-MM-DD",
+          "answer_by_model": {
+            "<model>": {
+              "request_count": int,
+              "ttft_ms":      {"p50": float, "p90": float, "p95": float},
+              "student_ttft": {"p50": float, "p90": float, "p95": float},
+              "llm_ttft":     {"p50": float, "p90": float, "p95": float},
+              "cost_usd": float,
+              "tokens": {"input": int, "output": int, "cached": int},
+            }, ...
+          },
+          "classifier": {
+            "request_count": int,
+            "avg_ms": float,
+            "p50": float, "p90": float, "p95": float,
+            "cost_usd": float,
+          } | None,
         }
 
-    On API failure: returns {"by_model": {}, "ok": False, ...} and the
-    renderer omits the latency sub-block (the cost sub-block is independent
-    and can still render).
+    On total failure: `ok=False`, both sub-dicts empty/None. Renderer prints
+    a "(no data)" placeholder for missing sub-blocks.
 
-    Skips rows where `providedModelName` is null (non-LLM observations) or
-    where ALL three percentile values are None (model without TTFT
-    instrumentation — Langfuse can't compute completion_start_time-start_time
-    when the SDK didn't emit completion_start_time).
+    Note: the per-model `request_count` is LLM-answered requests only —
+    ~45% of SUCCESS rows are non-LLM paths (excluded by the `IS NOT NULL`
+    filter on `llm_model_name`).
     """
-    from_ts, to_ts, day_before_label, yesterday_label = _two_day_window_utc()
-    rows = fetch_langfuse_metrics(
-        measures=[
-            "timeToFirstToken",
-            "timeToFirstToken",
-            "timeToFirstToken",
-            "timeToFirstToken",
-        ],
-        aggregations=["avg", "p50", "p90", "p95"],
-        dimensions=["providedModelName"],
-        from_ts=from_ts,
-        to_ts=to_ts,
-        granularity="day",
-    )
-    ok = bool(rows) or rows == []  # [] is "API returned cleanly with no rows", still ok
-    # But fetch_langfuse_metrics returns [] both on error AND on empty success;
-    # since we can't distinguish, treat empty as ok=True only when an
-    # immediate latency-cost API success on a different measure isn't possible
-    # to verify here. Renderer will show the "(no TTFT data)" placeholder
-    # rather than the whole section being omitted in that case.
-    by_model: Dict[str, Dict[str, Dict[str, Optional[float]]]] = {}
-    for row in rows:
-        model = row.get("providedModelName")
-        if not model:  # null providedModelName → non-LLM observation, skip
-            continue
-        day = row.get("time_dimension")
-        if day not in (day_before_label, yesterday_label):
-            continue
-        avg = row.get("avg_timeToFirstToken")
-        p50 = row.get("p50_timeToFirstToken")
-        p90 = row.get("p90_timeToFirstToken")
-        p95 = row.get("p95_timeToFirstToken")
-        # Skip rows where every TTFT stat is None — model had observations
-        # but no TTFT instrumentation. Renderer flags these as "(no TTFT data)".
-        if avg is None and p50 is None and p90 is None and p95 is None:
-            continue
-        bucket = "yesterday" if day == yesterday_label else "day_before"
-        by_model.setdefault(model, {})
-        by_model[model][bucket] = {"avg": avg, "p50": p50, "p90": p90, "p95": p95}
+    from metabase_client import run_native_query, MetabaseQueryError  # local import to keep top-level lean
+
+    start_ts, end_ts = _yesterday_utc_window()
+    params = {"start_ts": start_ts, "end_ts": end_ts}
+    yesterday_label = start_ts[:10]
+
+    answer_by_model: Dict[str, Dict[str, Any]] = {}
+    classifier: Optional[Dict[str, Any]] = None
+    any_ok = False
+
+    # ---- Answer per-model query --------------------------------------------
+    try:
+        rows = run_native_query(_ANSWER_METRICS_SQL, params)
+        any_ok = True
+        for row in rows:
+            model = row.get("llm_model_name")
+            if not model:
+                continue
+            answer_by_model[str(model)] = {
+                "request_count": _coerce_int_or_none(row.get("request_count")) or 0,
+                "ttft_ms": {
+                    "p50": _coerce_float(row.get("ttft_ms_p50")),
+                    "p90": _coerce_float(row.get("ttft_ms_p90")),
+                    "p95": _coerce_float(row.get("ttft_ms_p95")),
+                },
+                "student_ttft": {
+                    "p50": _coerce_float(row.get("student_ttft_ms_p50")),
+                    "p90": _coerce_float(row.get("student_ttft_ms_p90")),
+                    "p95": _coerce_float(row.get("student_ttft_ms_p95")),
+                },
+                "llm_ttft": {
+                    "p50": _coerce_float(row.get("llm_ttft_ms_p50")),
+                    "p90": _coerce_float(row.get("llm_ttft_ms_p90")),
+                    "p95": _coerce_float(row.get("llm_ttft_ms_p95")),
+                },
+                "cost_usd": _coerce_float(row.get("llm_cost_usd")) or 0.0,
+                "tokens": {
+                    "input": _coerce_int_or_none(row.get("llm_input_tokens")) or 0,
+                    "output": _coerce_int_or_none(row.get("llm_output_tokens")) or 0,
+                    "cached": _coerce_int_or_none(row.get("llm_cached_tokens")) or 0,
+                },
+            }
+    except Exception as exc:
+        print(
+            f"[warn] stream_logs answer-metrics query failed: {exc!r}",
+            file=sys.stderr,
+        )
+
+    # ---- Classifier aggregate query ----------------------------------------
+    try:
+        rows = run_native_query(_CLASSIFIER_METRICS_SQL, params)
+        any_ok = True
+        if rows:
+            row = rows[0]
+            req_count = _coerce_int_or_none(row.get("request_count")) or 0
+            if req_count > 0:
+                classifier = {
+                    "request_count": req_count,
+                    "avg_ms": _coerce_float(row.get("avg_ms")),
+                    "p50": _coerce_float(row.get("classification_ms_p50")),
+                    "p90": _coerce_float(row.get("classification_ms_p90")),
+                    "p95": _coerce_float(row.get("classification_ms_p95")),
+                    "cost_usd": _coerce_float(row.get("classification_cost_usd")) or 0.0,
+                }
+    except Exception as exc:
+        print(
+            f"[warn] stream_logs classifier-metrics query failed: {exc!r}",
+            file=sys.stderr,
+        )
+
     return {
+        "ok": any_ok,
         "yesterday": yesterday_label,
-        "day_before": day_before_label,
-        "by_model": by_model,
-        "ok": True,  # Even an empty result is "ok" — placeholder will render.
-    }
-
-
-def fetch_yesterday_and_prior_cost() -> dict:
-    """Fetch total cost (USD) per model for yesterday + day-before.
-
-    Returns the same shape as `fetch_yesterday_and_prior_latency` but
-    `by_model[name][bucket]` is a single dict `{"total": <float>}`:
-
-        {"by_model": {"gpt-4.1": {"yesterday": {"total": 218.32},
-                                  "day_before": {"total": 198.10}}},
-         "yesterday": "...", "day_before": "...", "ok": True}
-
-    Skips rows with null providedModelName. Models with total cost of None
-    or 0 are kept here (genuinely zero); the renderer suppresses $0 rows
-    (the plan: "if cost is $0 for a model that had no traffic, suppress the
-    row — don't flag as anomaly").
-    """
-    from_ts, to_ts, day_before_label, yesterday_label = _two_day_window_utc()
-    rows = fetch_langfuse_metrics(
-        measures=["totalCost"],
-        aggregations=["sum"],
-        dimensions=["providedModelName"],
-        from_ts=from_ts,
-        to_ts=to_ts,
-        granularity="day",
-    )
-    by_model: Dict[str, Dict[str, Dict[str, Optional[float]]]] = {}
-    for row in rows:
-        model = row.get("providedModelName")
-        if not model:
-            continue
-        day = row.get("time_dimension")
-        if day not in (day_before_label, yesterday_label):
-            continue
-        total = row.get("sum_totalCost")
-        bucket = "yesterday" if day == yesterday_label else "day_before"
-        by_model.setdefault(model, {})
-        by_model[model][bucket] = {"total": total}
-    return {
-        "yesterday": yesterday_label,
-        "day_before": day_before_label,
-        "by_model": by_model,
-        "ok": True,
+        "answer_by_model": answer_by_model,
+        "classifier": classifier,
     }
 
 
@@ -892,150 +994,158 @@ def _fmt_ms_as_seconds(ms: Optional[float]) -> str:
     return f"{v / 1000.0:.2f}s"
 
 
+def _fmt_ms_int(ms: Optional[float]) -> str:
+    """Render milliseconds as a compact integer ms string, or `—` for None."""
+    if ms is None:
+        return "—"
+    try:
+        return str(int(round(float(ms))))
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_tokens(n: Optional[int]) -> str:
+    """Render a token count compactly: 330_960_000 → '331.0M'."""
+    if n is None:
+        return "—"
+    try:
+        v = float(n)
+    except (TypeError, ValueError):
+        return "—"
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"{v / 1_000:.1f}K"
+    return f"{int(v)}"
+
+
 def fmt_cost_and_latency(
-    latency_data: dict,
-    cost_data: dict,
+    data: dict,
     *,
-    regression_pct: int = 20,
-    spike_pct: int = 30,
+    regression_pct: int = 20,  # retained for API back-compat; unused (no D-on-D deltas)
+    spike_pct: int = 30,       # retained for API back-compat; unused
 ) -> str:
-    """Render the unified Cost & Latency section body.
+    """Render the Cost & Latency section body, sourced from stream_logs.
 
-    Inputs match the shape returned by `fetch_yesterday_and_prior_latency`
-    and `fetch_yesterday_and_prior_cost`. Either may be `None` to indicate
-    "fetch failed — show placeholder for that sub-block".
+    `data` shape (from `fetch_yesterday_cost_and_latency_from_stream_logs`):
+        {
+          "ok": bool,
+          "yesterday": "YYYY-MM-DD",
+          "answer_by_model": {<model>: {request_count, ttft_ms, student_ttft, llm_ttft, cost_usd, tokens}},
+          "classifier": {request_count, avg_ms, p50, p90, p95, cost_usd} | None,
+        }
 
-    Behaviour:
-      - One header line + dim explanation
-      - Latency sub-block: per-model row with p50/p90/p95 values + deltas;
-        🔴 per-percentile when delta ≥ regression_pct
-      - Cost sub-block: per-model row + total; 🔴 per-model when delta > spike_pct
-      - Models with all-None TTFT → render "(no TTFT data)" placeholder row
-      - Models with $0 cost AND zero day-before cost → suppressed (no traffic)
-      - Model list is the union of both data sources, sorted by yesterday's
-        total cost desc (then by name) — heaviest spenders surface first.
+    Output layout (from spec):
+      • Provenance hint line
+      • Classifier Latency: single aggregate row + 3 explanatory lines
+      • Answer TTFT — per model: 3 metrics per model (server / student / llm-only)
+        with 3 explanation lines underneath
+      • Cost: per-model + classifier + total
 
-    Returns a Slack-mrkdwn body string. The caller wraps it in a section
-    block with the appropriate emoji header.
+    No day-on-day deltas in this iteration — the new data source doesn't carry
+    yesterday-vs-day-before yet. `regression_pct` / `spike_pct` kwargs are kept
+    in the signature for compatibility with the build_blocks call site.
     """
+    if not isinstance(data, dict) or data.get("ok") is False:
+        return (
+            "_Source: cdp.central.silver_stream_logs · SUCCESS requests on "
+            "/v1/nebula/video-co-pilot only_\n"
+            "  _(cost & latency unavailable — Metabase fetch failed)_"
+        )
+
+    answer = data.get("answer_by_model") or {}
+    classifier = data.get("classifier") or None
+
     lines: List[str] = [
-        "_TTFT (time-to-first-token) and cost per model. Day-on-day delta in (). "
-        f"🔴 = TTFT ≥{regression_pct}% or cost >{spike_pct}% over baseline._",
+        "_Source: `cdp.central.silver_stream_logs` · SUCCESS requests on "
+        "`/v1/nebula/video-co-pilot` only. Per-model `request_count` is "
+        "LLM-answered requests only (~45% of SUCCESS rows are non-LLM paths)._",
     ]
 
-    # ---- Latency sub-blocks (classifier + answer TTFT) ----------------------
-    lat_ok = isinstance(latency_data, dict) and latency_data.get("ok") is True
-    lat_models = (latency_data or {}).get("by_model") or {}
-
-    def _render_latency_row(
-        model: str, buckets: dict, stat_labels: Tuple[str, ...]
-    ) -> str:
-        """Render one model's row for the given stat labels (avg/p50/p90/p95)."""
-        y = buckets.get("yesterday") or {}
-        d = buckets.get("day_before") or {}
-        # If every stat in this row is None → defensive "(no TTFT data)".
-        if all(y.get(s) is None for s in stat_labels):
-            return f"  • `{model}`  _(no TTFT data)_"
-        parts = []
-        for label in stat_labels:
-            y_v = y.get(label)
-            d_v = d.get(label)
-            dlt = _safe_pct_delta(y_v, d_v)
-            arrow = _fmt_delta_arrow(dlt)
-            flag = " 🔴" if (dlt is not None and dlt >= regression_pct) else ""
-            parts.append(f"{label}: {_fmt_ms_as_seconds(y_v)} ({arrow}{flag})")
-        return f"  • `{model}`  " + "  |  ".join(parts)
-
-    classifier_models = {
-        m: b for m, b in lat_models.items() if m in _CLASSIFIER_MODELS
-    }
-    answer_models = {
-        m: b for m, b in lat_models.items() if m not in _CLASSIFIER_MODELS
-    }
-
-    if not lat_ok:
-        # Single unified placeholder when the fetch failed — no headers render
-        # (matches "empty sub-block → header must NOT render" rule on failure).
-        lines.append("")
-        lines.append("⏱️ *Latency (TTFT)*")
-        lines.append("  _(latency unavailable — Langfuse fetch failed)_")
-    elif not lat_models:
-        lines.append("")
-        lines.append("⏱️ *Latency (TTFT)*")
-        lines.append("  _(no TTFT-instrumented model traffic in window)_")
+    # ---- Classifier latency -----------------------------------------------
+    lines.append("")
+    lines.append("⏱️ *Classifier Latency*")
+    if not classifier:
+        lines.append("  _(no data)_")
     else:
-        # Classifier sub-block — only renders if non-empty.
-        if classifier_models:
-            lines.append("")
-            lines.append("⏱️ *Classifier Latency* (yesterday)")
-            for model in sorted(classifier_models.keys()):
-                lines.append(
-                    _render_latency_row(
-                        model,
-                        classifier_models[model],
-                        ("avg", "p50", "p90", "p95"),
-                    )
-                )
-        # Answer TTFT sub-block — only renders if non-empty.
-        if answer_models:
-            lines.append("")
-            lines.append("⏱️ *Answer TTFT* (yesterday)")
-            for model in sorted(answer_models.keys()):
-                lines.append(
-                    _render_latency_row(
-                        model,
-                        answer_models[model],
-                        ("p50", "p90", "p95"),
-                    )
-                )
+        n = classifier.get("request_count") or 0
+        avg = _fmt_ms_int(classifier.get("avg_ms"))
+        p50 = _fmt_ms_int(classifier.get("p50"))
+        p90 = _fmt_ms_int(classifier.get("p90"))
+        p95 = _fmt_ms_int(classifier.get("p95"))
+        cost = float(classifier.get("cost_usd") or 0.0)
+        lines.append(
+            f"  {n:,} requests · avg {avg}ms · p50 {p50}ms · p90 {p90}ms · "
+            f"p95 {p95}ms · cost ${cost:.2f}"
+        )
+        lines.append(
+            "  _Time spent on the classification LLM call (separate from the answer model)._"
+        )
 
-    # ---- Cost sub-block -----------------------------------------------------
-    cost_ok = isinstance(cost_data, dict) and cost_data.get("ok") is True
-    cost_models = (cost_data or {}).get("by_model") or {}
+    # ---- Answer TTFT per model --------------------------------------------
+    lines.append("")
+    lines.append("⏱️ *Answer TTFT — per model*")
+    if not answer:
+        lines.append("  _(no data)_")
+    else:
+        # Sort by request_count desc, then name.
+        sorted_models = sorted(
+            answer.items(),
+            key=lambda kv: (-(kv[1].get("request_count") or 0), kv[0]),
+        )
+        for model, m in sorted_models:
+            ttft = m.get("ttft_ms") or {}
+            student = m.get("student_ttft") or {}
+            llm = m.get("llm_ttft") or {}
+            srv = f"{_fmt_ms_int(ttft.get('p50'))} / {_fmt_ms_int(ttft.get('p90'))} / {_fmt_ms_int(ttft.get('p95'))}"
+            stu = f"{_fmt_ms_int(student.get('p50'))} / {_fmt_ms_int(student.get('p90'))} / {_fmt_ms_int(student.get('p95'))}"
+            lll = f"{_fmt_ms_int(llm.get('p50'))} / {_fmt_ms_int(llm.get('p90'))} / {_fmt_ms_int(llm.get('p95'))}"
+            lines.append(
+                f"  • `{model}`  server: {srv}ms  |  student: {stu}ms  |  llm-only: {lll}ms"
+            )
+        lines.append(
+            "  _server   = request arrives at our backend → first LLM token at server (raw server-side TTFT)._"
+        )
+        lines.append(
+            "  _student  = end-to-end as the student experiences it (closest to real UX)._"
+        )
+        lines.append(
+            "  _llm-only = LLM call start → first token (isolates provider latency from our pre-LLM work)._"
+        )
+
+    # ---- Cost --------------------------------------------------------------
     lines.append("")
     lines.append("💰 *Cost*")
-    if not cost_ok:
-        lines.append("  _(cost unavailable — Langfuse fetch failed)_")
+    have_answer_cost = any((m.get("cost_usd") or 0) > 0 for m in answer.values())
+    have_classifier_cost = bool(classifier and (classifier.get("cost_usd") or 0) > 0)
+    if not have_answer_cost and not have_classifier_cost:
+        lines.append("  _(no data)_")
     else:
-        # Filter: drop models with $0 yesterday AND $0 day-before (no traffic).
-        # Keep models with any nonzero value.
-        def _nz(v: Optional[float]) -> bool:
-            try:
-                return v is not None and float(v) > 0
-            except (TypeError, ValueError):
-                return False
-
-        kept: List[Tuple[str, Optional[float], Optional[float]]] = []
-        for model, buckets in cost_models.items():
-            y_total = (buckets.get("yesterday") or {}).get("total")
-            d_total = (buckets.get("day_before") or {}).get("total")
-            if not _nz(y_total) and not _nz(d_total):
-                continue
-            kept.append((model, y_total, d_total))
-        if not kept:
-            lines.append("  _(no model cost in window)_")
-        else:
-            # Sort by yesterday's cost desc — heaviest spenders surface first.
-            kept.sort(key=lambda t: (-(t[1] or 0.0), t[0]))
-            total_y = 0.0
-            total_d = 0.0
-            for model, y_total, d_total in kept:
-                dlt = _safe_pct_delta(y_total, d_total)
-                arrow = _fmt_delta_arrow(dlt)
-                flag = " 🔴" if (dlt is not None and dlt > spike_pct) else ""
-                y_disp = (
-                    f"${float(y_total):.2f}" if _nz(y_total) else "$0.00"
-                )
-                lines.append(f"  • `{model}`  {y_disp} ({arrow}{flag})")
-                if _nz(y_total):
-                    total_y += float(y_total)  # type: ignore[arg-type]
-                if _nz(d_total):
-                    total_d += float(d_total)  # type: ignore[arg-type]
-            total_dlt = _safe_pct_delta(total_y, total_d) if total_d > 0 else None
-            lines.append("  ───────────────────────────")
-            lines.append(
-                f"  *Total*  ${total_y:.2f} ({_fmt_delta_arrow(total_dlt)})"
+        total = 0.0
+        if have_answer_cost:
+            lines.append("  *Answer (by model)*")
+            sorted_models = sorted(
+                answer.items(),
+                key=lambda kv: (-(kv[1].get("cost_usd") or 0.0), kv[0]),
             )
+            for model, m in sorted_models:
+                cost = float(m.get("cost_usd") or 0.0)
+                if cost <= 0:
+                    continue
+                tok = m.get("tokens") or {}
+                tok_str = (
+                    f"{_fmt_tokens(tok.get('input'))} in / "
+                    f"{_fmt_tokens(tok.get('output'))} out / "
+                    f"{_fmt_tokens(tok.get('cached'))} cached tokens"
+                )
+                lines.append(f"    • `{model}`  ${cost:,.2f}   ({tok_str})")
+                total += cost
+        if classifier:
+            c_cost = float(classifier.get("cost_usd") or 0.0)
+            lines.append(f"  *Classifier*  ${c_cost:,.2f}")
+            total += c_cost
+        lines.append("  ───────────────────────────")
+        lines.append(f"  *Total*  ${total:,.2f}")
 
     return "\n".join(lines)
 
@@ -1433,8 +1543,7 @@ def _summarise_today_for_snapshot(
     behavior_follow_rows: Optional[List],
     behavior_rephrase_rows: Optional[List],
     classifier_snapshot: Optional[dict],
-    latency_data: Optional[dict] = None,
-    cost_data: Optional[dict] = None,
+    cost_latency_data: Optional[dict] = None,
 ) -> dict:
     """Build a compact dict of today's digest data for snapshot + LLM input.
 
@@ -1495,32 +1604,32 @@ def _summarise_today_for_snapshot(
             })
         return out
 
-    # Latency + cost — yesterday-only flat shape for Top 3 Insights LLM.
-    # The LLM input shouldn't lug around day-before values too — only yesterday
-    # numbers per model. Tomorrow's run can compare against tomorrow's
-    # yesterday-vs-day-before fetch directly from the Metrics API.
-    model_latency_yesterday: Dict[str, Dict[str, Optional[float]]] = {}
-    if isinstance(latency_data, dict):
-        for model, buckets in (latency_data.get("by_model") or {}).items():
-            y = (buckets or {}).get("yesterday") or {}
-            model_latency_yesterday[model] = {
-                "avg_ms": y.get("avg"),
-                "p50_ms": y.get("p50"),
-                "p90_ms": y.get("p90"),
-                "p95_ms": y.get("p95"),
+    # Cost + latency snapshot — sourced from stream_logs (Metabase). The new
+    # shape carries 3 TTFT views per answer model (server / student / llm-only)
+    # plus token totals, and an aggregate classifier row (classifier model
+    # name isn't in stream_logs). Yesterday-only — no day-on-day deltas here.
+    answer_by_model_snap: Dict[str, Dict[str, Any]] = {}
+    classifier_snap: Optional[Dict[str, Any]] = None
+    if isinstance(cost_latency_data, dict):
+        for model, m in (cost_latency_data.get("answer_by_model") or {}).items():
+            answer_by_model_snap[model] = {
+                "request_count": int(m.get("request_count") or 0),
+                "ttft_ms": dict(m.get("ttft_ms") or {}),
+                "student_ttft_ms": dict(m.get("student_ttft") or {}),
+                "llm_ttft_ms": dict(m.get("llm_ttft") or {}),
+                "cost_usd": round(float(m.get("cost_usd") or 0.0), 4),
+                "tokens": dict(m.get("tokens") or {}),
             }
-    model_cost_yesterday: Dict[str, Optional[float]] = {}
-    if isinstance(cost_data, dict):
-        for model, buckets in (cost_data.get("by_model") or {}).items():
-            y_total = ((buckets or {}).get("yesterday") or {}).get("total")
-            if y_total is None:
-                continue
-            try:
-                cost_val = float(y_total)
-            except (TypeError, ValueError):
-                continue
-            if cost_val > 0:
-                model_cost_yesterday[model] = round(cost_val, 4)
+        c = cost_latency_data.get("classifier")
+        if isinstance(c, dict):
+            classifier_snap = {
+                "request_count": int(c.get("request_count") or 0),
+                "avg_ms": c.get("avg_ms"),
+                "p50_ms": c.get("p50"),
+                "p90_ms": c.get("p90"),
+                "p95_ms": c.get("p95"),
+                "cost_usd": round(float(c.get("cost_usd") or 0.0), 4),
+            }
 
     return {
         "langfuse_errors_total": int(total_errors),
@@ -1547,10 +1656,13 @@ def _summarise_today_for_snapshot(
             if isinstance((classifier_snapshot or {}).get("category_counts"), dict)
             else {}
         ),
-        # NEW: per-model latency + cost for tomorrow's Top 3 Insights LLM call.
-        # Latency in ms (matches Langfuse Metrics API). Cost in USD.
-        "model_latency_yesterday": model_latency_yesterday,
-        "model_cost_yesterday": model_cost_yesterday,
+        # Cost & latency from stream_logs (Metabase). New flat shape:
+        #   answer_by_model[<model>] = {request_count, ttft_ms{p50,p90,p95},
+        #                               student_ttft_ms{...}, llm_ttft_ms{...},
+        #                               cost_usd, tokens{input,output,cached}}
+        #   classifier = {request_count, avg_ms, p50/p90/p95_ms, cost_usd} | None
+        "cost_latency_answer_by_model": answer_by_model_snap,
+        "cost_latency_classifier": classifier_snap,
     }
 
 
@@ -2232,8 +2344,7 @@ def build_blocks(
     scores_ok: bool = True,
     eval_snapshot_path: str = "",
     top_insights_text: Optional[str] = None,
-    latency_data: Optional[dict] = None,
-    cost_data: Optional[dict] = None,
+    cost_latency_data: Optional[dict] = None,
 ) -> list:
     """Assemble the digest in Phase 1 order.
 
@@ -2312,8 +2423,7 @@ def build_blocks(
     # block the rest of the digest from posting.
     try:
         cost_latency_block = fmt_cost_and_latency(
-            latency_data or {"ok": False, "by_model": {}},
-            cost_data or {"ok": False, "by_model": {}},
+            cost_latency_data or {"ok": False, "answer_by_model": {}, "classifier": None},
             regression_pct=LATENCY_REGRESSION_PCT,
             spike_pct=COST_SPIKE_PCT,
         )
@@ -2323,7 +2433,7 @@ def build_blocks(
             file=sys.stderr,
         )
         cost_latency_block = (
-            "_(cost/latency unavailable — Langfuse fetch failed)_"
+            "_(cost/latency unavailable — Metabase fetch failed)_"
         )
     blocks.extend([
         divider,
@@ -2557,19 +2667,15 @@ def main() -> int:
     total_traces, traces_ok = fetch_langfuse_traces_total()
     _assert_langfuse_or_exit(traces_ok, "fetch_langfuse_traces_total")
 
-    # Cost + latency are BEST-EFFORT — never gated by the strict Langfuse fail-fast.
-    # If the Metrics API errors, the section renders as a placeholder; the rest
-    # of the digest still posts.
+    # Cost + latency are BEST-EFFORT — sourced from cdp.central.silver_stream_logs
+    # via Metabase /api/dataset. Never gated by the strict Langfuse fail-fast.
+    # If Metabase errors, the section renders as a placeholder; the rest of
+    # the digest still posts.
     try:
-        latency_data = fetch_yesterday_and_prior_latency()
+        cost_latency_data = fetch_yesterday_cost_and_latency_from_stream_logs()
     except Exception as exc:
-        print(f"[warn] latency fetch raised: {exc!r}", file=sys.stderr)
-        latency_data = {"ok": False, "by_model": {}}
-    try:
-        cost_data = fetch_yesterday_and_prior_cost()
-    except Exception as exc:
-        print(f"[warn] cost fetch raised: {exc!r}", file=sys.stderr)
-        cost_data = {"ok": False, "by_model": {}}
+        print(f"[warn] stream_logs cost/latency fetch raised: {exc!r}", file=sys.stderr)
+        cost_latency_data = {"ok": False, "answer_by_model": {}, "classifier": None}
 
     follow_cfg = BEHAVIOR_FOLLOWUP_CARD_ID.isdigit()
     follow_rows = (
@@ -2644,8 +2750,7 @@ def main() -> int:
         behavior_follow_rows=follow_rows,
         behavior_rephrase_rows=rephrase_rows,
         classifier_snapshot=classifier_snap_for_summary,
-        latency_data=latency_data,
-        cost_data=cost_data,
+        cost_latency_data=cost_latency_data,
     )
 
     yesterday_snapshot = _load_yesterday_snapshot()
@@ -2691,8 +2796,7 @@ def main() -> int:
         scores_ok=scores_ok,
         eval_snapshot_path=EVAL_SUMMARY_PATH,
         top_insights_text=top_insights_text,
-        latency_data=latency_data,
-        cost_data=cost_data,
+        cost_latency_data=cost_latency_data,
     )
     print(f"[info] {fallback_text.splitlines()[0]}\n[{len(blocks)} blocks]", file=sys.stderr)
 
