@@ -843,6 +843,154 @@ def fetch_yesterday_and_prior_cost() -> dict:
     }
 
 
+def _fmt_delta_arrow(delta_pct: Optional[float]) -> str:
+    """Render a day-on-day delta percentage as `↑X%`, `↓X%`, `↑0%`, or `—`.
+
+    None → `—` (delta undefined — missing baseline or zero baseline).
+    Positive → `↑N%` (rounded to integer for compact display).
+    Negative → `↓N%` (absolute value).
+    """
+    if delta_pct is None:
+        return "—"
+    if abs(delta_pct) < 0.5:
+        return "↑0%"
+    if delta_pct >= 0:
+        return f"↑{int(round(delta_pct))}%"
+    return f"↓{int(round(abs(delta_pct)))}%"
+
+
+def _fmt_ms_as_seconds(ms: Optional[float]) -> str:
+    """Render milliseconds as compact seconds with 2 decimals: 2495 → '2.50s'.
+
+    None → `—`. Negative or non-numeric → `—`.
+    """
+    if ms is None:
+        return "—"
+    try:
+        v = float(ms)
+    except (TypeError, ValueError):
+        return "—"
+    if v < 0:
+        return "—"
+    return f"{v / 1000.0:.2f}s"
+
+
+def fmt_cost_and_latency(
+    latency_data: dict,
+    cost_data: dict,
+    *,
+    regression_pct: int = 20,
+    spike_pct: int = 30,
+) -> str:
+    """Render the unified Cost & Latency section body.
+
+    Inputs match the shape returned by `fetch_yesterday_and_prior_latency`
+    and `fetch_yesterday_and_prior_cost`. Either may be `None` to indicate
+    "fetch failed — show placeholder for that sub-block".
+
+    Behaviour:
+      - One header line + dim explanation
+      - Latency sub-block: per-model row with p50/p90/p95 values + deltas;
+        🔴 per-percentile when delta ≥ regression_pct
+      - Cost sub-block: per-model row + total; 🔴 per-model when delta > spike_pct
+      - Models with all-None TTFT → render "(no TTFT data)" placeholder row
+      - Models with $0 cost AND zero day-before cost → suppressed (no traffic)
+      - Model list is the union of both data sources, sorted by yesterday's
+        total cost desc (then by name) — heaviest spenders surface first.
+
+    Returns a Slack-mrkdwn body string. The caller wraps it in a section
+    block with the appropriate emoji header.
+    """
+    lines: List[str] = [
+        "_TTFT (time-to-first-token) and cost per model. Day-on-day delta in (). "
+        f"🔴 = TTFT ≥{regression_pct}% or cost >{spike_pct}% over baseline._",
+    ]
+
+    # ---- Latency sub-block --------------------------------------------------
+    lat_ok = isinstance(latency_data, dict) and latency_data.get("ok") is True
+    lat_models = (latency_data or {}).get("by_model") or {}
+    lines.append("")  # blank line before sub-block
+    lines.append("⏱️ *Latency (TTFT)*")
+    if not lat_ok:
+        lines.append("  _(latency unavailable — Langfuse fetch failed)_")
+    elif not lat_models:
+        lines.append("  _(no TTFT-instrumented model traffic in window)_")
+    else:
+        # Order: alphabetical by model name (stable, predictable).
+        for model in sorted(lat_models.keys()):
+            buckets = lat_models[model]
+            y = buckets.get("yesterday") or {}
+            d = buckets.get("day_before") or {}
+            y_p50, y_p90, y_p95 = y.get("p50"), y.get("p90"), y.get("p95")
+            d_p50, d_p90, d_p95 = d.get("p50"), d.get("p90"), d.get("p95")
+            if y_p50 is None and y_p90 is None and y_p95 is None:
+                lines.append(f"  • `{model}`  _(no TTFT data)_")
+                continue
+            parts = []
+            for label, y_v, d_v in (
+                ("p50", y_p50, d_p50),
+                ("p90", y_p90, d_p90),
+                ("p95", y_p95, d_p95),
+            ):
+                dlt = _safe_pct_delta(y_v, d_v)
+                arrow = _fmt_delta_arrow(dlt)
+                flag = " 🔴" if (dlt is not None and dlt >= regression_pct) else ""
+                parts.append(
+                    f"{label}: {_fmt_ms_as_seconds(y_v)} ({arrow}{flag})"
+                )
+            lines.append(f"  • `{model}`  " + "  |  ".join(parts))
+
+    # ---- Cost sub-block -----------------------------------------------------
+    cost_ok = isinstance(cost_data, dict) and cost_data.get("ok") is True
+    cost_models = (cost_data or {}).get("by_model") or {}
+    lines.append("")
+    lines.append("💰 *Cost*")
+    if not cost_ok:
+        lines.append("  _(cost unavailable — Langfuse fetch failed)_")
+    else:
+        # Filter: drop models with $0 yesterday AND $0 day-before (no traffic).
+        # Keep models with any nonzero value.
+        def _nz(v: Optional[float]) -> bool:
+            try:
+                return v is not None and float(v) > 0
+            except (TypeError, ValueError):
+                return False
+
+        kept: List[Tuple[str, Optional[float], Optional[float]]] = []
+        for model, buckets in cost_models.items():
+            y_total = (buckets.get("yesterday") or {}).get("total")
+            d_total = (buckets.get("day_before") or {}).get("total")
+            if not _nz(y_total) and not _nz(d_total):
+                continue
+            kept.append((model, y_total, d_total))
+        if not kept:
+            lines.append("  _(no model cost in window)_")
+        else:
+            # Sort by yesterday's cost desc — heaviest spenders surface first.
+            kept.sort(key=lambda t: (-(t[1] or 0.0), t[0]))
+            total_y = 0.0
+            total_d = 0.0
+            for model, y_total, d_total in kept:
+                dlt = _safe_pct_delta(y_total, d_total)
+                arrow = _fmt_delta_arrow(dlt)
+                flag = " 🔴" if (dlt is not None and dlt > spike_pct) else ""
+                y_disp = (
+                    f"${float(y_total):.2f}" if _nz(y_total) else "$0.00"
+                )
+                lines.append(f"  • `{model}`  {y_disp} ({arrow}{flag})")
+                if _nz(y_total):
+                    total_y += float(y_total)  # type: ignore[arg-type]
+                if _nz(d_total):
+                    total_d += float(d_total)  # type: ignore[arg-type]
+            total_dlt = _safe_pct_delta(total_y, total_d) if total_d > 0 else None
+            lines.append("  ───────────────────────────")
+            lines.append(
+                f"  *Total*  ${total_y:.2f} ({_fmt_delta_arrow(total_dlt)})"
+            )
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Error categorisation
 # ---------------------------------------------------------------------------
