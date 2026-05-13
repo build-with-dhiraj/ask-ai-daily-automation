@@ -397,6 +397,56 @@ def fetch_metabase_card(card_id: int, *, retries: int = 1) -> Optional[List]:
 
 
 # ---------------------------------------------------------------------------
+# Section-level empty-reason logging
+# ---------------------------------------------------------------------------
+#
+# When a section in the digest comes back blank, on-call needs to know in
+# 10 seconds whether the cause is:
+#   (a) upstream data lag (card returned 0 rows — silver table not ingested yet),
+#   (b) a fetch error (card returned None — Metabase down / timeout / auth),
+#   (c) Python-side filter dropping everything (card had rows but filter on
+#       yesterday rejected them all — usually a date-format SQL change).
+#
+# This helper covers (a) and (b) at the call site. (c) is logged inside
+# fmt_downvote_dump where the Python-side filter actually runs.
+
+def _log_section_emptiness(
+    section_label: str,
+    card_id_env_value: str,
+    rows: Optional[List],
+    *,
+    configured: bool,
+) -> None:
+    """Emit a single warn line categorising why a section is empty (or note that it isn't)."""
+    if not configured:
+        # Already logged separately by _warn_metabase_card_env_var; don't double-warn.
+        return
+    if rows is None:
+        print(
+            f"[warn] section {section_label} (card {card_id_env_value}): "
+            "fetch returned None — Metabase HTTP error or timeout after retries. "
+            "See earlier [warn] Metabase card lines for the underlying exception.",
+            file=sys.stderr,
+        )
+        return
+    n = len(rows)
+    if n == 0:
+        print(
+            f"[warn] section {section_label} (card {card_id_env_value}): "
+            "card returned 0 rows — likely upstream silver table data lag "
+            "(yesterday's data not yet ingested in Trino). "
+            "See pre-flight upstream-freshness probe lines above.",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"[info] section {section_label} (card {card_id_env_value}): "
+        f"card returned {n} rows.",
+        file=sys.stderr,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pre-flight: upstream data freshness check
 # ---------------------------------------------------------------------------
 #
@@ -523,8 +573,17 @@ def fmt_nonacademic(rows: Optional[List]) -> str:
 
 def fmt_downvote_dump(rows: Optional[List]) -> str:
     if rows is None:
+        # Loud, actionable: distinguishes "card fetch failed" from
+        # "card OK but yesterday-filter dropped everything" below.
+        print(
+            "[warn] downvote dump (card 23036): card fetch returned None "
+            "(timeout or HTTP error after retries) — see earlier "
+            "[warn] Metabase card lines for the underlying cause.",
+            file=sys.stderr,
+        )
         return "  _(unavailable)_"
 
+    total_card_rows = len(rows)
     # Filter to yesterday — check every string field for a value starting with yesterday
     yesterday_rows = []
     for row in rows:
@@ -535,6 +594,23 @@ def fmt_downvote_dump(rows: Optional[List]) -> str:
 
     n = len(yesterday_rows)
     if n == 0:
+        # On-call triage shortcut: with these two counts they can tell in
+        # 10 seconds whether the empty section is upstream-data lag (card
+        # row count = 0) vs Python-filter mismatch (card had rows but none
+        # for `yesterday`, e.g. a date-format change in the SQL).
+        print(
+            f"[warn] downvote dump (card 23036): 0 yesterday rows "
+            f"(card returned {total_card_rows} total rows, "
+            f"Python filter on yesterday={yesterday} kept 0). "
+            + (
+                "Likely upstream silver table data lag — "
+                "no rows from May/yesterday's date present in card output."
+                if total_card_rows == 0
+                else "Card returned data but none matched yesterday's date prefix — "
+                "check the SQL date filter or the column the Python filter scans."
+            ),
+            file=sys.stderr,
+        )
         return f"  0 downvoted queries logged for {yesterday}."
 
     # Category split — try common field names
@@ -2191,11 +2267,23 @@ def main() -> int:
         if follow_cfg
         else None
     )
+    _log_section_emptiness(
+        "behavior_followup (multi-turn burst)",
+        BEHAVIOR_FOLLOWUP_CARD_ID,
+        follow_rows,
+        configured=follow_cfg,
+    )
     rephrase_cfg = BEHAVIOR_REPHRASE_CARD_ID.isdigit()
     rephrase_rows = (
         fetch_metabase_card(int(BEHAVIOR_REPHRASE_CARD_ID), retries=METABASE_CARD_RETRIES)
         if rephrase_cfg
         else None
+    )
+    _log_section_emptiness(
+        "behavior_rephrase (rephrase rate)",
+        BEHAVIOR_REPHRASE_CARD_ID,
+        rephrase_rows,
+        configured=rephrase_cfg,
     )
     eval_summary = load_eval_summary(EVAL_SUMMARY_PATH)
 
