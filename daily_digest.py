@@ -631,6 +631,13 @@ def fetch_langfuse_traces_total() -> Tuple[int, bool]:
 LATENCY_REGRESSION_PCT = max(0, _env_int("LATENCY_REGRESSION_PCT", 20))
 COST_SPIKE_PCT = max(0, _env_int("COST_SPIKE_PCT", 30))
 
+# Models acting as the classifier role. Membership in this set is currently
+# the *only* role discriminator — until the model record gains an explicit
+# `role` field, exact name match here is how the renderer decides whether a
+# model row belongs in the Classifier Latency sub-block (with `avg`) or the
+# Answer TTFT sub-block (percentiles only).
+_CLASSIFIER_MODELS = {"gpt-5-nano"}
+
 
 def _safe_pct_delta(today: Optional[float], prior: Optional[float]) -> Optional[float]:
     """Compute (today - prior) / prior * 100 with NaN/None/zero guards.
@@ -764,8 +771,13 @@ def fetch_yesterday_and_prior_latency() -> dict:
     """
     from_ts, to_ts, day_before_label, yesterday_label = _two_day_window_utc()
     rows = fetch_langfuse_metrics(
-        measures=["timeToFirstToken", "timeToFirstToken", "timeToFirstToken"],
-        aggregations=["p50", "p90", "p95"],
+        measures=[
+            "timeToFirstToken",
+            "timeToFirstToken",
+            "timeToFirstToken",
+            "timeToFirstToken",
+        ],
+        aggregations=["avg", "p50", "p90", "p95"],
         dimensions=["providedModelName"],
         from_ts=from_ts,
         to_ts=to_ts,
@@ -785,16 +797,17 @@ def fetch_yesterday_and_prior_latency() -> dict:
         day = row.get("time_dimension")
         if day not in (day_before_label, yesterday_label):
             continue
+        avg = row.get("avg_timeToFirstToken")
         p50 = row.get("p50_timeToFirstToken")
         p90 = row.get("p90_timeToFirstToken")
         p95 = row.get("p95_timeToFirstToken")
-        # Skip rows where every percentile is None — model had observations
+        # Skip rows where every TTFT stat is None — model had observations
         # but no TTFT instrumentation. Renderer flags these as "(no TTFT data)".
-        if p50 is None and p90 is None and p95 is None:
+        if avg is None and p50 is None and p90 is None and p95 is None:
             continue
         bucket = "yesterday" if day == yesterday_label else "day_before"
         by_model.setdefault(model, {})
-        by_model[model][bucket] = {"p50": p50, "p90": p90, "p95": p95}
+        by_model[model][bucket] = {"avg": avg, "p50": p50, "p90": p90, "p95": p95}
     return {
         "yesterday": yesterday_label,
         "day_before": day_before_label,
@@ -910,39 +923,71 @@ def fmt_cost_and_latency(
         f"🔴 = TTFT ≥{regression_pct}% or cost >{spike_pct}% over baseline._",
     ]
 
-    # ---- Latency sub-block --------------------------------------------------
+    # ---- Latency sub-blocks (classifier + answer TTFT) ----------------------
     lat_ok = isinstance(latency_data, dict) and latency_data.get("ok") is True
     lat_models = (latency_data or {}).get("by_model") or {}
-    lines.append("")  # blank line before sub-block
-    lines.append("⏱️ *Latency (TTFT)*")
+
+    def _render_latency_row(
+        model: str, buckets: dict, stat_labels: Tuple[str, ...]
+    ) -> str:
+        """Render one model's row for the given stat labels (avg/p50/p90/p95)."""
+        y = buckets.get("yesterday") or {}
+        d = buckets.get("day_before") or {}
+        # If every stat in this row is None → defensive "(no TTFT data)".
+        if all(y.get(s) is None for s in stat_labels):
+            return f"  • `{model}`  _(no TTFT data)_"
+        parts = []
+        for label in stat_labels:
+            y_v = y.get(label)
+            d_v = d.get(label)
+            dlt = _safe_pct_delta(y_v, d_v)
+            arrow = _fmt_delta_arrow(dlt)
+            flag = " 🔴" if (dlt is not None and dlt >= regression_pct) else ""
+            parts.append(f"{label}: {_fmt_ms_as_seconds(y_v)} ({arrow}{flag})")
+        return f"  • `{model}`  " + "  |  ".join(parts)
+
+    classifier_models = {
+        m: b for m, b in lat_models.items() if m in _CLASSIFIER_MODELS
+    }
+    answer_models = {
+        m: b for m, b in lat_models.items() if m not in _CLASSIFIER_MODELS
+    }
+
     if not lat_ok:
+        # Single unified placeholder when the fetch failed — no headers render
+        # (matches "empty sub-block → header must NOT render" rule on failure).
+        lines.append("")
+        lines.append("⏱️ *Latency (TTFT)*")
         lines.append("  _(latency unavailable — Langfuse fetch failed)_")
     elif not lat_models:
+        lines.append("")
+        lines.append("⏱️ *Latency (TTFT)*")
         lines.append("  _(no TTFT-instrumented model traffic in window)_")
     else:
-        # Order: alphabetical by model name (stable, predictable).
-        for model in sorted(lat_models.keys()):
-            buckets = lat_models[model]
-            y = buckets.get("yesterday") or {}
-            d = buckets.get("day_before") or {}
-            y_p50, y_p90, y_p95 = y.get("p50"), y.get("p90"), y.get("p95")
-            d_p50, d_p90, d_p95 = d.get("p50"), d.get("p90"), d.get("p95")
-            if y_p50 is None and y_p90 is None and y_p95 is None:
-                lines.append(f"  • `{model}`  _(no TTFT data)_")
-                continue
-            parts = []
-            for label, y_v, d_v in (
-                ("p50", y_p50, d_p50),
-                ("p90", y_p90, d_p90),
-                ("p95", y_p95, d_p95),
-            ):
-                dlt = _safe_pct_delta(y_v, d_v)
-                arrow = _fmt_delta_arrow(dlt)
-                flag = " 🔴" if (dlt is not None and dlt >= regression_pct) else ""
-                parts.append(
-                    f"{label}: {_fmt_ms_as_seconds(y_v)} ({arrow}{flag})"
+        # Classifier sub-block — only renders if non-empty.
+        if classifier_models:
+            lines.append("")
+            lines.append("⏱️ *Classifier Latency* (yesterday)")
+            for model in sorted(classifier_models.keys()):
+                lines.append(
+                    _render_latency_row(
+                        model,
+                        classifier_models[model],
+                        ("avg", "p50", "p90", "p95"),
+                    )
                 )
-            lines.append(f"  • `{model}`  " + "  |  ".join(parts))
+        # Answer TTFT sub-block — only renders if non-empty.
+        if answer_models:
+            lines.append("")
+            lines.append("⏱️ *Answer TTFT* (yesterday)")
+            for model in sorted(answer_models.keys()):
+                lines.append(
+                    _render_latency_row(
+                        model,
+                        answer_models[model],
+                        ("p50", "p90", "p95"),
+                    )
+                )
 
     # ---- Cost sub-block -----------------------------------------------------
     cost_ok = isinstance(cost_data, dict) and cost_data.get("ok") is True
@@ -1459,6 +1504,7 @@ def _summarise_today_for_snapshot(
         for model, buckets in (latency_data.get("by_model") or {}).items():
             y = (buckets or {}).get("yesterday") or {}
             model_latency_yesterday[model] = {
+                "avg_ms": y.get("avg"),
                 "p50_ms": y.get("p50"),
                 "p90_ms": y.get("p90"),
                 "p95_ms": y.get("p95"),

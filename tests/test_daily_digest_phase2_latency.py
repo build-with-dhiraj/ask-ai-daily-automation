@@ -455,8 +455,8 @@ class TestSnapshotIncludesLatencyAndCost(unittest.TestCase):
             "day_before": "2026-05-11",
             "by_model": {
                 "gpt-4.1": {
-                    "yesterday": {"p50": 2495.0, "p90": 3567.9, "p95": 4143.45},
-                    "day_before": {"p50": 2400.0, "p90": 3500.0, "p95": 4100.0},
+                    "yesterday": {"avg": 2510.5, "p50": 2495.0, "p90": 3567.9, "p95": 4143.45},
+                    "day_before": {"avg": 2410.0, "p50": 2400.0, "p90": 3500.0, "p95": 4100.0},
                 },
             },
         }
@@ -494,7 +494,7 @@ class TestSnapshotIncludesLatencyAndCost(unittest.TestCase):
         self.assertIn("model_latency_yesterday", summary)
         self.assertEqual(
             summary["model_latency_yesterday"]["gpt-4.1"],
-            {"p50_ms": 2495.0, "p90_ms": 3567.9, "p95_ms": 4143.45},
+            {"avg_ms": 2510.5, "p50_ms": 2495.0, "p90_ms": 3567.9, "p95_ms": 4143.45},
         )
         # Cost: yesterday-only, $0 traffic suppressed, value rounded to 4dp.
         self.assertIn("model_cost_yesterday", summary)
@@ -521,6 +521,154 @@ class TestSnapshotIncludesLatencyAndCost(unittest.TestCase):
         )
         self.assertEqual(summary.get("model_latency_yesterday"), {})
         self.assertEqual(summary.get("model_cost_yesterday"), {})
+
+
+# ---------------------------------------------------------------------------
+# 10. Classifier vs Answer TTFT sub-block split
+# ---------------------------------------------------------------------------
+
+
+class TestLatencySubBlockSplit(unittest.TestCase):
+    def _latency(self, by_model):
+        return {"ok": True, "yesterday": "y", "day_before": "d", "by_model": by_model}
+
+    def test_classifier_only_renders_classifier_header_not_answer(self):
+        digest = _load_digest()
+        body = digest.fmt_cost_and_latency(
+            self._latency({
+                "gpt-5-nano": {
+                    "yesterday": {"avg": 310, "p50": 280, "p90": 420, "p95": 540},
+                    "day_before": {"avg": 300, "p50": 275, "p90": 410, "p95": 530},
+                },
+            }),
+            {"ok": True, "by_model": {}},
+        )
+        self.assertIn("Classifier Latency", body)
+        self.assertNotIn("Answer TTFT", body)
+        self.assertIn("avg: 0.31s", body)
+        self.assertIn("p50: 0.28s", body)
+
+    def test_answer_only_renders_answer_header_not_classifier(self):
+        digest = _load_digest()
+        body = digest.fmt_cost_and_latency(
+            self._latency({
+                "gpt-4.1": {
+                    "yesterday": {"avg": 500, "p50": 420, "p90": 1200, "p95": 1850},
+                    "day_before": {"avg": 480, "p50": 400, "p90": 1165, "p95": 1814},
+                },
+            }),
+            {"ok": True, "by_model": {}},
+        )
+        self.assertIn("Answer TTFT", body)
+        self.assertNotIn("Classifier Latency", body)
+        # Answer block must NOT show avg.
+        self.assertNotIn("avg:", body)
+
+    def test_both_present_renders_both_headers(self):
+        digest = _load_digest()
+        body = digest.fmt_cost_and_latency(
+            self._latency({
+                "gpt-5-nano": {
+                    "yesterday": {"avg": 310, "p50": 280, "p90": 420, "p95": 540},
+                    "day_before": {"avg": 300, "p50": 275, "p90": 410, "p95": 530},
+                },
+                "gpt-4.1": {
+                    "yesterday": {"avg": 500, "p50": 420, "p90": 1200, "p95": 1850},
+                    "day_before": {"avg": 480, "p50": 400, "p90": 1165, "p95": 1814},
+                },
+            }),
+            {"ok": True, "by_model": {}},
+        )
+        self.assertIn("Classifier Latency", body)
+        self.assertIn("Answer TTFT", body)
+        # avg appears (classifier row) but only once — answer row drops it.
+        self.assertEqual(body.count("avg:"), 1)
+
+    def test_neither_present_renders_no_traffic_placeholder(self):
+        digest = _load_digest()
+        body = digest.fmt_cost_and_latency(
+            self._latency({}),
+            {"ok": True, "by_model": {}},
+        )
+        self.assertIn("no TTFT-instrumented model traffic", body)
+        self.assertNotIn("Classifier Latency", body)
+        self.assertNotIn("Answer TTFT", body)
+
+    def test_all_none_row_renders_no_ttft_data(self):
+        digest = _load_digest()
+        body = digest.fmt_cost_and_latency(
+            self._latency({
+                "gpt-5-nano": {
+                    "yesterday": {"avg": None, "p50": None, "p90": None, "p95": None},
+                    "day_before": {"avg": None, "p50": None, "p90": None, "p95": None},
+                },
+            }),
+            {"ok": True, "by_model": {}},
+        )
+        line = next(l for l in body.splitlines() if "gpt-5-nano" in l)
+        self.assertIn("(no TTFT data)", line)
+
+    def test_avg_present_percentiles_none_still_renders_classifier_row(self):
+        digest = _load_digest()
+        body = digest.fmt_cost_and_latency(
+            self._latency({
+                "gpt-5-nano": {
+                    "yesterday": {"avg": 305, "p50": None, "p90": None, "p95": None},
+                    "day_before": {"avg": 300, "p50": None, "p90": None, "p95": None},
+                },
+            }),
+            {"ok": True, "by_model": {}},
+        )
+        self.assertIn("Classifier Latency", body)
+        line = next(l for l in body.splitlines() if "gpt-5-nano" in l)
+        # avg renders, percentiles render as em-dashes (None → `—`).
+        self.assertIn("avg: 0.30s", line)  # 305ms → 0.30s (2dp)
+        self.assertNotIn("(no TTFT data)", line)
+
+
+# ---------------------------------------------------------------------------
+# 11. Snapshot round-trip includes avg
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotRoundTripWithAvg(unittest.TestCase):
+    def test_avg_ms_preserved_through_summarise(self):
+        digest = _load_digest()
+        latency_data = {
+            "ok": True,
+            "yesterday": "2026-05-12",
+            "day_before": "2026-05-11",
+            "by_model": {
+                "gpt-5-nano": {
+                    "yesterday": {"avg": 310.7, "p50": 280.0, "p90": 420.0, "p95": 540.0},
+                    "day_before": {"avg": 300.0, "p50": 275.0, "p90": 410.0, "p95": 530.0},
+                },
+            },
+        }
+        summary = digest._summarise_today_for_snapshot(
+            error_obs=[],
+            total_errors=0,
+            score_items=[],
+            dv_in_sample=0,
+            total_traces=0,
+            dump_rows=None,
+            academic_rows=None,
+            non_academic_rows=None,
+            behavior_follow_rows=None,
+            behavior_rephrase_rows=None,
+            classifier_snapshot=None,
+            latency_data=latency_data,
+            cost_data={"ok": True, "by_model": {}},
+        )
+        self.assertEqual(
+            summary["model_latency_yesterday"]["gpt-5-nano"],
+            {"avg_ms": 310.7, "p50_ms": 280.0, "p90_ms": 420.0, "p95_ms": 540.0},
+        )
+        # Round-trip via json — values must survive.
+        round_tripped = json.loads(json.dumps(summary))
+        self.assertEqual(
+            round_tripped["model_latency_yesterday"]["gpt-5-nano"]["avg_ms"], 310.7
+        )
 
 
 if __name__ == "__main__":
