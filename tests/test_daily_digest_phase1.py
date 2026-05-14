@@ -176,13 +176,58 @@ class TestDigestSnapshot(unittest.TestCase):
             pass
 
     def test_round_trip(self) -> None:
-        today = {"errors_total": 100, "downvotes": 42}
-        self.mod._write_digest_snapshot(today, path=str(self.tmp))
+        # Write+read round-trip. Because the loader now requires snapshot date
+        # to equal yesterday's UTC (#19), we simulate yesterday's run by
+        # writing a payload with yesterday's date directly rather than calling
+        # _write_digest_snapshot (which always stamps today). The serializer's
+        # own date-stamping is exercised by test_serializer_writes_date_field.
+        yesterday = (
+            datetime.now(timezone.utc) - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        self.tmp.write_text(
+            json.dumps({"date": yesterday, "errors_total": 100, "downvotes": 42}),
+            encoding="utf-8",
+        )
         loaded = self.mod._load_yesterday_snapshot(path=str(self.tmp))
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded["errors_total"], 100)
         self.assertEqual(loaded["downvotes"], 42)
         self.assertIn("date", loaded)
+
+    def test_serializer_writes_date_field(self) -> None:
+        # The reader's day-equality guard depends on the serializer stamping
+        # the snapshot with the UTC date it was WRITTEN (which is "today's
+        # data" at write time → "yesterday's baseline" at tomorrow's read).
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.mod._write_digest_snapshot(
+            {"errors_total": 1}, path=str(self.tmp)
+        )
+        with open(self.tmp, encoding="utf-8") as f:
+            raw = json.load(f)
+        self.assertEqual(raw.get("date"), today)
+
+    def test_same_day_intra_day_snapshot_rejected(self) -> None:
+        # The #19 corruption path: a same-day earlier run wrote a snapshot
+        # to local /tmp; the cross-run artifact download failed; the loader
+        # would previously fall back to this same-day file and feed Top 3
+        # Insights a baseline that is hours-stale, not 24h-stale. The
+        # day-equality guard must reject it as "not yesterday's".
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.tmp.write_text(
+            json.dumps({"date": today, "errors_total": 999}),
+            encoding="utf-8",
+        )
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            self.assertIsNone(self.mod._load_yesterday_snapshot(path=str(self.tmp)))
+
+    def test_missing_date_field_rejected(self) -> None:
+        # Pre-#19 snapshots that lack the date field cannot be safely treated
+        # as yesterday's — refuse rather than risk a stale-by-hours baseline.
+        self.tmp.write_text(
+            json.dumps({"errors_total": 5}), encoding="utf-8"
+        )
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            self.assertIsNone(self.mod._load_yesterday_snapshot(path=str(self.tmp)))
 
     def test_missing_file_returns_none(self) -> None:
         self.assertIsNone(self.mod._load_yesterday_snapshot(path=str(self.tmp)))
@@ -384,11 +429,38 @@ class TestFmtBrokenChapter(unittest.TestCase):
         self.assertIn("likely fix candidate", out)
         self.assertIn("Detailed 11th Revision", out)
 
-    def test_no_overlap_uses_plain_english_no_chapter_message(self) -> None:
-        eval_summary = {"formatting_hotspot_chapters": ["Some Chapter"]}
+    def test_no_overlap_renders_as_finding_with_cardinalities(self) -> None:
+        # Empty state must read as a deliberate finding, not a missing field
+        # (#20). Lead with a checkmark, restate intent, surface input counts
+        # so the reader can see the cross-check actually ran.
+        eval_summary = {
+            "formatting_hotspot_chapters": ["Some Chapter", "Another Chapter"]
+        }
         out = self.mod.fmt_broken_chapter([], [], eval_summary)
-        self.assertIn("no chapter shows both", out)
+        self.assertIn(":white_check_mark:", out)
+        self.assertIn("Today's broken chapter: none detected", out)
+        # 2 judge hotspots, 0 behavioral (empty follow/rephrase rows) → 0 overlap.
+        self.assertIn("2 judge hotspots", out)
+        self.assertIn("0 behavioral chapters", out)
+        self.assertIn("0 overlap", out)
         self.assertNotIn("∩", out)
+        self.assertNotIn("no chapter shows both", out)
+
+    def test_no_judge_hotspots_renders_as_finding_with_cardinalities(self) -> None:
+        # When daily eval reported no formatting hotspots, the cross-check
+        # still ran — just against an empty judge set. Empty state copy
+        # surfaces that cardinality (#20).
+        eval_summary = {"formatting_hotspot_chapters": []}
+        follow_rows = [
+            {"chapter": "Chapter A", "triple_followup_60s_pct": 10.0},
+            {"chapter": "Chapter B", "triple_followup_60s_pct": 10.0},
+        ]
+        out = self.mod.fmt_broken_chapter(follow_rows, [], eval_summary)
+        self.assertIn(":white_check_mark:", out)
+        self.assertIn("Today's broken chapter: none detected", out)
+        self.assertIn("0 judge hotspots", out)
+        self.assertIn("2 behavioral chapters", out)
+        self.assertIn("0 overlap", out)
 
     def test_alias_function_still_exists(self) -> None:
         # Backwards-compat alias for the existing test that imports the old name

@@ -37,17 +37,26 @@ class TestEvalSampleCounts(unittest.TestCase):
 
 
 class TestFmtConfirmedRegressions(unittest.TestCase):
+    # Empty-state copy is now finding-style (#20): both the missing-key and
+    # empty-list branches render the same unified message. The legacy "no
+    # formatting hotspot chapters" wording was replaced with the checkmark
+    # finding line plus input cardinalities so a reader sees the cross-check
+    # actually ran.
     def test_legacy_snapshot_without_hotspot_key(self) -> None:
         ev = {"n_judged": 10, "stopped_reason": "complete"}
         txt = fmt_confirmed_regressions(None, None, ev)
         self.assertNotIn("missing key", txt)
-        self.assertIn("formatting hotspot", txt.lower())
+        self.assertIn("Today's broken chapter: none detected", txt)
+        self.assertIn("0 judge hotspots", txt)
+        self.assertIn("0 overlap", txt)
 
     def test_empty_hotspot_list_same_as_legacy(self) -> None:
         ev = {"formatting_hotspot_chapters": [], "n_judged": 1}
         txt = fmt_confirmed_regressions(None, None, ev)
         self.assertNotIn("missing key", txt)
-        self.assertIn("formatting hotspot chapters", txt.lower())
+        self.assertIn("Today's broken chapter: none detected", txt)
+        self.assertIn("0 judge hotspots", txt)
+        self.assertIn("0 overlap", txt)
 
 
 class TestFmtEvalCoverageNote(unittest.TestCase):
