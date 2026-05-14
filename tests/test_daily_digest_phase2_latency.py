@@ -562,5 +562,33 @@ class TestBuildBlocksDefensive(unittest.TestCase):
         self.assertIn("Metabase fetch failed", all_text)
 
 
+# ---------------------------------------------------------------------------
+# 6. _yesterday_utc_window output format — regression guard
+# ---------------------------------------------------------------------------
+
+
+class TestYesterdayUtcWindowFormat(unittest.TestCase):
+    """Regression guard: Metabase's `date/single` parameter binding hands
+    the literal to Trino, which then `cast(... AS timestamp with time zone)`
+    coerces it. ISO-Z form (`YYYY-MM-DDTHH:MM:SSZ`) was verified rejected
+    via a live Metabase probe with `Value cannot be cast to timestamp`.
+    Date-only form (`YYYY-MM-DD`) is the supported shape.
+    """
+
+    def test_yesterday_window_emits_date_only_format(self):
+        digest = _load_digest()
+        start_ts, end_ts = digest._yesterday_utc_window()
+        self.assertRegex(start_ts, r"^\d{4}-\d{2}-\d{2}$")
+        self.assertRegex(end_ts, r"^\d{4}-\d{2}-\d{2}$")
+        # Ensure no `T`/`Z` time portion sneaks back in (the bug we're guarding).
+        self.assertNotIn("T", start_ts)
+        self.assertNotIn("Z", start_ts)
+        self.assertNotIn("T", end_ts)
+        self.assertNotIn("Z", end_ts)
+        # Half-open `[yesterday, today)` semantics: end_ts strictly later than
+        # start_ts as plain dates.
+        self.assertLess(start_ts, end_ts)
+
+
 if __name__ == "__main__":
     unittest.main()

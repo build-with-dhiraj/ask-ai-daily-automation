@@ -695,17 +695,21 @@ FROM base
 
 
 def _yesterday_utc_window() -> Tuple[str, str]:
-    """Return (start_ts, end_ts) ISO-Z strings for yesterday in UTC.
+    """Return (start_ts, end_ts) date-only strings for yesterday in UTC.
 
-    Half-open `[yesterday_00:00:00Z, today_00:00:00Z)`.
+    Half-open `[yesterday, today)`. Date-only `YYYY-MM-DD` format is what
+    Metabase's `date/single` parameter type expects; the previous ISO-Z form
+    (`YYYY-MM-DDTHH:MM:SSZ`) was rejected by Trino with
+    `Value cannot be cast to timestamp` when the SQL coerced the bound param
+    via `cast(... AS timestamp with time zone)`.
     """
     today_midnight = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     yesterday_midnight = today_midnight - timedelta(days=1)
     return (
-        yesterday_midnight.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        today_midnight.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        yesterday_midnight.strftime("%Y-%m-%d"),
+        today_midnight.strftime("%Y-%m-%d"),
     )
 
 
