@@ -2480,11 +2480,6 @@ def fmt_broken_chapter(
 
     # Legacy snapshots may omit this key; treat like an empty list (no judge hotspots to cross).
     fmt_hot = set(eval_summary.get("formatting_hotspot_chapters") or [])
-    if not fmt_hot:
-        return (
-            "  _Daily eval reported *no* formatting hotspot chapters in this run "
-            "(or snapshot predates the key — broken-chapter cross-check uses an empty judge hotspot set)._"
-        )
     behavioral: set[str] = set()
     for row in rephrase_rows or []:
         ch = _row_chapter(row)
@@ -2496,8 +2491,12 @@ def fmt_broken_chapter(
             behavioral.add(ch)
     both = sorted(fmt_hot & behavioral)
     if not both:
+        # Empty-state copy: render as a finding (deliberate result), not a
+        # missing field. Surface input cardinalities so the reader can see
+        # the cross-check actually ran. Closes #20.
         return (
-            "(no chapter shows both AI quality issues AND user behavior spike today)"
+            f":white_check_mark: Today's broken chapter: none detected\n"
+            f"({len(fmt_hot)} judge hotspots × {len(behavioral)} behavioral chapters → 0 overlap)"
         )
     lines = "\n".join(
         f"• *{_slack_escape(c)}* — both AI output quality flagged AND users keep retrying "

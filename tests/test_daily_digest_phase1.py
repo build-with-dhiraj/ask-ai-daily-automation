@@ -384,11 +384,38 @@ class TestFmtBrokenChapter(unittest.TestCase):
         self.assertIn("likely fix candidate", out)
         self.assertIn("Detailed 11th Revision", out)
 
-    def test_no_overlap_uses_plain_english_no_chapter_message(self) -> None:
-        eval_summary = {"formatting_hotspot_chapters": ["Some Chapter"]}
+    def test_no_overlap_renders_as_finding_with_cardinalities(self) -> None:
+        # Empty state must read as a deliberate finding, not a missing field
+        # (#20). Lead with a checkmark, restate intent, surface input counts
+        # so the reader can see the cross-check actually ran.
+        eval_summary = {
+            "formatting_hotspot_chapters": ["Some Chapter", "Another Chapter"]
+        }
         out = self.mod.fmt_broken_chapter([], [], eval_summary)
-        self.assertIn("no chapter shows both", out)
+        self.assertIn(":white_check_mark:", out)
+        self.assertIn("Today's broken chapter: none detected", out)
+        # 2 judge hotspots, 0 behavioral (empty follow/rephrase rows) → 0 overlap.
+        self.assertIn("2 judge hotspots", out)
+        self.assertIn("0 behavioral chapters", out)
+        self.assertIn("0 overlap", out)
         self.assertNotIn("∩", out)
+        self.assertNotIn("no chapter shows both", out)
+
+    def test_no_judge_hotspots_renders_as_finding_with_cardinalities(self) -> None:
+        # When daily eval reported no formatting hotspots, the cross-check
+        # still ran — just against an empty judge set. Empty state copy
+        # surfaces that cardinality (#20).
+        eval_summary = {"formatting_hotspot_chapters": []}
+        follow_rows = [
+            {"chapter": "Chapter A", "triple_followup_60s_pct": 10.0},
+            {"chapter": "Chapter B", "triple_followup_60s_pct": 10.0},
+        ]
+        out = self.mod.fmt_broken_chapter(follow_rows, [], eval_summary)
+        self.assertIn(":white_check_mark:", out)
+        self.assertIn("Today's broken chapter: none detected", out)
+        self.assertIn("0 judge hotspots", out)
+        self.assertIn("2 behavioral chapters", out)
+        self.assertIn("0 overlap", out)
 
     def test_alias_function_still_exists(self) -> None:
         # Backwards-compat alias for the existing test that imports the old name
