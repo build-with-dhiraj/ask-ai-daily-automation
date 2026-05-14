@@ -695,28 +695,53 @@ FROM base
 
 
 # Query 3 — feedback breakdown. Joins stream_logs to the conversational-query
-# bridge then to the prod feedback table to bucket yesterday's answers into
-# upvote (rating=6), downvote (rating=0), and no_vote (rating IS NULL).
+# bridge then to a deduplicated view of the prod feedback table to bucket
+# yesterday's answers into upvote (rating=6), downvote (rating=0), no_vote
+# (rating IS NULL), and a defensive `other` pass-through.
 #
-# DE-validated end-to-end against prod data. DO NOT MODIFY the SQL body —
-# only ratings 0, 6, NULL bridge in practice; the `other` branch is a defensive
-# pass-through. ~2.5% of stream_logs rows don't bridge to `cq` and appear in
-# `no_vote` via the LEFT JOIN — this is intentional so per-model bucket sums
-# roll up exactly to Query 1's per-model `request_count`.
+# DE-validated end-to-end against prod data (E6 round) — bucket sums roll up
+# exactly to Query 1's per-model `request_count`, zero delta. DO NOT MODIFY
+# the SQL body. Key invariants this version pins:
+#   • Catalog is `cdp.central.silver_stream_logs` (matches Q1 / Q2).
+#   • `status = 'SUCCESS'` + `endpoint = '/v1/nebula/video-co-pilot'` mirror
+#     Q1's filters so the row sets are identical.
+#   • `cast({{...}} AS timestamp with time zone)` matches Q1's date-binding
+#     coercion (Metabase `date/single` → Trino timestamp-with-tz).
+#   • `fb_latest` CTE picks ONE rating per `entity_id` (latest by timestamp,
+#     UUID-v1 id as deterministic tiebreak). Without dedup, the LEFT JOIN
+#     fanned out 661+ duplicate feedback rows and inflated bucket counts.
+#   • ~2.5% of stream_logs rows don't bridge to `cq` and appear in `no_vote`
+#     via the LEFT JOIN — intentional, preserves sum-consistency with Q1.
 _FEEDBACK_BREAKDOWN_SQL = """
-WITH base AS (
+WITH fb_latest AS (
+  -- Dedup: one rating per entity_id. Latest by timestamp, tiebreak on id
+  -- (UUID-v1, deterministic). Filters 661+ duplicate feedback rows that
+  -- previously fanned out via the LEFT JOIN and inflated bucket counts.
+  SELECT entity_id, rating
+  FROM (
+    SELECT
+      entity_id,
+      rating,
+      ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY timestamp DESC, id DESC) AS rn
+    FROM cdp_curated.astracdc.silver_prod_feedback_by_user_entity
+  )
+  WHERE rn = 1
+),
+base AS (
   SELECT
-    json_extract_scalar(sl.additional_metadata, '$.llm_model_name')             AS model,
-    CAST(json_extract_scalar(sl.additional_metadata, '$.student_ttft') AS DOUBLE) * 1000.0 AS student_ttft_ms,
-    CAST(json_extract_scalar(sl.additional_metadata, '$.llm_cost')     AS DOUBLE) AS llm_cost,
-    fb.rating                                                                   AS rating
-  FROM cdp_curated.central.silver_stream_logs sl
+    json_extract_scalar(sl.additional_metadata, '$.llm_model_name')                           AS model,
+    CAST(json_extract_scalar(sl.additional_metadata, '$.student_ttft') AS DOUBLE) * 1000.0    AS student_ttft_ms,
+    CAST(json_extract_scalar(sl.additional_metadata, '$.llm_cost')     AS DOUBLE)             AS llm_cost,
+    fb.rating                                                                                  AS rating
+  FROM cdp.central.silver_stream_logs sl
   LEFT JOIN cdp_curated.astracdc.silver_conversational_query_table cq
     ON sl.message_id = cq.userintentid
-  LEFT JOIN cdp_curated.astracdc.silver_prod_feedback_by_user_entity fb
+  LEFT JOIN fb_latest fb
     ON cq.aiintentid = fb.entity_id
-  WHERE sl.created_at >= TIMESTAMP {{start_ts}}
-    AND sl.created_at <  TIMESTAMP {{end_ts}}
+  WHERE sl.status = 'SUCCESS'
+    AND sl.endpoint = '/v1/nebula/video-co-pilot'
+    AND sl.created_at >= cast({{start_ts}} AS timestamp with time zone)
+    AND sl.created_at <  cast({{end_ts}}   AS timestamp with time zone)
     AND json_extract_scalar(sl.additional_metadata, '$.llm_model_name') IS NOT NULL
 )
 SELECT
