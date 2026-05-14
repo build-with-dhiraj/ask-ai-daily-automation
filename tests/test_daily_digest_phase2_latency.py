@@ -590,5 +590,402 @@ class TestYesterdayUtcWindowFormat(unittest.TestCase):
         self.assertLess(start_ts, end_ts)
 
 
+# ---------------------------------------------------------------------------
+# 7. Per-response cost normalization + feedback breakdown (NEW)
+# ---------------------------------------------------------------------------
+
+
+_FEEDBACK_ROWS = [
+    # gpt-4.1: three buckets, all non-empty.
+    [
+        ("model", "gpt-4.1"),
+        ("feedback_bucket", "upvote"),
+        ("request_count", 1200),
+        ("student_ttft_p50_ms", 5800.0),
+        ("cost_usd", 14.20),
+    ],
+    [
+        ("model", "gpt-4.1"),
+        ("feedback_bucket", "no_vote"),
+        ("request_count", 36000),
+        ("student_ttft_p50_ms", 6100.0),
+        ("cost_usd", 390.07),
+    ],
+    [
+        ("model", "gpt-4.1"),
+        ("feedback_bucket", "downvote"),
+        ("request_count", 2376),
+        ("student_ttft_p50_ms", 6400.0),
+        ("cost_usd", 31.00),
+    ],
+    # gemini-3-flash-preview: upvote bucket empty (0 rows from SQL); downvote
+    # present. The renderer must synthesise the empty upvote cell.
+    [
+        ("model", "gemini-3-flash-preview"),
+        ("feedback_bucket", "no_vote"),
+        ("request_count", 19500),
+        ("student_ttft_p50_ms", 6200.0),
+        ("cost_usd", 173.50),
+    ],
+    [
+        ("model", "gemini-3-flash-preview"),
+        ("feedback_bucket", "downvote"),
+        ("request_count", 500),
+        ("student_ttft_p50_ms", 6700.0),
+        ("cost_usd", 4.49),
+    ],
+]
+
+
+@mock.patch.dict(os.environ, {"METABASE_API_KEY": "test-key"})
+class TestFetchFeedbackBreakdownShape(unittest.TestCase):
+    def test_maps_rows_into_nested_by_model_bucket_dict(self):
+        digest = _load_digest()
+        response = _dataset_response(_FEEDBACK_ROWS)
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=lambda req, timeout=None: _mock_urlopen_returning(response),
+        ):
+            out = digest.fetch_feedback_breakdown_from_stream_logs()
+
+        self.assertTrue(out["ok"])
+        bm = out["by_model"]
+        self.assertIn("gpt-4.1", bm)
+        self.assertIn("gemini-3-flash-preview", bm)
+        # Three buckets for gpt-4.1.
+        self.assertEqual(set(bm["gpt-4.1"].keys()), {"upvote", "no_vote", "downvote"})
+        # cost_per_response = cost / count (4 decimal+ resolution).
+        up = bm["gpt-4.1"]["upvote"]
+        self.assertEqual(up["count"], 1200)
+        self.assertAlmostEqual(up["cost_per_response"], 14.20 / 1200, places=8)
+        # Downvote
+        dv = bm["gpt-4.1"]["downvote"]
+        self.assertAlmostEqual(dv["cost_per_response"], 31.00 / 2376, places=8)
+        # Only two buckets emitted for gemini (empty upvote is NOT
+        # synthesised at the fetcher layer — renderer's job).
+        self.assertEqual(
+            set(bm["gemini-3-flash-preview"].keys()), {"no_vote", "downvote"}
+        )
+
+    def test_fetcher_5xx_exhaustion_returns_ok_false(self):
+        digest = _load_digest()
+        with mock.patch("urllib.request.urlopen", side_effect=_http_5xx()):
+            with mock.patch("time.sleep"):
+                out = digest.fetch_feedback_breakdown_from_stream_logs()
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["by_model"], {})
+
+    def test_fetcher_4xx_returns_ok_false(self):
+        """4xx never retries — single HTTP call, fetcher reports failure
+        without exception escaping to the caller."""
+        digest = _load_digest()
+        err_4xx = urllib.error.HTTPError(
+            url="https://metabase/api/dataset",
+            code=400, msg="bad", hdrs=None,  # type: ignore[arg-type]
+            fp=io.BytesIO(b"x"),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=err_4xx):
+            out = digest.fetch_feedback_breakdown_from_stream_logs()
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["by_model"], {})
+
+    def test_zero_count_bucket_emits_none_cost_per_response(self):
+        """Defensive: if Metabase ever returns a count=0 row (it shouldn't,
+        but the SQL doesn't filter it out), we must not div-by-zero."""
+        digest = _load_digest()
+        zero_row = [[
+            ("model", "gpt-4.1"),
+            ("feedback_bucket", "upvote"),
+            ("request_count", 0),
+            ("student_ttft_p50_ms", None),
+            ("cost_usd", 0.0),
+        ]]
+        response = _dataset_response(zero_row)
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=lambda req, timeout=None: _mock_urlopen_returning(response),
+        ):
+            out = digest.fetch_feedback_breakdown_from_stream_logs()
+        self.assertTrue(out["ok"])
+        self.assertIsNone(out["by_model"]["gpt-4.1"]["upvote"]["cost_per_response"])
+
+
+class TestPerResponseCostInExistingFetcher(unittest.TestCase):
+    """Q1 fetcher must now compute cost_per_response per model and on
+    the classifier row. Zero-count must emit None (no div-by-zero)."""
+
+    @mock.patch.dict(os.environ, {"METABASE_API_KEY": "test-key"})
+    def test_answer_and_classifier_carry_cost_per_response(self):
+        digest = _load_digest()
+        responses = [
+            _dataset_response([_ANSWER_ROW_FULL]),
+            _dataset_response([_CLASSIFIER_ROW_FULL]),
+        ]
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=lambda req, timeout=None: _mock_urlopen_returning(
+                responses.pop(0)
+            ),
+        ):
+            out = digest.fetch_yesterday_cost_and_latency_from_stream_logs()
+        gpt = out["answer_by_model"]["gpt-4.1"]
+        self.assertAlmostEqual(gpt["cost_per_response"], 435.27 / 39576, places=8)
+        c = out["classifier"]
+        self.assertAlmostEqual(c["cost_per_response"], 37.80 / 116803, places=8)
+
+
+# Reusable test data for renderer tests below.
+_FEEDBACK_BY_MODEL_FULL = {
+    "gpt-4.1": {
+        "upvote":   {"count": 1200,  "student_ttft_p50_ms": 5800.0, "cost_usd": 14.20,  "cost_per_response": 14.20 / 1200},
+        "no_vote":  {"count": 36000, "student_ttft_p50_ms": 6100.0, "cost_usd": 390.07, "cost_per_response": 390.07 / 36000},
+        "downvote": {"count": 2376,  "student_ttft_p50_ms": 6400.0, "cost_usd": 31.00,  "cost_per_response": 31.00 / 2376},
+    },
+    "gemini-3-flash-preview": {
+        "no_vote":  {"count": 19500, "student_ttft_p50_ms": 6200.0, "cost_usd": 173.50, "cost_per_response": 173.50 / 19500},
+        "downvote": {"count": 500,   "student_ttft_p50_ms": 6700.0, "cost_usd": 4.49,   "cost_per_response": 4.49 / 500},
+        # upvote bucket missing → renderer must synthesise `0 · — · —`.
+    },
+}
+
+
+class TestFmtCostAndLatencyWithEnrichments(unittest.TestCase):
+    def test_renders_cost_per_response_inline_in_cost_block(self):
+        digest = _load_digest()
+        # Inject cost_per_response onto the existing _FULL_DATA fixture.
+        data = json.loads(json.dumps(_FULL_DATA))  # deep copy
+        for model, m in data["answer_by_model"].items():
+            m["cost_per_response"] = m["cost_usd"] / m["request_count"]
+        data["classifier"]["cost_per_response"] = (
+            data["classifier"]["cost_usd"] / data["classifier"]["request_count"]
+        )
+        body = digest.fmt_cost_and_latency(data)
+        # Classifier line carries $/req with significant figures preserved.
+        # 37.80 / 116803 = 0.0003236... → "$0.000324"
+        self.assertIn("$0.000324/req", body)
+        # gpt-4.1: 435.27 / 39576 = 0.01099... → "$0.01100"
+        # (use a tolerant assertion: per-response cost appears with 5 decimals
+        # for x>=0.01; just check the dollar marker pattern is present)
+        self.assertRegex(body, r"`gpt-4\.1`.*\$\d+\.\d+.*\*\(\$0\.\d{5}/req\)\*")
+
+    def test_renders_feedback_breakdown_table_when_ok(self):
+        digest = _load_digest()
+        data = json.loads(json.dumps(_FULL_DATA))
+        for model, m in data["answer_by_model"].items():
+            m["cost_per_response"] = m["cost_usd"] / m["request_count"]
+        data["classifier"]["cost_per_response"] = (
+            data["classifier"]["cost_usd"] / data["classifier"]["request_count"]
+        )
+        data["feedback_breakdown"] = {
+            "ok": True,
+            "by_model": _FEEDBACK_BY_MODEL_FULL,
+        }
+        body = digest.fmt_cost_and_latency(data)
+        # Sub-block heading + intro text.
+        self.assertIn("Feedback breakdown — answer models only", body)
+        # Code fence present.
+        self.assertIn("```", body)
+        # Both models appear in the table.
+        self.assertIn("gpt-4.1", body)
+        self.assertIn("gemini-3-flash-preview", body)
+        # Count, ttft, $/req all rendered for upvote bucket of gpt-4.1.
+        self.assertIn("1,200", body)
+        self.assertIn("5800ms", body)
+        # gemini has empty upvote bucket → must show `0 · — · —`.
+        self.assertIn("0 · — · —", body)
+        # Bucket header order locked: upvote → no_vote → downvote.
+        # Find the table line containing the column headers.
+        table_start = body.index("```")
+        table_end = body.index("```", table_start + 3)
+        table = body[table_start:table_end]
+        # All three column names appear, in the right order.
+        up_pos = table.index("upvote")
+        nv_pos = table.index("no_vote")
+        dv_pos = table.index("downvote")
+        self.assertLess(up_pos, nv_pos)
+        self.assertLess(nv_pos, dv_pos)
+        # Footer explanation lines present.
+        self.assertIn("Feedback arrives over time", body)
+        self.assertIn("silver_prod_feedback_by_user_entity", body)
+
+    def test_feedback_fetch_failed_suppresses_table_keeps_per_response(self):
+        digest = _load_digest()
+        data = json.loads(json.dumps(_FULL_DATA))
+        for model, m in data["answer_by_model"].items():
+            m["cost_per_response"] = m["cost_usd"] / m["request_count"]
+        data["classifier"]["cost_per_response"] = (
+            data["classifier"]["cost_usd"] / data["classifier"]["request_count"]
+        )
+        data["feedback_breakdown"] = {"ok": False, "by_model": {}}
+        body = digest.fmt_cost_and_latency(data)
+        # Italic unavailable line shown.
+        self.assertIn("Feedback breakdown unavailable", body)
+        # No code fence / no table header.
+        self.assertNotIn("Feedback breakdown — answer models only", body)
+        self.assertNotIn("```", body)
+        # Per-response cost additions still present.
+        self.assertIn("/req", body)
+
+    def test_feedback_empty_dict_when_ok_suppresses_block_cleanly(self):
+        """If `ok=True` but `by_model` is empty (no qualifying rows
+        yesterday — extremely unlikely but possible if there's literally
+        zero traffic): suppress the entire sub-block silently. No
+        "unavailable" line — that's misleading."""
+        digest = _load_digest()
+        data = json.loads(json.dumps(_FULL_DATA))
+        for model, m in data["answer_by_model"].items():
+            m["cost_per_response"] = m["cost_usd"] / m["request_count"]
+        data["classifier"]["cost_per_response"] = (
+            data["classifier"]["cost_usd"] / data["classifier"]["request_count"]
+        )
+        data["feedback_breakdown"] = {"ok": True, "by_model": {}}
+        body = digest.fmt_cost_and_latency(data)
+        self.assertNotIn("Feedback breakdown", body)
+        self.assertNotIn("Feedback breakdown unavailable", body)
+
+
+class TestSnapshotIncludesFeedbackBreakdown(unittest.TestCase):
+    def test_snapshot_round_trips_with_feedback(self):
+        digest = _load_digest()
+        data = json.loads(json.dumps(_FULL_DATA))
+        for model, m in data["answer_by_model"].items():
+            m["cost_per_response"] = m["cost_usd"] / m["request_count"]
+        data["classifier"]["cost_per_response"] = (
+            data["classifier"]["cost_usd"] / data["classifier"]["request_count"]
+        )
+        data["feedback_breakdown"] = {
+            "ok": True,
+            "by_model": _FEEDBACK_BY_MODEL_FULL,
+        }
+        summary = digest._summarise_today_for_snapshot(
+            error_obs=[], total_errors=0, score_items=[],
+            dv_in_sample=0, total_traces=0,
+            dump_rows=None, academic_rows=None, non_academic_rows=None,
+            behavior_follow_rows=None, behavior_rephrase_rows=None,
+            classifier_snapshot=None,
+            cost_latency_data=data,
+        )
+        self.assertTrue(summary["feedback_breakdown_ok"])
+        self.assertIn("gpt-4.1", summary["feedback_breakdown_by_model"])
+        up = summary["feedback_breakdown_by_model"]["gpt-4.1"]["upvote"]
+        self.assertEqual(up["count"], 1200)
+        self.assertAlmostEqual(up["cost_per_response"], 14.20 / 1200, places=6)
+        # Cost_per_response on the answer-model side preserved.
+        self.assertIsNotNone(
+            summary["cost_latency_answer_by_model"]["gpt-4.1"]["cost_per_response"]
+        )
+        # JSON round-trip clean.
+        rt = json.loads(json.dumps(summary))
+        self.assertEqual(
+            rt["feedback_breakdown_by_model"]["gpt-4.1"]["upvote"]["count"], 1200
+        )
+
+    def test_snapshot_flags_feedback_breakdown_failure(self):
+        digest = _load_digest()
+        data = json.loads(json.dumps(_FULL_DATA))
+        data["feedback_breakdown"] = {"ok": False, "by_model": {}}
+        summary = digest._summarise_today_for_snapshot(
+            error_obs=[], total_errors=0, score_items=[],
+            dv_in_sample=0, total_traces=0,
+            dump_rows=None, academic_rows=None, non_academic_rows=None,
+            behavior_follow_rows=None, behavior_rephrase_rows=None,
+            classifier_snapshot=None,
+            cost_latency_data=data,
+        )
+        self.assertFalse(summary["feedback_breakdown_ok"])
+        self.assertEqual(summary["feedback_breakdown_by_model"], {})
+
+
+class TestCostLatencySectionSizeGuard(unittest.TestCase):
+    """When the rendered section crosses the ~2700-char safety margin,
+    build_blocks splits it into two `section` blocks separated by a
+    `divider`, with the seam right before the Feedback breakdown."""
+
+    def test_long_render_splits_into_two_sections(self):
+        digest = _load_digest()
+        # Construct a `cost_latency_data` dict with many models so the
+        # rendered body crosses the 2700-char soft limit. Each model row
+        # adds ~150 chars; the feedback table adds another ~400 chars +
+        # surrounding prose (~250 chars).
+        many_models = {}
+        many_feedback = {}
+        for i in range(20):
+            name = f"model-with-a-fairly-long-name-{i:02d}"
+            many_models[name] = {
+                "request_count": 1000 + i,
+                "ttft_ms": {"p50": 4000, "p90": 6000, "p95": 7000},
+                "student_ttft": {"p50": 5000, "p90": 7000, "p95": 8000},
+                "llm_ttft": {"p50": 3000, "p90": 4500, "p95": 5500},
+                "cost_usd": 100.00 + i,
+                "cost_per_response": (100.00 + i) / (1000 + i),
+                "tokens": {"input": 100_000, "output": 5_000, "cached": 50_000},
+            }
+            many_feedback[name] = {
+                "upvote":   {"count": 100, "student_ttft_p50_ms": 5000.0, "cost_usd": 1.00, "cost_per_response": 0.01},
+                "no_vote":  {"count": 800, "student_ttft_p50_ms": 5500.0, "cost_usd": 8.00, "cost_per_response": 0.01},
+                "downvote": {"count": 100, "student_ttft_p50_ms": 6000.0, "cost_usd": 1.00, "cost_per_response": 0.01},
+            }
+        data = {
+            "ok": True,
+            "yesterday": "2026-05-12",
+            "answer_by_model": many_models,
+            "classifier": {
+                "request_count": 50000, "avg_ms": 3000, "p50": 3000, "p90": 3500, "p95": 3800,
+                "cost_usd": 20.00, "cost_per_response": 20.00 / 50000,
+            },
+            "feedback_breakdown": {"ok": True, "by_model": many_feedback},
+        }
+        blocks = digest.build_blocks(
+            academic_rows=None, nonacademic_rows=None, dump_rows=None,
+            score_items=[], dv_in_sample=0, error_obs=[], total_errors=0,
+            total_traces=0, cost_latency_data=data,
+        )
+        # Find the Cost & Latency section(s).
+        section_texts = [
+            b.get("text", {}).get("text", "") for b in blocks if b.get("type") == "section"
+        ]
+        cl_sections = [s for s in section_texts if "Cost & Latency" in s or "Feedback breakdown" in s]
+        # Must have split: one section with "Cost & Latency", another with
+        # "Feedback breakdown".
+        self.assertEqual(
+            len(cl_sections), 2,
+            f"expected 2 sections for long render, got {len(cl_sections)}",
+        )
+        # Order: header first, feedback second.
+        self.assertIn("Cost & Latency", cl_sections[0])
+        self.assertIn("Feedback breakdown", cl_sections[1])
+
+    def test_short_render_stays_single_section(self):
+        """Regression guard: when the body is well under the limit
+        (common case — few models, no feedback table), don't split."""
+        digest = _load_digest()
+        data = {
+            "ok": True,
+            "yesterday": "2026-05-12",
+            "answer_by_model": {
+                "gpt-4.1": {
+                    "request_count": 100, "cost_usd": 1.00,
+                    "cost_per_response": 0.01,
+                    "ttft_ms": {"p50": 4000, "p90": 6000, "p95": 7000},
+                    "student_ttft": {"p50": 5000, "p90": 7000, "p95": 8000},
+                    "llm_ttft": {"p50": 3000, "p90": 4500, "p95": 5500},
+                    "tokens": {"input": 1000, "output": 500, "cached": 500},
+                },
+            },
+            "classifier": None,
+            # No feedback breakdown at all — keep it short.
+        }
+        blocks = digest.build_blocks(
+            academic_rows=None, nonacademic_rows=None, dump_rows=None,
+            score_items=[], dv_in_sample=0, error_obs=[], total_errors=0,
+            total_traces=0, cost_latency_data=data,
+        )
+        section_texts = [
+            b.get("text", {}).get("text", "") for b in blocks if b.get("type") == "section"
+        ]
+        cl_sections = [s for s in section_texts if "Cost & Latency" in s]
+        self.assertEqual(len(cl_sections), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
