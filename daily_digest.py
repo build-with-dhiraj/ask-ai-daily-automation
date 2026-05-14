@@ -600,6 +600,770 @@ def fetch_langfuse_traces_total() -> Tuple[int, bool]:
         print(f"[warn] Langfuse traces failed: {repr(exc)}", file=sys.stderr)
         return 0, False
 
+
+def _safe_pct_delta(today: Optional[float], prior: Optional[float]) -> Optional[float]:
+    """Compute (today - prior) / prior * 100 with NaN/None/zero guards.
+
+    Returns None when the delta is undefined (missing day, zero baseline, or
+    non-numeric input). Callers render `—` for None.
+    """
+    if today is None or prior is None:
+        return None
+    try:
+        t = float(today)
+        p = float(prior)
+    except (TypeError, ValueError):
+        return None
+    # NaN poisons every comparison downstream (NaN >= 20 is False, but NaN
+    # printed with _fmt_delta_arrow still leaks "↑nan%") — treat as undefined.
+    if t != t or p != p:  # NaN check via self-inequality (stdlib-only)
+        return None
+    if p == 0:
+        return None
+    return (t - p) / p * 100.0
+
+
+# ---------------------------------------------------------------------------
+# Cost & Latency — sourced from cdp.central.silver_stream_logs (Metabase)
+# ---------------------------------------------------------------------------
+# Replaces the prior Langfuse-Metrics-API-backed fetchers. Two native queries
+# run via Metabase /api/dataset (Trino-Prod DB 895): one per-model answer
+# metrics block, one aggregate classifier block. Both filter to SUCCESS rows
+# on /v1/nebula/video-co-pilot for yesterday in UTC.
+
+_ANSWER_METRICS_SQL = """
+WITH base AS (
+  SELECT
+    json_extract_scalar(additional_metadata, '$.llm_model_name')                           AS llm_model_name,
+    CAST(json_extract_scalar(additional_metadata, '$.time_to_first_token_ms') AS DOUBLE)   AS ttft_ms,
+    CAST(json_extract_scalar(additional_metadata, '$.student_ttft')           AS DOUBLE) * 1000.0 AS student_ttft_ms,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_ttft')               AS DOUBLE) * 1000.0 AS llm_ttft_ms,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_cost')               AS DOUBLE)   AS llm_cost,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_input_tokens')       AS BIGINT)   AS llm_input_tokens,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_output_tokens')      AS BIGINT)   AS llm_output_tokens,
+    CAST(json_extract_scalar(additional_metadata, '$.llm_cached_tokens')      AS BIGINT)   AS llm_cached_tokens
+  FROM cdp.central.silver_stream_logs
+  WHERE status = 'SUCCESS'
+    AND endpoint = '/v1/nebula/video-co-pilot'
+    AND created_at >= cast({{start_ts}} AS timestamp with time zone)
+    AND created_at <  cast({{end_ts}}   AS timestamp with time zone)
+    AND json_extract_scalar(additional_metadata, '$.llm_model_name') IS NOT NULL
+)
+SELECT
+  llm_model_name,
+  COUNT(*)                                            AS request_count,
+  approx_percentile(ttft_ms,         0.50)            AS ttft_ms_p50,
+  approx_percentile(ttft_ms,         0.90)            AS ttft_ms_p90,
+  approx_percentile(ttft_ms,         0.95)            AS ttft_ms_p95,
+  approx_percentile(student_ttft_ms, 0.50)            AS student_ttft_ms_p50,
+  approx_percentile(student_ttft_ms, 0.90)            AS student_ttft_ms_p90,
+  approx_percentile(student_ttft_ms, 0.95)            AS student_ttft_ms_p95,
+  approx_percentile(llm_ttft_ms,     0.50)            AS llm_ttft_ms_p50,
+  approx_percentile(llm_ttft_ms,     0.90)            AS llm_ttft_ms_p90,
+  approx_percentile(llm_ttft_ms,     0.95)            AS llm_ttft_ms_p95,
+  SUM(llm_cost)                                       AS llm_cost_usd,
+  SUM(llm_input_tokens)                               AS llm_input_tokens,
+  SUM(llm_output_tokens)                              AS llm_output_tokens,
+  SUM(llm_cached_tokens)                              AS llm_cached_tokens
+FROM base
+GROUP BY llm_model_name
+ORDER BY request_count DESC
+""".strip()
+
+
+_CLASSIFIER_METRICS_SQL = """
+WITH base AS (
+  SELECT
+    CAST(json_extract_scalar(additional_metadata, '$.classification_time') AS DOUBLE) * 1000.0 AS classification_ms,
+    CAST(json_extract_scalar(additional_metadata, '$.classification_cost') AS DOUBLE)         AS classification_cost
+  FROM cdp.central.silver_stream_logs
+  WHERE status = 'SUCCESS'
+    AND endpoint = '/v1/nebula/video-co-pilot'
+    AND created_at >= cast({{start_ts}} AS timestamp with time zone)
+    AND created_at <  cast({{end_ts}}   AS timestamp with time zone)
+    AND json_extract_scalar(additional_metadata, '$.classification_time') IS NOT NULL
+)
+SELECT
+  COUNT(*)                                       AS request_count,
+  AVG(classification_ms)                         AS avg_ms,
+  approx_percentile(classification_ms, 0.50)     AS classification_ms_p50,
+  approx_percentile(classification_ms, 0.90)     AS classification_ms_p90,
+  approx_percentile(classification_ms, 0.95)     AS classification_ms_p95,
+  SUM(classification_cost)                       AS classification_cost_usd
+FROM base
+""".strip()
+
+
+# Query 3 — feedback breakdown. Joins stream_logs to the conversational-query
+# bridge then to a deduplicated view of the prod feedback table to bucket
+# yesterday's answers into upvote (rating=6), downvote (rating=0), no_vote
+# (rating IS NULL), and a defensive `other` pass-through.
+#
+# DE-validated end-to-end against prod data (E6 round) — bucket sums roll up
+# exactly to Query 1's per-model `request_count`, zero delta. DO NOT MODIFY
+# the SQL body. Key invariants this version pins:
+#   • Catalog is `cdp.central.silver_stream_logs` (matches Q1 / Q2).
+#   • `status = 'SUCCESS'` + `endpoint = '/v1/nebula/video-co-pilot'` mirror
+#     Q1's filters so the row sets are identical.
+#   • `cast({{...}} AS timestamp with time zone)` matches Q1's date-binding
+#     coercion (Metabase `date/single` → Trino timestamp-with-tz).
+#   • `fb_latest` CTE picks ONE rating per `entity_id` (latest by timestamp,
+#     UUID-v1 id as deterministic tiebreak). Without dedup, the LEFT JOIN
+#     fanned out 661+ duplicate feedback rows and inflated bucket counts.
+#   • ~2.5% of stream_logs rows don't bridge to `cq` and appear in `no_vote`
+#     via the LEFT JOIN — intentional, preserves sum-consistency with Q1.
+_FEEDBACK_BREAKDOWN_SQL = """
+WITH fb_latest AS (
+  -- Dedup: one rating per entity_id. Latest by timestamp, tiebreak on id
+  -- (UUID-v1, deterministic). Filters 661+ duplicate feedback rows that
+  -- previously fanned out via the LEFT JOIN and inflated bucket counts.
+  SELECT entity_id, rating
+  FROM (
+    SELECT
+      entity_id,
+      rating,
+      ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY timestamp DESC, id DESC) AS rn
+    FROM cdp_curated.astracdc.silver_prod_feedback_by_user_entity
+  )
+  WHERE rn = 1
+),
+base AS (
+  SELECT
+    json_extract_scalar(sl.additional_metadata, '$.llm_model_name')                           AS model,
+    CAST(json_extract_scalar(sl.additional_metadata, '$.student_ttft') AS DOUBLE) * 1000.0    AS student_ttft_ms,
+    CAST(json_extract_scalar(sl.additional_metadata, '$.llm_cost')     AS DOUBLE)             AS llm_cost,
+    fb.rating                                                                                  AS rating
+  FROM cdp.central.silver_stream_logs sl
+  LEFT JOIN cdp_curated.astracdc.silver_conversational_query_table cq
+    ON sl.message_id = cq.userintentid
+  LEFT JOIN fb_latest fb
+    ON cq.aiintentid = fb.entity_id
+  WHERE sl.status = 'SUCCESS'
+    AND sl.endpoint = '/v1/nebula/video-co-pilot'
+    AND sl.created_at >= cast({{start_ts}} AS timestamp with time zone)
+    AND sl.created_at <  cast({{end_ts}}   AS timestamp with time zone)
+    AND json_extract_scalar(sl.additional_metadata, '$.llm_model_name') IS NOT NULL
+)
+SELECT
+  model,
+  CASE WHEN rating = 6 THEN 'upvote'
+       WHEN rating = 0 THEN 'downvote'
+       WHEN rating IS NULL THEN 'no_vote'
+       ELSE 'other' END AS feedback_bucket,
+  count(*)                                AS request_count,
+  approx_percentile(student_ttft_ms, 0.5) AS student_ttft_p50_ms,
+  SUM(llm_cost)                           AS cost_usd
+FROM base
+GROUP BY 1, 2
+ORDER BY 1, 2
+""".strip()
+
+
+def _yesterday_utc_window() -> Tuple[str, str]:
+    """Return (start_ts, end_ts) date-only strings for yesterday in UTC.
+
+    Half-open `[yesterday, today)`. Date-only `YYYY-MM-DD` format is what
+    Metabase's `date/single` parameter type expects; the previous ISO-Z form
+    (`YYYY-MM-DDTHH:MM:SSZ`) was rejected by Trino with
+    `Value cannot be cast to timestamp` when the SQL coerced the bound param
+    via `cast(... AS timestamp with time zone)`.
+    """
+    today_midnight = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    yesterday_midnight = today_midnight - timedelta(days=1)
+    return (
+        yesterday_midnight.strftime("%Y-%m-%d"),
+        today_midnight.strftime("%Y-%m-%d"),
+    )
+
+
+def _coerce_float(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int_or_none(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return None
+
+
+def fetch_yesterday_cost_and_latency_from_stream_logs() -> dict:
+    """Fetch per-model answer + aggregate classifier metrics for yesterday.
+
+    Sources `cdp.central.silver_stream_logs` (Trino-Prod, DB 895) via Metabase
+    `/api/dataset`. Returns:
+
+        {
+          "ok": True/False,
+          "yesterday": "YYYY-MM-DD",
+          "answer_by_model": {
+            "<model>": {
+              "request_count": int,
+              "ttft_ms":      {"p50": float, "p90": float, "p95": float},
+              "student_ttft": {"p50": float, "p90": float, "p95": float},
+              "llm_ttft":     {"p50": float, "p90": float, "p95": float},
+              "cost_usd": float,
+              "tokens": {"input": int, "output": int, "cached": int},
+            }, ...
+          },
+          "classifier": {
+            "request_count": int,
+            "avg_ms": float,
+            "p50": float, "p90": float, "p95": float,
+            "cost_usd": float,
+          } | None,
+        }
+
+    On total failure: `ok=False`, both sub-dicts empty/None. Renderer prints
+    a "(no data)" placeholder for missing sub-blocks.
+
+    Note: the per-model `request_count` is LLM-answered requests only —
+    ~45% of SUCCESS rows are non-LLM paths (excluded by the `IS NOT NULL`
+    filter on `llm_model_name`).
+    """
+    from metabase_client import run_native_query, MetabaseQueryError  # local import to keep top-level lean
+
+    start_ts, end_ts = _yesterday_utc_window()
+    params = {"start_ts": start_ts, "end_ts": end_ts}
+    yesterday_label = start_ts[:10]
+
+    answer_by_model: Dict[str, Dict[str, Any]] = {}
+    classifier: Optional[Dict[str, Any]] = None
+    any_ok = False
+
+    # ---- Answer per-model query --------------------------------------------
+    try:
+        rows = run_native_query(_ANSWER_METRICS_SQL, params)
+        any_ok = True
+        for row in rows:
+            model = row.get("llm_model_name")
+            if not model:
+                continue
+            req_count = _coerce_int_or_none(row.get("request_count")) or 0
+            cost_usd = _coerce_float(row.get("llm_cost_usd")) or 0.0
+            # Per-response cost normalization: cost_usd / request_count.
+            # `None` when request_count is 0 (avoid div-by-zero) so the
+            # renderer can fall back to an em-dash placeholder.
+            cost_per_response = (cost_usd / req_count) if req_count > 0 else None
+            answer_by_model[str(model)] = {
+                "request_count": req_count,
+                "ttft_ms": {
+                    "p50": _coerce_float(row.get("ttft_ms_p50")),
+                    "p90": _coerce_float(row.get("ttft_ms_p90")),
+                    "p95": _coerce_float(row.get("ttft_ms_p95")),
+                },
+                "student_ttft": {
+                    "p50": _coerce_float(row.get("student_ttft_ms_p50")),
+                    "p90": _coerce_float(row.get("student_ttft_ms_p90")),
+                    "p95": _coerce_float(row.get("student_ttft_ms_p95")),
+                },
+                "llm_ttft": {
+                    "p50": _coerce_float(row.get("llm_ttft_ms_p50")),
+                    "p90": _coerce_float(row.get("llm_ttft_ms_p90")),
+                    "p95": _coerce_float(row.get("llm_ttft_ms_p95")),
+                },
+                "cost_usd": cost_usd,
+                "cost_per_response": cost_per_response,
+                "tokens": {
+                    "input": _coerce_int_or_none(row.get("llm_input_tokens")) or 0,
+                    "output": _coerce_int_or_none(row.get("llm_output_tokens")) or 0,
+                    "cached": _coerce_int_or_none(row.get("llm_cached_tokens")) or 0,
+                },
+            }
+    except Exception as exc:
+        print(
+            f"[warn] stream_logs answer-metrics query failed: {exc!r}",
+            file=sys.stderr,
+        )
+
+    # ---- Classifier aggregate query ----------------------------------------
+    try:
+        rows = run_native_query(_CLASSIFIER_METRICS_SQL, params)
+        any_ok = True
+        if rows:
+            row = rows[0]
+            req_count = _coerce_int_or_none(row.get("request_count")) or 0
+            if req_count > 0:
+                c_cost = _coerce_float(row.get("classification_cost_usd")) or 0.0
+                classifier = {
+                    "request_count": req_count,
+                    "avg_ms": _coerce_float(row.get("avg_ms")),
+                    "p50": _coerce_float(row.get("classification_ms_p50")),
+                    "p90": _coerce_float(row.get("classification_ms_p90")),
+                    "p95": _coerce_float(row.get("classification_ms_p95")),
+                    "cost_usd": c_cost,
+                    "cost_per_response": (c_cost / req_count) if req_count > 0 else None,
+                }
+    except Exception as exc:
+        print(
+            f"[warn] stream_logs classifier-metrics query failed: {exc!r}",
+            file=sys.stderr,
+        )
+
+    return {
+        "ok": any_ok,
+        "yesterday": yesterday_label,
+        "answer_by_model": answer_by_model,
+        "classifier": classifier,
+    }
+
+
+def fetch_feedback_breakdown_from_stream_logs() -> dict:
+    """Fetch per-model × feedback-bucket breakdown for yesterday.
+
+    Sources the same `silver_stream_logs` row set as Query 1, LEFT-JOINed to
+    `silver_conversational_query_table` (intent-id bridge) and then to
+    `silver_prod_feedback_by_user_entity` (rating). Buckets yesterday's
+    answer-model requests into:
+      • `upvote`   — rating = 6
+      • `downvote` — rating = 0
+      • `no_vote`  — rating IS NULL (default state — student hasn't rated)
+      • `other`    — defensive pass-through; DE confirms this is empty in
+                     practice, but we keep it (and only render if count>0).
+
+    DE-validated invariant: per-model bucket sums roll up exactly to
+    Query 1's per-model `request_count`. This is logged at fetch time
+    so a future drift is visible in CI logs.
+
+    Returns:
+        {
+          "ok": True/False,
+          "by_model": {
+            "<model>": {
+              "<bucket>": {
+                "count": int,
+                "student_ttft_p50_ms": float | None,
+                "cost_usd": float,
+                "cost_per_response": float | None,
+              }, ...
+            }, ...
+          },
+        }
+
+    On any error (4xx / 5xx-exhaustion / malformed payload): `ok=False`,
+    `by_model={}`. The caller suppresses the entire feedback sub-block in
+    that case (per locked product decision).
+    """
+    from metabase_client import run_native_query, MetabaseQueryError  # local
+
+    start_ts, end_ts = _yesterday_utc_window()
+    params = {"start_ts": start_ts, "end_ts": end_ts}
+
+    by_model: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    try:
+        rows = run_native_query(_FEEDBACK_BREAKDOWN_SQL, params)
+    except MetabaseQueryError as exc:
+        print(
+            f"[warn] stream_logs feedback-breakdown query failed: {exc!r}",
+            file=sys.stderr,
+        )
+        return {"ok": False, "by_model": {}}
+    except Exception as exc:
+        print(
+            f"[warn] stream_logs feedback-breakdown unexpected error: {exc!r}",
+            file=sys.stderr,
+        )
+        return {"ok": False, "by_model": {}}
+
+    for row in rows or []:
+        model = row.get("model")
+        bucket = row.get("feedback_bucket")
+        if not model or not bucket:
+            continue
+        bucket_s = str(bucket)
+        # Per locked spec: render `other` only if count > 0; drop silently
+        # otherwise. Defer that decision to the renderer; the fetcher
+        # carries the data through faithfully.
+        count = _coerce_int_or_none(row.get("request_count")) or 0
+        cost_usd = _coerce_float(row.get("cost_usd")) or 0.0
+        cost_per_response = (cost_usd / count) if count > 0 else None
+        by_model.setdefault(str(model), {})[bucket_s] = {
+            "count": count,
+            "student_ttft_p50_ms": _coerce_float(row.get("student_ttft_p50_ms")),
+            "cost_usd": cost_usd,
+            "cost_per_response": cost_per_response,
+        }
+
+    return {"ok": True, "by_model": by_model}
+
+
+def _log_feedback_rollup_assertion(
+    answer_by_model: Dict[str, Dict[str, Any]],
+    feedback_by_model: Dict[str, Dict[str, Dict[str, Any]]],
+) -> None:
+    """Log a warning when per-model bucket sums diverge from Query 1 totals.
+
+    Per DE: bucket sums (upvote + no_vote + downvote + other) must equal
+    Query 1's per-model `request_count`. The LEFT JOIN to `cq` deliberately
+    passes ~2.5% non-bridging stream_logs rows through as `no_vote` to
+    preserve this invariant. Drift here means schema upstream changed —
+    surface it loudly in logs (don't fail the digest).
+    """
+    for model, q1 in (answer_by_model or {}).items():
+        q1_count = int(q1.get("request_count") or 0)
+        buckets = (feedback_by_model or {}).get(model) or {}
+        q3_total = sum(int(b.get("count") or 0) for b in buckets.values())
+        if q1_count > 0 and q3_total != q1_count:
+            print(
+                f"[warn] feedback rollup mismatch for {model!r}: "
+                f"Q1 request_count={q1_count} != Q3 bucket sum={q3_total}",
+                file=sys.stderr,
+            )
+
+
+def _fmt_delta_arrow(delta_pct: Optional[float]) -> str:
+    """Render a day-on-day delta percentage as `↑X%`, `↓X%`, `↑0%`, or `—`.
+
+    None → `—` (delta undefined — missing baseline or zero baseline).
+    Positive → `↑N%` (rounded to integer for compact display).
+    Negative → `↓N%` (absolute value).
+    """
+    if delta_pct is None:
+        return "—"
+    if abs(delta_pct) < 0.5:
+        return "↑0%"
+    if delta_pct >= 0:
+        return f"↑{int(round(delta_pct))}%"
+    return f"↓{int(round(abs(delta_pct)))}%"
+
+
+def _fmt_ms_as_seconds(ms: Optional[float]) -> str:
+    """Render milliseconds as compact seconds with 2 decimals: 2495 → '2.50s'.
+
+    None → `—`. Negative or non-numeric → `—`.
+    """
+    if ms is None:
+        return "—"
+    try:
+        v = float(ms)
+    except (TypeError, ValueError):
+        return "—"
+    if v < 0:
+        return "—"
+    return f"{v / 1000.0:.2f}s"
+
+
+def _fmt_ms_int(ms: Optional[float]) -> str:
+    """Render milliseconds as a compact integer ms string, or `—` for None."""
+    if ms is None:
+        return "—"
+    try:
+        return str(int(round(float(ms))))
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_tokens(n: Optional[int]) -> str:
+    """Render a token count compactly: 330_960_000 → '331.0M'."""
+    if n is None:
+        return "—"
+    try:
+        v = float(n)
+    except (TypeError, ValueError):
+        return "—"
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"{v / 1_000:.1f}K"
+    return f"{int(v)}"
+
+
+def _fmt_cost_per_response(v: Optional[float]) -> str:
+    """Render a per-response cost preserving significant figures.
+
+    Per locked product decision: do NOT normalize decimals. Pick a
+    precision that keeps the leading non-zero digits visible across the
+    typical spread ($0.000325 classifier → $0.01098 answer model).
+
+    `None` → em-dash placeholder (renderer uses this for empty/zero rows).
+    """
+    if v is None:
+        return "—"
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if x <= 0:
+        return f"${x:.4f}"
+    # Pick decimals so the first 4 significant digits show:
+    #   x >= 0.01   → 5 decimals  ($0.01098)
+    #   x <  0.01   → 6 decimals  ($0.000325)
+    decimals = 6 if x < 0.01 else 5
+    return f"${x:.{decimals}f}"
+
+
+def _fmt_ms_p50_only(ms: Optional[float]) -> str:
+    """Render a single p50 latency in ms with no separator: 6049 → '6049ms'.
+
+    Distinct from `_fmt_ms_int` only at the call site — used inside the
+    feedback breakdown table cells where we want a unit-suffixed integer.
+    `None` → em-dash placeholder.
+    """
+    if ms is None:
+        return "—"
+    try:
+        return f"{int(round(float(ms)))}ms"
+    except (TypeError, ValueError):
+        return "—"
+
+
+# Bucket display order (locked product decision).
+_FEEDBACK_BUCKETS_ORDER = ("upvote", "no_vote", "downvote")
+
+
+def _render_feedback_breakdown_table(
+    answer_by_model: Dict[str, Dict[str, Any]],
+    feedback_by_model: Dict[str, Dict[str, Dict[str, Any]]],
+) -> str:
+    """Build the triple-backtick monospace table for the feedback breakdown.
+
+    One row per answer model. Columns: model · upvote · no_vote · downvote.
+    Each cell shows `count · ttft_p50ms · $/req` separated by ` · `. The
+    `other` bucket, if non-zero for any model, becomes an additional column.
+
+    Empty bucket renders `0 · — · —` (locked product decision).
+
+    Columns are space-aligned for monospace; mobile Slack horizontal-scrolls.
+    """
+    # Determine column set: standard three, plus `other` only if any model
+    # has count > 0 in `other`.
+    columns: List[str] = list(_FEEDBACK_BUCKETS_ORDER)
+    any_other = False
+    for buckets in feedback_by_model.values():
+        if int((buckets.get("other") or {}).get("count") or 0) > 0:
+            any_other = True
+            break
+    if any_other:
+        columns.append("other")
+
+    # Build per-cell text first so we can size columns to actual content.
+    # Cell format (locked spec): `<count> · <ttft>ms · <$/req>`. Empty:
+    # `0 · — · —`.
+    def _cell(bucket: Optional[Dict[str, Any]]) -> str:
+        if not bucket:
+            return "0 · — · —"
+        cnt = int(bucket.get("count") or 0)
+        if cnt <= 0:
+            return "0 · — · —"
+        ttft = _fmt_ms_p50_only(bucket.get("student_ttft_p50_ms"))
+        cpr = _fmt_cost_per_response(bucket.get("cost_per_response"))
+        return f"{cnt:,} · {ttft} · {cpr}"
+
+    # Build header + body rows as tuples of strings (column-aligned later).
+    # Sort model rows by Q1 request_count desc, then name (same ordering as
+    # the Answer TTFT sub-block — keeps the eye line consistent).
+    sorted_models = sorted(
+        feedback_by_model.keys(),
+        key=lambda m: (
+            -int((answer_by_model.get(m) or {}).get("request_count") or 0),
+            m,
+        ),
+    )
+
+    rows: List[List[str]] = []
+    rows.append(["model", *columns])
+    for model in sorted_models:
+        buckets = feedback_by_model.get(model) or {}
+        rows.append([model, *[_cell(buckets.get(b)) for b in columns]])
+
+    # Column widths: max of header & body in each column.
+    n_cols = len(rows[0])
+    widths = [max(len(r[i]) for r in rows) for i in range(n_cols)]
+
+    def _fmt_row(r: List[str]) -> str:
+        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(r))
+
+    body = "\n".join(_fmt_row(r) for r in rows)
+    return "```\n" + body + "\n```"
+
+
+def fmt_cost_and_latency(data: dict) -> str:
+    """Render the Cost & Latency section body, sourced from stream_logs.
+
+    `data` shape (from `fetch_yesterday_cost_and_latency_from_stream_logs`):
+        {
+          "ok": bool,
+          "yesterday": "YYYY-MM-DD",
+          "answer_by_model": {<model>: {request_count, ttft_ms, student_ttft, llm_ttft, cost_usd, tokens}},
+          "classifier": {request_count, avg_ms, p50, p90, p95, cost_usd} | None,
+        }
+
+    Output layout (from spec):
+      • Provenance hint line
+      • Classifier Latency: single aggregate row + 3 explanatory lines
+      • Answer TTFT — per model: 3 metrics per model (server / student / llm-only)
+        with 3 explanation lines underneath
+      • Cost: per-model + classifier + total
+
+    No day-on-day deltas in this iteration — the new data source doesn't carry
+    yesterday-vs-day-before yet, so the old `regression_pct` / `spike_pct`
+    thresholds aren't applicable.
+    """
+    if not isinstance(data, dict) or data.get("ok") is False:
+        return (
+            "_Source: cdp.central.silver_stream_logs · SUCCESS requests on "
+            "/v1/nebula/video-co-pilot only_\n"
+            "  _(cost & latency unavailable — Metabase fetch failed)_"
+        )
+
+    answer = data.get("answer_by_model") or {}
+    classifier = data.get("classifier") or None
+
+    lines: List[str] = [
+        "_Source: `cdp.central.silver_stream_logs` · SUCCESS requests on "
+        "`/v1/nebula/video-co-pilot` only. Per-model `request_count` is "
+        "LLM-answered requests only (~45% of SUCCESS rows are non-LLM paths)._",
+    ]
+
+    # ---- Classifier latency -----------------------------------------------
+    lines.append("")
+    lines.append("⏱️ *Classifier Latency*")
+    if not classifier:
+        lines.append("  _(no data)_")
+    else:
+        n = classifier.get("request_count") or 0
+        avg = _fmt_ms_int(classifier.get("avg_ms"))
+        p50 = _fmt_ms_int(classifier.get("p50"))
+        p90 = _fmt_ms_int(classifier.get("p90"))
+        p95 = _fmt_ms_int(classifier.get("p95"))
+        cost = float(classifier.get("cost_usd") or 0.0)
+        cpr = _fmt_cost_per_response(classifier.get("cost_per_response"))
+        lines.append(
+            f"  {n:,} requests · avg {avg}ms · p50 {p50}ms · p90 {p90}ms · "
+            f"p95 {p95}ms · cost ${cost:.2f}  ·  *{cpr}/req*"
+        )
+        lines.append(
+            "  _Time spent on the classification LLM call (separate from the answer model)._"
+        )
+
+    # ---- Answer TTFT per model --------------------------------------------
+    lines.append("")
+    lines.append("⏱️ *Answer TTFT — per model*")
+    if not answer:
+        lines.append("  _(no data)_")
+    else:
+        # Sort by request_count desc, then name.
+        sorted_models = sorted(
+            answer.items(),
+            key=lambda kv: (-(kv[1].get("request_count") or 0), kv[0]),
+        )
+        for model, m in sorted_models:
+            ttft = m.get("ttft_ms") or {}
+            student = m.get("student_ttft") or {}
+            llm = m.get("llm_ttft") or {}
+            srv = f"{_fmt_ms_int(ttft.get('p50'))} / {_fmt_ms_int(ttft.get('p90'))} / {_fmt_ms_int(ttft.get('p95'))}"
+            stu = f"{_fmt_ms_int(student.get('p50'))} / {_fmt_ms_int(student.get('p90'))} / {_fmt_ms_int(student.get('p95'))}"
+            lll = f"{_fmt_ms_int(llm.get('p50'))} / {_fmt_ms_int(llm.get('p90'))} / {_fmt_ms_int(llm.get('p95'))}"
+            lines.append(
+                f"  • `{model}`  server: {srv}ms  |  student: {stu}ms  |  llm-only: {lll}ms"
+            )
+        lines.append(
+            "  _server   = request arrives at our backend → first LLM token at server (raw server-side TTFT)._"
+        )
+        lines.append(
+            "  _student  = end-to-end as the student experiences it (closest to real UX)._"
+        )
+        lines.append(
+            "  _llm-only = LLM call start → first token (isolates provider latency from our pre-LLM work)._"
+        )
+
+    # ---- Cost --------------------------------------------------------------
+    lines.append("")
+    lines.append("💰 *Cost*")
+    have_answer_cost = any((m.get("cost_usd") or 0) > 0 for m in answer.values())
+    have_classifier_cost = bool(classifier and (classifier.get("cost_usd") or 0) > 0)
+    if not have_answer_cost and not have_classifier_cost:
+        lines.append("  _(no data)_")
+    else:
+        total = 0.0
+        # Always show the answer-by-model sub-header so the layout is stable.
+        # When classifier-only days happen (or some other zero-answer-cost
+        # condition), make it explicit rather than silently omitting the
+        # subsection — that would otherwise look like a render bug.
+        lines.append("  *Answer (by model)*")
+        if have_answer_cost:
+            sorted_models = sorted(
+                answer.items(),
+                key=lambda kv: (-(kv[1].get("cost_usd") or 0.0), kv[0]),
+            )
+            for model, m in sorted_models:
+                cost = float(m.get("cost_usd") or 0.0)
+                if cost <= 0:
+                    continue
+                tok = m.get("tokens") or {}
+                tok_str = (
+                    f"{_fmt_tokens(tok.get('input'))} in / "
+                    f"{_fmt_tokens(tok.get('output'))} out / "
+                    f"{_fmt_tokens(tok.get('cached'))} cached tokens"
+                )
+                cpr = _fmt_cost_per_response(m.get("cost_per_response"))
+                lines.append(
+                    f"    • `{model}`  ${cost:,.2f}  *({cpr}/req)*   ({tok_str})"
+                )
+                total += cost
+        else:
+            lines.append("    _(no answer-model cost yet)_")
+        if classifier:
+            c_cost = float(classifier.get("cost_usd") or 0.0)
+            cpr = _fmt_cost_per_response(classifier.get("cost_per_response"))
+            lines.append(f"  *Classifier*  ${c_cost:,.2f}  *({cpr}/req)*")
+            total += c_cost
+        lines.append("  ───────────────────────────")
+        lines.append(f"  *Total*  ${total:,.2f}")
+
+    # ---- Feedback breakdown (NEW) -----------------------------------------
+    # Per locked product decision: the feedback sub-block is gated separately
+    # from the rest. When the feedback fetch failed, emit one italic
+    # "unavailable" line and suppress the table. The per-response cost
+    # additions above are independent and stay either way.
+    feedback = data.get("feedback_breakdown")
+    if isinstance(feedback, dict):
+        fb_ok = bool(feedback.get("ok"))
+        fb_by_model = feedback.get("by_model") or {}
+        if not fb_ok:
+            lines.append("")
+            lines.append(
+                "_Feedback breakdown unavailable — feedback table fetch failed._"
+            )
+        elif fb_by_model and any(
+            any((b.get("count") or 0) > 0 for b in (buckets or {}).values())
+            for buckets in fb_by_model.values()
+        ):
+            lines.append("")
+            lines.append("📊 *Feedback breakdown — answer models only*")
+            lines.append(
+                "_Yesterday's responses bucketed by student feedback. "
+                "`ttft` = student p50 (end-to-end UX). "
+                "`$/req` = cost ÷ count in that bucket._"
+            )
+            lines.append(_render_feedback_breakdown_table(answer, fb_by_model))
+            lines.append(
+                "_Feedback arrives over time — `no_vote` is the default state "
+                "(student hasn't rated yet). This breakdown reflects ratings "
+                "received so far for yesterday's requests; the numbers will "
+                "shift as more students give feedback._"
+            )
+            lines.append(
+                "_Source: `silver_prod_feedback_by_user_entity` joined via "
+                "`silver_conversational_query_table`. Buckets sum to the "
+                "per-model totals above._"
+            )
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Error categorisation
 # ---------------------------------------------------------------------------
@@ -993,6 +1757,7 @@ def _summarise_today_for_snapshot(
     behavior_follow_rows: Optional[List],
     behavior_rephrase_rows: Optional[List],
     classifier_snapshot: Optional[dict],
+    cost_latency_data: Optional[dict] = None,
 ) -> dict:
     """Build a compact dict of today's digest data for snapshot + LLM input.
 
@@ -1053,6 +1818,74 @@ def _summarise_today_for_snapshot(
             })
         return out
 
+    # Cost + latency snapshot — sourced from stream_logs (Metabase). The new
+    # shape carries 3 TTFT views per answer model (server / student / llm-only)
+    # plus token totals, and an aggregate classifier row (classifier model
+    # name isn't in stream_logs). Yesterday-only — no day-on-day deltas here.
+    answer_by_model_snap: Dict[str, Dict[str, Any]] = {}
+    classifier_snap: Optional[Dict[str, Any]] = None
+    feedback_breakdown_snap: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    feedback_breakdown_ok = False
+    # Explicit fetch-success flag so downstream consumers (Top 3 Insights LLM,
+    # human JSON readers) can distinguish "fetch failed" from "no qualifying
+    # traffic yesterday". Default False unless we see a well-formed
+    # cost_latency_data dict with ok=True.
+    cost_latency_ok = bool(
+        isinstance(cost_latency_data, dict) and cost_latency_data.get("ok") is True
+    )
+    if isinstance(cost_latency_data, dict):
+        for model, m in (cost_latency_data.get("answer_by_model") or {}).items():
+            cpr = m.get("cost_per_response")
+            answer_by_model_snap[model] = {
+                "request_count": int(m.get("request_count") or 0),
+                "ttft_ms": dict(m.get("ttft_ms") or {}),
+                "student_ttft_ms": dict(m.get("student_ttft") or {}),
+                "llm_ttft_ms": dict(m.get("llm_ttft") or {}),
+                "cost_usd": round(float(m.get("cost_usd") or 0.0), 4),
+                # Per-response cost — keep as None when undefined (zero count)
+                # so JSON consumers can tell "no data" from "actually $0".
+                "cost_per_response": (
+                    round(float(cpr), 6) if cpr is not None else None
+                ),
+                "tokens": dict(m.get("tokens") or {}),
+            }
+        c = cost_latency_data.get("classifier")
+        if isinstance(c, dict):
+            c_cpr = c.get("cost_per_response")
+            classifier_snap = {
+                "request_count": int(c.get("request_count") or 0),
+                "avg_ms": c.get("avg_ms"),
+                "p50_ms": c.get("p50"),
+                "p90_ms": c.get("p90"),
+                "p95_ms": c.get("p95"),
+                "cost_usd": round(float(c.get("cost_usd") or 0.0), 4),
+                "cost_per_response": (
+                    round(float(c_cpr), 6) if c_cpr is not None else None
+                ),
+            }
+        # Feedback breakdown — fold the nested by_model→bucket dict into the
+        # snapshot. Don't fabricate values when the fetch failed: emit an
+        # empty dict and a False flag.
+        fb = cost_latency_data.get("feedback_breakdown")
+        if isinstance(fb, dict):
+            feedback_breakdown_ok = bool(fb.get("ok"))
+            for model, buckets in (fb.get("by_model") or {}).items():
+                if not isinstance(buckets, dict):
+                    continue
+                feedback_breakdown_snap[str(model)] = {}
+                for bucket, b in buckets.items():
+                    if not isinstance(b, dict):
+                        continue
+                    b_cpr = b.get("cost_per_response")
+                    feedback_breakdown_snap[str(model)][str(bucket)] = {
+                        "count": int(b.get("count") or 0),
+                        "student_ttft_p50_ms": b.get("student_ttft_p50_ms"),
+                        "cost_usd": round(float(b.get("cost_usd") or 0.0), 4),
+                        "cost_per_response": (
+                            round(float(b_cpr), 6) if b_cpr is not None else None
+                        ),
+                    }
+
     return {
         "langfuse_errors_total": int(total_errors),
         "langfuse_errors_breakdown": cat_counts,
@@ -1078,6 +1911,19 @@ def _summarise_today_for_snapshot(
             if isinstance((classifier_snapshot or {}).get("category_counts"), dict)
             else {}
         ),
+        # Cost & latency from stream_logs (Metabase). New flat shape:
+        #   answer_by_model[<model>] = {request_count, ttft_ms{p50,p90,p95},
+        #                               student_ttft_ms{...}, llm_ttft_ms{...},
+        #                               cost_usd, tokens{input,output,cached}}
+        #   classifier = {request_count, avg_ms, p50/p90/p95_ms, cost_usd} | None
+        "cost_latency_ok": cost_latency_ok,
+        "cost_latency_answer_by_model": answer_by_model_snap,
+        "cost_latency_classifier": classifier_snap,
+        # Feedback breakdown — separate ok flag so a feedback-only failure
+        # is distinguishable from a full cost/latency failure. Empty dict on
+        # failure (do NOT fabricate buckets).
+        "feedback_breakdown_ok": feedback_breakdown_ok,
+        "feedback_breakdown_by_model": feedback_breakdown_snap,
     }
 
 
@@ -1759,6 +2605,7 @@ def build_blocks(
     scores_ok: bool = True,
     eval_snapshot_path: str = "",
     top_insights_text: Optional[str] = None,
+    cost_latency_data: Optional[dict] = None,
 ) -> list:
     """Assemble the digest in Phase 1 order.
 
@@ -1766,15 +2613,16 @@ def build_blocks(
       1. Header
       2. Top 3 Insights (NEW)
       3. Today's broken chapter (MOVED + RENAMED)
-      4. Langfuse Errors (24h)
-      5. Video co-pilot API health (stream_logs)
-      6. User Comments on Downvotes (TRIMMED — stats only)
-      7. Free-text feedback breakdown
-      8. Yesterday's Downvoted Queries Snapshot (TRIMMED — top 5 reasons)
-      9. Multi-turn burst (split + context)
-     10. Rephrase / language-switch (split + context)
-     11. Rolling 21d Downvote Reasons — merged 2-column fields block
-     12. Footer
+      4. Cost & Latency (yesterday) — NEW
+      5. Langfuse Errors (24h)
+      6. Video co-pilot API health (stream_logs)
+      7. User Comments on Downvotes (TRIMMED — stats only)
+      8. Free-text feedback breakdown
+      9. Yesterday's Downvoted Queries Snapshot (TRIMMED — top 5 reasons)
+     10. Multi-turn burst (split + context)
+     11. Rephrase / language-switch (split + context)
+     12. Rolling 21d Downvote Reasons — merged 2-column fields block
+     13. Footer
     """
     dump_block        = fmt_downvote_dump(dump_rows)
     scores_block      = fmt_scores(
@@ -1831,7 +2679,46 @@ def build_blocks(
         ),
     ])
 
-    # 4. Langfuse Errors (24h)
+    # 4. Cost & Latency (yesterday) — NEW. Best-effort: any unexpected error
+    # in the renderer is caught here so a misshaped latency/cost dict can never
+    # block the rest of the digest from posting.
+    try:
+        cost_latency_block = fmt_cost_and_latency(
+            cost_latency_data or {"ok": False, "answer_by_model": {}, "classifier": None},
+        )
+    except Exception as exc:  # pragma: no cover — defence-in-depth only
+        print(
+            f"[warn] fmt_cost_and_latency raised unexpectedly: {exc!r}",
+            file=sys.stderr,
+        )
+        cost_latency_block = (
+            "_(cost/latency unavailable — Metabase fetch failed)_"
+        )
+    # Section-size guard: a single mrkdwn section is capped by Slack at
+    # 3000 chars (text body). Once the section grows past ~2700 chars (our
+    # safety margin) we split it before the feedback breakdown — the
+    # natural visual seam — into two section blocks separated by a divider.
+    _CL_SOFT_LIMIT = 2700
+    _CL_PREFIX = ":money_with_wings: *Cost & Latency (yesterday)*\n"
+    full_body = f"{_CL_PREFIX}{cost_latency_block}"
+    fb_marker = "📊 *Feedback breakdown — answer models only*"
+    if len(full_body) > _CL_SOFT_LIMIT and fb_marker in cost_latency_block:
+        head, _, tail = cost_latency_block.partition(fb_marker)
+        head_section = f"{_CL_PREFIX}{head.rstrip()}"
+        tail_section = f"{fb_marker}{tail}"
+        blocks.extend([
+            divider,
+            section(head_section),
+            divider,
+            section(tail_section),
+        ])
+    else:
+        blocks.extend([
+            divider,
+            section(full_body),
+        ])
+
+    # 5. Langfuse Errors (24h)
     blocks.extend([
         divider,
         section(f":rotating_light: *Langfuse Errors (last 24h)*\n{errors_block}"),
@@ -2056,6 +2943,36 @@ def main() -> int:
     total_traces, traces_ok = fetch_langfuse_traces_total()
     _assert_langfuse_or_exit(traces_ok, "fetch_langfuse_traces_total")
 
+    # Cost + latency are BEST-EFFORT — sourced from cdp.central.silver_stream_logs
+    # via Metabase /api/dataset. Never gated by the strict Langfuse fail-fast.
+    # If Metabase errors, the section renders as a placeholder; the rest of
+    # the digest still posts.
+    try:
+        cost_latency_data = fetch_yesterday_cost_and_latency_from_stream_logs()
+    except Exception as exc:
+        print(f"[warn] stream_logs cost/latency fetch raised: {exc!r}", file=sys.stderr)
+        cost_latency_data = {"ok": False, "answer_by_model": {}, "classifier": None}
+
+    # Feedback breakdown is independent of the main cost/latency fetch — a
+    # failure here only suppresses the new sub-block; per-response cost
+    # additions still render. Folded into the same `cost_latency_data` dict
+    # so the renderer and snapshot have a single source of truth.
+    try:
+        feedback_breakdown = fetch_feedback_breakdown_from_stream_logs()
+    except Exception as exc:
+        print(
+            f"[warn] stream_logs feedback-breakdown fetch raised: {exc!r}",
+            file=sys.stderr,
+        )
+        feedback_breakdown = {"ok": False, "by_model": {}}
+    cost_latency_data["feedback_breakdown"] = feedback_breakdown
+    # Defensive rollup assertion (logs only — never fails the digest).
+    if feedback_breakdown.get("ok") and isinstance(cost_latency_data.get("answer_by_model"), dict):
+        _log_feedback_rollup_assertion(
+            cost_latency_data["answer_by_model"],
+            feedback_breakdown.get("by_model") or {},
+        )
+
     follow_cfg = BEHAVIOR_FOLLOWUP_CARD_ID.isdigit()
     follow_rows = (
         fetch_metabase_card(int(BEHAVIOR_FOLLOWUP_CARD_ID), retries=METABASE_CARD_RETRIES)
@@ -2129,6 +3046,7 @@ def main() -> int:
         behavior_follow_rows=follow_rows,
         behavior_rephrase_rows=rephrase_rows,
         classifier_snapshot=classifier_snap_for_summary,
+        cost_latency_data=cost_latency_data,
     )
 
     yesterday_snapshot = _load_yesterday_snapshot()
@@ -2174,6 +3092,7 @@ def main() -> int:
         scores_ok=scores_ok,
         eval_snapshot_path=EVAL_SUMMARY_PATH,
         top_insights_text=top_insights_text,
+        cost_latency_data=cost_latency_data,
     )
     print(f"[info] {fallback_text.splitlines()[0]}\n[{len(blocks)} blocks]", file=sys.stderr)
 
