@@ -601,42 +601,6 @@ def fetch_langfuse_traces_total() -> Tuple[int, bool]:
         return 0, False
 
 
-# ---------------------------------------------------------------------------
-# Cost + Latency section (Langfuse Metrics API)
-#
-# The Metrics API (`GET /api/public/metrics`) accepts a URL-encoded JSON `query`
-# parameter and returns server-side-aggregated rows. We use it for two purposes:
-#   (a) per-model TTFT percentiles (p50/p90/p95), day-on-day
-#   (b) per-model total cost (USD), day-on-day
-# Both calls are best-effort: if the API errors, the section is omitted from
-# the digest with a placeholder; the rest of the digest still posts.
-#
-# IMPORTANT — verified live against cloud.langfuse.com on 2026-05-13:
-#   • The TTFT measure name is `timeToFirstToken` (camelCase), NOT
-#     `time_to_first_token` (snake_case — that errors HTTP 400). Values are
-#     returned in milliseconds, not seconds.
-#   • The cost measure is `totalCost`, aggregation `sum`. Returns USD.
-#   • The response shape is:
-#       {"data": [
-#         {"providedModelName": "gpt-4.1", "time_dimension": "2026-05-12",
-#          "p50_timeToFirstToken": 2495, "p90_timeToFirstToken": 3567.9, ...},
-#         {"providedModelName": null, ...},   # non-LLM observations — we skip
-#         ...
-#       ]}
-#     Field names are `<aggregation>_<measureName>` (e.g. `p50_timeToFirstToken`,
-#     `sum_totalCost`). Time grouping field is `time_dimension`.
-# ---------------------------------------------------------------------------
-
-# Anomaly thresholds — overridable via env so we can tune without a deploy.
-LATENCY_REGRESSION_PCT = max(0, _env_int("LATENCY_REGRESSION_PCT", 20))
-COST_SPIKE_PCT = max(0, _env_int("COST_SPIKE_PCT", 30))
-
-# NOTE: `_CLASSIFIER_MODELS` was removed when the cost/latency section moved
-# from Langfuse to `cdp.central.silver_stream_logs`. The classifier model name
-# is not present in stream_logs, so classifier is rendered as a single
-# aggregate row (no per-model breakdown). See `fetch_yesterday_cost_and_latency_from_stream_logs`.
-
-
 def _safe_pct_delta(today: Optional[float], prior: Optional[float]) -> Optional[float]:
     """Compute (today - prior) / prior * 100 with NaN/None/zero guards.
 
@@ -657,30 +621,6 @@ def _safe_pct_delta(today: Optional[float], prior: Optional[float]) -> Optional[
     if p == 0:
         return None
     return (t - p) / p * 100.0
-
-
-def _two_day_window_utc() -> Tuple[str, str, str, str]:
-    """Return ISO-Z timestamps and day labels for (day_before, yesterday).
-
-    Returns: (from_ts, to_ts, day_before_label, yesterday_label)
-        from_ts = start-of-(day-before-yesterday) UTC
-        to_ts   = start-of-today UTC (exclusive upper bound)
-        day_before_label = "YYYY-MM-DD" for day-before
-        yesterday_label  = "YYYY-MM-DD" for yesterday
-
-    Mirrors how Langfuse buckets by `time_dimension` (granularity=day, UTC).
-    """
-    today_midnight = datetime.now(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    yesterday_midnight = today_midnight - timedelta(days=1)
-    day_before_midnight = today_midnight - timedelta(days=2)
-    return (
-        day_before_midnight.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        today_midnight.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        day_before_midnight.strftime("%Y-%m-%d"),
-        yesterday_midnight.strftime("%Y-%m-%d"),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -757,9 +697,7 @@ FROM base
 def _yesterday_utc_window() -> Tuple[str, str]:
     """Return (start_ts, end_ts) ISO-Z strings for yesterday in UTC.
 
-    Half-open `[yesterday_00:00:00Z, today_00:00:00Z)`. Re-derived locally to
-    keep this fetcher self-contained (the older `_two_day_window_utc` returned
-    a two-day span tailored for the prior Langfuse fetchers).
+    Half-open `[yesterday_00:00:00Z, today_00:00:00Z)`.
     """
     today_midnight = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -1059,8 +997,12 @@ def fmt_cost_and_latency(data: dict) -> str:
         lines.append("  _(no data)_")
     else:
         total = 0.0
+        # Always show the answer-by-model sub-header so the layout is stable.
+        # When classifier-only days happen (or some other zero-answer-cost
+        # condition), make it explicit rather than silently omitting the
+        # subsection — that would otherwise look like a render bug.
+        lines.append("  *Answer (by model)*")
         if have_answer_cost:
-            lines.append("  *Answer (by model)*")
             sorted_models = sorted(
                 answer.items(),
                 key=lambda kv: (-(kv[1].get("cost_usd") or 0.0), kv[0]),
@@ -1077,6 +1019,8 @@ def fmt_cost_and_latency(data: dict) -> str:
                 )
                 lines.append(f"    • `{model}`  ${cost:,.2f}   ({tok_str})")
                 total += cost
+        else:
+            lines.append("    _(no answer-model cost yet)_")
         if classifier:
             c_cost = float(classifier.get("cost_usd") or 0.0)
             lines.append(f"  *Classifier*  ${c_cost:,.2f}")
@@ -1547,6 +1491,13 @@ def _summarise_today_for_snapshot(
     # name isn't in stream_logs). Yesterday-only — no day-on-day deltas here.
     answer_by_model_snap: Dict[str, Dict[str, Any]] = {}
     classifier_snap: Optional[Dict[str, Any]] = None
+    # Explicit fetch-success flag so downstream consumers (Top 3 Insights LLM,
+    # human JSON readers) can distinguish "fetch failed" from "no qualifying
+    # traffic yesterday". Default False unless we see a well-formed
+    # cost_latency_data dict with ok=True.
+    cost_latency_ok = bool(
+        isinstance(cost_latency_data, dict) and cost_latency_data.get("ok") is True
+    )
     if isinstance(cost_latency_data, dict):
         for model, m in (cost_latency_data.get("answer_by_model") or {}).items():
             answer_by_model_snap[model] = {
@@ -1598,6 +1549,7 @@ def _summarise_today_for_snapshot(
         #                               student_ttft_ms{...}, llm_ttft_ms{...},
         #                               cost_usd, tokens{input,output,cached}}
         #   classifier = {request_count, avg_ms, p50/p90/p95_ms, cost_usd} | None
+        "cost_latency_ok": cost_latency_ok,
         "cost_latency_answer_by_model": answer_by_model_snap,
         "cost_latency_classifier": classifier_snap,
     }

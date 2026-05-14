@@ -61,11 +61,6 @@ jobs:
       # Flipped 1 → 0 (2026-05-12): degraded post is preferred over silent miss.
       # Mirrors the change in daily-automation.yml; see commentary there.
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
-      # Cost & Latency section thresholds (per-percentile latency regression vs
-      # day-before, per-model cost spike vs day-before). The renderer flags 🔴
-      # in the Slack body when crossed. Mirrors daily-automation.yml.
-      LATENCY_REGRESSION_PCT: "20"
-      COST_SPIKE_PCT: "30"
     steps:
       - uses: actions/checkout@v4
 
