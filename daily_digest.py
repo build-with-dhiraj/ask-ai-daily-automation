@@ -1721,10 +1721,14 @@ def _load_yesterday_snapshot(
     *,
     max_age_days: int = DIGEST_SNAPSHOT_MAX_AGE_DAYS,
 ) -> Optional[dict]:
-    """Read yesterday's digest snapshot if present, valid, and recent.
+    """Read yesterday's digest snapshot if present, valid, and dated yesterday.
 
     Returns None gracefully when the file is missing, malformed, or its embedded
-    `date` field is more than `max_age_days` old. Stale loads emit a warning.
+    `date` does NOT equal yesterday's UTC calendar date. The day-equality check
+    (rather than just "not too old") prevents a same-day intra-day snapshot —
+    written by an earlier run on disk when the cross-run GitHub Actions artifact
+    download falls back to local /tmp — from posing as yesterday's baseline,
+    which would silently corrupt Top 3 Insights deltas (#19).
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -1737,23 +1741,56 @@ def _load_yesterday_snapshot(
     if not isinstance(data, dict):
         return None
     raw_date = str(data.get("date") or "").strip()
-    if raw_date:
-        try:
-            snap_dt = datetime.strptime(raw_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            age = datetime.now(timezone.utc) - snap_dt
-            if age > timedelta(days=max_age_days):
-                print(
-                    f"[warn] digest snapshot at {path} is {age.days}d old "
-                    f"(>{max_age_days}d cap) — ignoring for Top 3 Insights",
-                    file=sys.stderr,
-                )
-                return None
-        except Exception as exc:  # malformed date → treat as stale
-            print(
-                f"[warn] digest snapshot date {raw_date!r} unparseable: {exc!r} — ignoring",
-                file=sys.stderr,
-            )
-            return None
+    if not raw_date:
+        # Pre-#19 snapshots without an embedded date cannot be safely attributed
+        # to "yesterday" — refuse rather than risk a stale-by-hours baseline.
+        print(
+            f"[warn] digest snapshot at {path} has no `date` field — "
+            "cannot confirm it is yesterday's; ignoring for Top 3 Insights",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        snap_dt = datetime.strptime(raw_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except Exception as exc:  # malformed date → refuse
+        print(
+            f"[warn] digest snapshot date {raw_date!r} unparseable: {exc!r} — ignoring",
+            file=sys.stderr,
+        )
+        return None
+    today_utc = datetime.now(timezone.utc).date()
+    yesterday_utc = today_utc - timedelta(days=1)
+    snap_date = snap_dt.date()
+    if snap_date != yesterday_utc:
+        # Three rejection cases collapsed: same-day intra-day snapshot
+        # (snap_date == today, the #19 corruption path), older-than-yesterday
+        # (e.g. workflow paused for days), or future-dated (clock skew).
+        # `max_age_days` is no longer the gate — exact day equality is.
+        if snap_date == today_utc:
+            reason = "same-day intra-day snapshot, not yesterday's"
+        elif snap_date < yesterday_utc:
+            age_days = (today_utc - snap_date).days
+            reason = f"{age_days}d old (>1d gap, not yesterday's)"
+        else:
+            reason = "future-dated (clock skew?)"
+        print(
+            f"[warn] digest snapshot at {path} dated {raw_date} != "
+            f"yesterday ({yesterday_utc.isoformat()}): {reason} — "
+            "ignoring for Top 3 Insights",
+            file=sys.stderr,
+        )
+        return None
+    # Defensive: also enforce the historical max_age_days cap (parameter
+    # preserved for callers/tests that pass it). Yesterday is always 1d old,
+    # so this only excludes pathologically large negative values.
+    age = datetime.now(timezone.utc) - snap_dt
+    if age > timedelta(days=max_age_days):
+        print(
+            f"[warn] digest snapshot at {path} is {age.days}d old "
+            f"(>{max_age_days}d cap) — ignoring for Top 3 Insights",
+            file=sys.stderr,
+        )
+        return None
     return data
 
 

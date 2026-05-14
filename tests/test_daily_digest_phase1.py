@@ -176,13 +176,58 @@ class TestDigestSnapshot(unittest.TestCase):
             pass
 
     def test_round_trip(self) -> None:
-        today = {"errors_total": 100, "downvotes": 42}
-        self.mod._write_digest_snapshot(today, path=str(self.tmp))
+        # Write+read round-trip. Because the loader now requires snapshot date
+        # to equal yesterday's UTC (#19), we simulate yesterday's run by
+        # writing a payload with yesterday's date directly rather than calling
+        # _write_digest_snapshot (which always stamps today). The serializer's
+        # own date-stamping is exercised by test_serializer_writes_date_field.
+        yesterday = (
+            datetime.now(timezone.utc) - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        self.tmp.write_text(
+            json.dumps({"date": yesterday, "errors_total": 100, "downvotes": 42}),
+            encoding="utf-8",
+        )
         loaded = self.mod._load_yesterday_snapshot(path=str(self.tmp))
         self.assertIsNotNone(loaded)
         self.assertEqual(loaded["errors_total"], 100)
         self.assertEqual(loaded["downvotes"], 42)
         self.assertIn("date", loaded)
+
+    def test_serializer_writes_date_field(self) -> None:
+        # The reader's day-equality guard depends on the serializer stamping
+        # the snapshot with the UTC date it was WRITTEN (which is "today's
+        # data" at write time → "yesterday's baseline" at tomorrow's read).
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.mod._write_digest_snapshot(
+            {"errors_total": 1}, path=str(self.tmp)
+        )
+        with open(self.tmp, encoding="utf-8") as f:
+            raw = json.load(f)
+        self.assertEqual(raw.get("date"), today)
+
+    def test_same_day_intra_day_snapshot_rejected(self) -> None:
+        # The #19 corruption path: a same-day earlier run wrote a snapshot
+        # to local /tmp; the cross-run artifact download failed; the loader
+        # would previously fall back to this same-day file and feed Top 3
+        # Insights a baseline that is hours-stale, not 24h-stale. The
+        # day-equality guard must reject it as "not yesterday's".
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.tmp.write_text(
+            json.dumps({"date": today, "errors_total": 999}),
+            encoding="utf-8",
+        )
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            self.assertIsNone(self.mod._load_yesterday_snapshot(path=str(self.tmp)))
+
+    def test_missing_date_field_rejected(self) -> None:
+        # Pre-#19 snapshots that lack the date field cannot be safely treated
+        # as yesterday's — refuse rather than risk a stale-by-hours baseline.
+        self.tmp.write_text(
+            json.dumps({"errors_total": 5}), encoding="utf-8"
+        )
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            self.assertIsNone(self.mod._load_yesterday_snapshot(path=str(self.tmp)))
 
     def test_missing_file_returns_none(self) -> None:
         self.assertIsNone(self.mod._load_yesterday_snapshot(path=str(self.tmp)))
