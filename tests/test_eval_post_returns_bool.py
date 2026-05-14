@@ -143,10 +143,15 @@ class TestMarkerOnlyWrittenOnSuccess(unittest.TestCase):
                 self.assertTrue(contents[0].startswith("eval-posted-"))
                 self.assertTrue(contents[0].endswith(".marker"))
 
-    def test_marker_filename_includes_staging_target(self) -> None:
-        # Staging→prod gate: when SLACK_TARGET=staging (workflow_dispatch path),
-        # the marker filename MUST include "-staging-" so a manual staging run
-        # cannot block the next scheduled prod cron from posting.
+    def test_staging_target_does_not_write_marker(self) -> None:
+        # Staging is a test surface: operators must be able to re-dispatch
+        # repeatedly throughout the same UTC day and see fresh posts. The
+        # day-level marker is therefore disabled entirely when
+        # SLACK_TARGET=staging — _eval_write_posted_marker must be a no-op
+        # and no file should appear on disk. (Supersedes the prior
+        # "marker filename includes -staging-" gate, which only prevented
+        # cross-target blocking; staging→staging same-day blocking was the
+        # remaining bug this no-op fixes.)
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir, \
@@ -163,10 +168,10 @@ class TestMarkerOnlyWrittenOnSuccess(unittest.TestCase):
             with patch.object(sys, "stderr", io.StringIO()):
                 mod._eval_write_posted_marker("eval-posted")
                 contents = os.listdir(tmpdir)
-                self.assertEqual(len(contents), 1)
-                self.assertIn("-staging-", contents[0])
-                self.assertTrue(contents[0].startswith("eval-posted-staging-"))
-                self.assertTrue(contents[0].endswith(".marker"))
+                self.assertEqual(
+                    contents, [],
+                    f"staging must not write any marker; found {contents}",
+                )
 
     def test_marker_not_written_on_failure_path_simulated(self) -> None:
         # The behavioural guarantee here is at the call site in main(): when

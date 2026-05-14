@@ -96,13 +96,26 @@ def _eval_marker_path(prefix: str = "eval-posted") -> Path:
     return Path(base) / f"{prefix}-{target}-{today_utc}.marker"
 
 
+def _eval_is_staging_target() -> bool:
+    # Staging is a test surface: operators must be able to re-dispatch within
+    # the same UTC day and see fresh posts. The day-level marker is therefore
+    # disabled entirely when SLACK_TARGET=staging. Prod (and the implicit-prod
+    # fallback) keep the original idempotency behavior.
+    return (os.environ.get("SLACK_TARGET") or "").strip().lower() == "staging"
+
+
 def _eval_already_posted_today(prefix: str = "eval-posted") -> bool:
+    if _eval_is_staging_target():
+        return False
     if os.environ.get("FORCE_REPOST", "").strip() == "1":
         return False
     return _eval_marker_path(prefix).exists()
 
 
 def _eval_write_posted_marker(prefix: str = "eval-posted") -> None:
+    if _eval_is_staging_target():
+        # Staging keeps no day-level state; see _eval_is_staging_target.
+        return
     marker = _eval_marker_path(prefix)
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
