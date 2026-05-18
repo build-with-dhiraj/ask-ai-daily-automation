@@ -139,6 +139,14 @@ def main() -> int:
     if dry_run:
         print(json.dumps(payload, indent=2))
         print("\nDRY RUN: no actual post made")
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            with open(summary_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"### CSAT Lift Announcer (DRY RUN)\n\n"
+                    f"No Slack post was made. Payload size: "
+                    f"{len(json.dumps(payload))} bytes.\n"
+                )
         return 0
 
     webhook = os.environ.get("SLACK_WEBHOOK_URL_STAGING", "").strip()
@@ -158,12 +166,25 @@ def main() -> int:
         timeout=30,
     )
     if not (200 <= resp.status_code < 300):
-        raise RuntimeError(
-            f"Slack webhook returned non-2xx status {resp.status_code}: {resp.text[:500]}"
+        # Defense-in-depth: log only status + body snippet, never `resp` itself
+        # or `resp.request.url` (which would leak the webhook URL via traceback).
+        status = resp.status_code
+        body_snippet = resp.text[:500]
+        print(
+            f"ERROR: Slack webhook returned non-2xx status {status}: {body_snippet}",
+            file=sys.stderr,
         )
+        return 2
 
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     print(f"Posted successfully to staging Slack at {ts}")
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"### CSAT Lift Announcer\n\n"
+                f"Posted to staging Slack at {ts}.\n"
+            )
     return 0
 
 

@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'If true, print Slack payload without posting'
+        description: 'If true (default for safety), print Slack payload without posting. Set to false to post for real.'
         required: false
-        default: 'false'
+        default: 'true'
         type: choice
         options:
           - 'true'
@@ -33,7 +33,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install 'requests==2.32.3'
 
       - name: Run CSAT lift analysis + post to staging Slack
         env:
