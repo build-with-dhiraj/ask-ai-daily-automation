@@ -77,7 +77,7 @@ def test_dry_run_prints_payload_and_exits_zero(monkeypatch: pytest.MonkeyPatch) 
     """DRY_RUN=true must print JSON payload, never need the webhook, and exit 0."""
     monkeypatch.setenv("DRY_RUN", "true")
     # Deliberately unset the webhook to prove dry-run path doesn't read it.
-    monkeypatch.delenv("SLACK_WEBHOOK_URL_STAGING", raising=False)
+    monkeypatch.delenv("SLACK_WEBHOOK_URL_TEST", raising=False)
 
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -95,10 +95,10 @@ def test_missing_webhook_in_post_mode_returns_error(
 ) -> None:
     """No webhook + DRY_RUN!=true must fail loudly with exit 1, no POST attempted."""
     monkeypatch.setenv("DRY_RUN", "false")
-    monkeypatch.delenv("SLACK_WEBHOOK_URL_STAGING", raising=False)
+    monkeypatch.delenv("SLACK_WEBHOOK_URL_TEST", raising=False)
 
     rc = announcer.main()
     captured = capsys.readouterr()
 
     assert rc == 1
-    assert "SLACK_WEBHOOK_URL_STAGING" in captured.err
+    assert "SLACK_WEBHOOK_URL_TEST" in captured.err

@@ -4,10 +4,10 @@ One-shot Slack announcement of the SME-audit vs production CSAT correlation
 findings. Posts to a staging Slack channel via webhook (Block Kit payload).
 
 Runs in parallel isolation from daily_eval.py / judge_runner.py — no shared
-state, no shared secrets beyond `SLACK_WEBHOOK_URL_STAGING`.
+state, no shared secrets beyond `SLACK_WEBHOOK_URL_TEST`.
 
 Env vars:
-    SLACK_WEBHOOK_URL_STAGING   Slack incoming webhook URL (required unless DRY_RUN=true)
+    SLACK_WEBHOOK_URL_TEST   Slack incoming webhook URL (required unless DRY_RUN=true)
     DRY_RUN                     "true" prints payload and exits 0; anything else POSTs
 
 Exit codes:
@@ -149,10 +149,10 @@ def main() -> int:
                 )
         return 0
 
-    webhook = os.environ.get("SLACK_WEBHOOK_URL_STAGING", "").strip()
+    webhook = os.environ.get("SLACK_WEBHOOK_URL_TEST", "").strip()
     if not webhook:
         print(
-            "ERROR: SLACK_WEBHOOK_URL_STAGING is not set and DRY_RUN != 'true'. "
+            "ERROR: SLACK_WEBHOOK_URL_TEST is not set and DRY_RUN != 'true'. "
             "Add the secret in GitHub repo Settings -> Secrets and variables -> Actions, "
             "or rerun with DRY_RUN=true to print the payload locally.",
             file=sys.stderr,

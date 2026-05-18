@@ -26,7 +26,7 @@ Before the first non-dry-run trigger, add the staging webhook URL as a repo
 secret:
 
 1. Repo -> Settings -> Secrets and variables -> Actions -> **New repository secret**
-2. Name: `SLACK_WEBHOOK_URL_STAGING`
+2. Name: `SLACK_WEBHOOK_URL_TEST`
 3. Value: the Slack incoming-webhook URL for `#chakra-ai-product-ds-staging`
    (channel ID `C0B473ARXPS`)
 

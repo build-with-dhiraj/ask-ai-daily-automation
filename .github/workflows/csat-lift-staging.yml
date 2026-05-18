@@ -37,6 +37,6 @@ jobs:
 
       - name: Run CSAT lift analysis + post to staging Slack
         env:
-          SLACK_WEBHOOK_URL_STAGING: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
+          SLACK_WEBHOOK_URL_TEST: ${{ secrets.SLACK_WEBHOOK_URL_TEST }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: python scripts/csat_lift_announcer.py
