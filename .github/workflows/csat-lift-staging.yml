@@ -1,0 +1,42 @@
+name: CSAT Lift Analysis (Staging)
+
+# One-shot announcement workflow for the SME-audit vs production CSAT
+# correlation findings. Runs in parallel isolation from daily-automation.yml:
+# no shared state, no shared secrets beyond the staging Slack webhook, and
+# never touches the v7/v8 judge or daily_eval.py.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'If true, print Slack payload without posting'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: read
+
+jobs:
+  csat-lift-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run CSAT lift analysis + post to staging Slack
+        env:
+          SLACK_WEBHOOK_URL_STAGING: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: python scripts/csat_lift_announcer.py
