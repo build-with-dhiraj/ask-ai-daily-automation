@@ -2,7 +2,7 @@ name: Prune old posters
 
 on:
   schedule:
-    # Daily at 04:00 UTC (09:30 IST) — before the daily eval/digest runs
+    # Daily at 04:00 UTC (09:30 IST); before the daily eval/digest runs
     - cron: "0 4 * * *"
   workflow_dispatch: {}
 

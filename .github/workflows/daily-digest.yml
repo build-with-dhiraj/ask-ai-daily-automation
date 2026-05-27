@@ -1,8 +1,8 @@
-# Daily Digest — requires these Actions *repository* secrets (names must match exactly):
+# Daily Digest; requires these Actions *repository* secrets (names must match exactly):
 #   METABASE_URL, METABASE_API_KEY
 #   LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST
 #   SLACK_WEBHOOK_URL
-# Optional Metabase card ids (digits only in secrets — canonical PW prod questions):
+# Optional Metabase card ids (digits only in secrets; canonical PW prod questions):
 #   METABASE_BEHAVIOR_FOLLOWUP_CARD_ID → 33282
 #     https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card
 #   METABASE_BEHAVIOR_REPHRASE_CARD_ID → 33283
@@ -33,7 +33,7 @@ concurrency:
 jobs:
   digest:
     runs-on: self-hosted
-    # Bumped 180 → 240 to match daily-automation.yml — accommodates the new
+    # Bumped 180 → 240 to match daily-automation.yml; accommodates the new
     # retry-tail budget across Metabase + Langfuse + Slack.
     timeout-minutes: 240
     env:
@@ -58,7 +58,7 @@ jobs:
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
       # Phase 1 digest restructure: digest now calls Azure OpenAI gpt-4.1 for the
-      # "Top 3 Insights" section. Same secret names as eval/classifier — no new
+      # "Top 3 Insights" section. Same secret names as eval/classifier; no new
       # secrets needed. The LLM call is best-effort; any failure falls back to
       # a placeholder and the digest still posts.
       AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
@@ -111,7 +111,7 @@ jobs:
             cp "$src" "/tmp/daily_digest_yesterday_summary.json"
             echo "[info] Yesterday's digest snapshot placed at /tmp/daily_digest_yesterday_summary.json"
           else
-            echo "[info] No yesterday digest snapshot — Top 3 Insights will use first-run placeholder"
+            echo "[info] No yesterday digest snapshot; Top 3 Insights will use first-run placeholder"
           fi
 
       - name: Install Python deps for Top 3 Insights LLM call

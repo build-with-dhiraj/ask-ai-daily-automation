@@ -98,7 +98,7 @@ def test_publish_poster_writes_file_and_commits_locally(cleanup):
     assert f"posters/{surface}/{date_str}.png" in log
     assert f"poster: {surface} {date_str}.png" in log
 
-    # No push happened — worktree HEAD should differ from origin if origin exists;
+    # No push happened; worktree HEAD should differ from origin if origin exists;
     # but more important: the env var was unset, so we just assert the log line
     # was written. (Active push would have required network.)
 

@@ -2,9 +2,9 @@
 
 Verifies that each of the four canonical sample inputs renders to a valid
 PNG byte stream. We assert the PNG magic header rather than pixel content
-— pixel-diffing is brittle across font versions and OS releases, and the
+(pixel-diffing is brittle across font versions and OS releases, and the
 design review is owned by the Design Specialist with eyeballs on
-`/tmp/poster_*.png`.
+`/tmp/poster_*.png`).
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ SAMPLES = REPO_ROOT / "templates" / "sample_inputs"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 _SKIP_REASON = (
-    "Playwright Chromium not installed locally — run "
+    "Playwright Chromium not installed locally; run "
     "`python -m playwright install chromium` to enable, or set CI=true."
 )
 
