@@ -49,8 +49,22 @@ def _ensure_no_auto_push(monkeypatch):
 
 @pytest.fixture
 def cleanup():
+    # Snapshot the gh-pages tip BEFORE the test so we can roll local back to
+    # it afterwards. Without this, commits accumulate on the local gh-pages
+    # branch across tests and a later test that asserts on HEAD's log sees
+    # a previous test's commit on top.
+    prev = subprocess.run(
+        ["git", "rev-parse", "gh-pages"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    prev_sha = prev.stdout.strip() if prev.returncode == 0 else None
     yield
     cleanup_worktree()
+    if prev_sha:
+        subprocess.run(
+            ["git", "update-ref", "refs/heads/gh-pages", prev_sha],
+            cwd=REPO_ROOT, check=False,
+        )
 
 
 @pytest.mark.skipif(

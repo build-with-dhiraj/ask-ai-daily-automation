@@ -2879,6 +2879,54 @@ def build_plain_fallback(
     return "\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# C1.3 — Insights coercion + poster wiring helpers
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_INSIGHTS = "_(insights begin tomorrow once a baseline exists)_"
+_PLACEHOLDER_UNAVAILABLE = "_(insights unavailable today)_"
+
+
+def _coerce_insights_to_text(value) -> str:
+    """Render fmt_top_insights output for Block Kit text section.
+
+    Accepts:
+      • None / "" → first-run placeholder
+      • str       → returned as-is (v1 contract, used by legacy callers / tests)
+      • dict      → v2 structured payload; rendered to a numbered prose list.
+
+    The renderer (poster PNG) consumes the dict directly. This function only
+    exists for the text-companion / fallback path which must remain readable
+    Block Kit on poster render failure.
+    """
+    if value is None or value == "":
+        return _PLACEHOLDER_INSIGHTS
+    if isinstance(value, str):
+        return value.strip() or _PLACEHOLDER_INSIGHTS
+    if isinstance(value, dict):
+        if value.get("_llm_unavailable"):
+            return _PLACEHOLDER_UNAVAILABLE
+        insights = value.get("insights") or []
+        if not insights:
+            return _PLACEHOLDER_INSIGHTS
+        lines: list = []
+        headline = (value.get("headline") or "").strip()
+        if headline:
+            lines.append(f"*{headline}*")
+        for i, ins in enumerate(insights[:5], start=1):
+            icon = ins.get("icon") or ""
+            label = ins.get("topic_label") or ""
+            claim = ins.get("claim") or ""
+            evidence = ins.get("evidence") or ""
+            head = f"{i}. {icon} *{label}* — {claim}".strip()
+            lines.append(head)
+            if evidence:
+                lines.append(f"   {evidence}")
+        return "\n".join(lines)
+    # Unknown shape — degrade safely.
+    return _PLACEHOLDER_UNAVAILABLE
+
+
 def build_blocks(
     academic_rows,
     nonacademic_rows,
@@ -2961,7 +3009,8 @@ def build_blocks(
     ]
 
     # 2. Top 3 Insights, NEW. Reader sees no "LLM" wording.
-    insights_text = (top_insights_text or "_(insights begin tomorrow once a baseline exists)_").strip()
+    # Accept either v1 string contract or v2 structured dict from fmt_top_insights.
+    insights_text = _coerce_insights_to_text(top_insights_text)
     blocks.extend([
         divider,
         section(f":dart: *Top 3 Insights*\n{insights_text}"),

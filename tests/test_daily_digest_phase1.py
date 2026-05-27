@@ -83,76 +83,107 @@ class TestFmtTopInsights(unittest.TestCase):
             else:
                 os.environ[k] = v
 
+    # NOTE: rewritten for v2 contract. fmt_top_insights now returns a STRUCTURED
+    # DICT (headline + insights[] + kill_switch_breach + _llm_unavailable), not
+    # a string. The downstream poster renderer consumes the dict directly; the
+    # text-companion path goes through _coerce_insights_to_text. See C1.3.
+
     def test_first_run_no_snapshot_skips_llm(self) -> None:
-        """yesterday_snapshot=None → placeholder, NO Azure call."""
+        """yesterday_snapshot=None → empty insights payload, NO Azure call."""
         with mock.patch.object(self.mod, "_call_top_insights_llm") as called:
             out = self.mod.fmt_top_insights({"x": 1}, None)
         self.assertEqual(called.call_count, 0)
-        self.assertIn("insights begin tomorrow", out)
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out.get("insights"), [])
+        self.assertFalse(out.get("_llm_unavailable", True))
+        # Coerced text contains the first-run placeholder
+        text = self.mod._coerce_insights_to_text(out)
+        self.assertIn("insights begin tomorrow", text)
 
-    def test_happy_path_returns_text(self) -> None:
-        valid = (
-            "1. Errors up 30% from 100 to 130 in last 24h.\n"
-            "2. Multi-turn burst on Chapter Foo at 7.5%, up from 5.2%.\n"
-            "3. Rephrase rate down to 3.1% from 4.8% on Chapter Bar."
-        )
-        client = _make_mock_openai_client(valid)
+    def test_happy_path_returns_structured_dict(self) -> None:
+        parsed = {
+            "headline": "Errors up 30%.",
+            "insights": [
+                {
+                    "topic_label": "ACCURACY",
+                    "icon": "🎯",
+                    "claim": "Downvote rate spiking to 1.4% (was 0.8%).",
+                    "evidence": "47 downvotes on 3,350 traces.",
+                    "context": None,
+                    "spark_series": None,
+                },
+            ],
+        }
         with mock.patch.object(
-            self.mod, "_call_top_insights_llm", return_value=valid
+            self.mod, "_call_top_insights_llm", return_value=parsed
         ) as patched:
             out = self.mod.fmt_top_insights({"a": 1}, {"b": 2})
-        # Output must NOT contain reader-facing "LLM" wording (we don't surface it)
-        self.assertNotIn("LLM", out)
-        self.assertNotIn("gpt-", out.lower())
-        # Three numbered bullets present
-        self.assertIn("1.", out)
-        self.assertIn("2.", out)
-        self.assertIn("3.", out)
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out["headline"], "Errors up 30%.")
+        self.assertEqual(len(out["insights"]), 1)
+        self.assertFalse(out["_llm_unavailable"])
         self.assertEqual(patched.call_count, 1)
+        # Coerced text path has no reader-facing model references
+        text = self.mod._coerce_insights_to_text(out)
+        self.assertNotIn("LLM", text)
+        self.assertNotIn("gpt-", text.lower())
 
-    def test_url_error_returns_unavailable_placeholder(self) -> None:
+    def test_url_error_returns_unavailable_payload(self) -> None:
         with mock.patch.object(
             self.mod,
             "_call_top_insights_llm",
             side_effect=urllib.error.URLError("net"),
         ), mock.patch.object(sys, "stderr", io.StringIO()):
             out = self.mod.fmt_top_insights({"a": 1}, {"b": 2})
-        self.assertIn("insights unavailable today", out)
+        self.assertIsInstance(out, dict)
+        self.assertTrue(out["_llm_unavailable"])
+        self.assertEqual(out["insights"], [])
 
-    def test_generic_exception_returns_unavailable_placeholder(self) -> None:
+    def test_generic_exception_returns_unavailable_payload(self) -> None:
         with mock.patch.object(
             self.mod,
             "_call_top_insights_llm",
             side_effect=RuntimeError("Azure 503 boom"),
         ), mock.patch.object(sys, "stderr", io.StringIO()):
             out = self.mod.fmt_top_insights({"a": 1}, {"b": 2})
-        self.assertIn("insights unavailable today", out)
+        self.assertIsInstance(out, dict)
+        self.assertTrue(out["_llm_unavailable"])
 
-    def test_no_digits_in_output_fails_validation(self) -> None:
-        bad = "Things look fine this week, no major changes worth noting."
+    def test_non_dict_parsed_payload_returns_unavailable(self) -> None:
+        """A malformed LLM payload (e.g. a string slipped through) must degrade
+        to the unavailable sentinel rather than being passed to the renderer."""
         with mock.patch.object(
-            self.mod, "_call_top_insights_llm", return_value=bad
+            self.mod, "_call_top_insights_llm", return_value="not a dict"
         ), mock.patch.object(sys, "stderr", io.StringIO()):
             out = self.mod.fmt_top_insights({"a": 1}, {"b": 2})
-        self.assertIn("insights unavailable today", out)
+        self.assertIsInstance(out, dict)
+        self.assertTrue(out["_llm_unavailable"])
 
-    def test_no_significant_change_sentence_passes_without_digits(self) -> None:
-        """The fixed sentinel sentence is allowed even though it has no digits."""
-        sentence = (
-            "No significant day-on-day changes today; baseline behavior."
-        )
+    def test_quiet_day_empty_insights_passes(self) -> None:
+        """Quiet-day path: parser returns dict with empty insights → payload
+        propagates with insights=[] and _llm_unavailable=False."""
+        parsed = {"headline": "No anomalies today.", "insights": []}
         with mock.patch.object(
-            self.mod, "_call_top_insights_llm", return_value=sentence
+            self.mod, "_call_top_insights_llm", return_value=parsed
         ):
             out = self.mod.fmt_top_insights({"a": 1}, {"b": 2})
-        self.assertEqual(out, sentence)
+        self.assertEqual(out["insights"], [])
+        self.assertFalse(out["_llm_unavailable"])
+        self.assertEqual(out["headline"], "No anomalies today.")
 
-    def test_empty_llm_response_returns_unavailable(self) -> None:
+    def test_kill_switch_breach_preserved_on_llm_failure(self) -> None:
+        """Even when the LLM call fails, the deterministic kill-switch flag
+        computed pre-LLM must survive into the returned payload so the
+        renderer's red banner still fires."""
+        today_breach = {"academic_fail_pct": 9.5}  # > 6% floor → breach
         with mock.patch.object(
-            self.mod, "_call_top_insights_llm", return_value="   "
+            self.mod,
+            "_call_top_insights_llm",
+            side_effect=RuntimeError("boom"),
         ), mock.patch.object(sys, "stderr", io.StringIO()):
-            out = self.mod.fmt_top_insights({"a": 1}, {"b": 2})
-        self.assertIn("insights unavailable today", out)
+            out = self.mod.fmt_top_insights(today_breach, {"b": 2})
+        self.assertTrue(out["_llm_unavailable"])
+        self.assertTrue(out["kill_switch_breach"])
 
 
 # ---------------------------------------------------------------------------
@@ -597,19 +628,18 @@ class TestFmtTopInsightsMissingCreds(unittest.TestCase):
         for k in self._saved_env:
             os.environ.pop(k, None)
 
-    def test_missing_azure_creds_returns_placeholder_does_not_raise(self) -> None:
-        """The core SRE regression: with NO Azure env set and a yesterday
-        snapshot present (so we'd otherwise call the LLM), fmt_top_insights
-        must return the placeholder without raising SystemExit, and must
-        NOT have called _call_top_insights_llm at all."""
+    def test_missing_azure_creds_returns_unavailable_does_not_raise(self) -> None:
+        """SRE regression: with NO Azure env set and a yesterday snapshot
+        present, fmt_top_insights must return the unavailable v2 payload
+        without raising SystemExit, and must NOT have called the LLM."""
         self._clear_all_azure_env()
         with mock.patch.object(
             self.mod, "_call_top_insights_llm"
         ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
-            # If the bug were unfixed, this call would propagate SystemExit
-            # from judge_runner.get_openai_client via _call_top_insights_llm.
             out = self.mod.fmt_top_insights({"x": 1}, {"date": "2026-05-12"})
-        self.assertIn("insights unavailable today", out)
+        self.assertIsInstance(out, dict)
+        self.assertTrue(out["_llm_unavailable"])
+        self.assertEqual(out["insights"], [])
         self.assertEqual(
             llm.call_count,
             0,
@@ -617,8 +647,6 @@ class TestFmtTopInsightsMissingCreds(unittest.TestCase):
         )
 
     def test_empty_string_creds_treated_as_missing(self) -> None:
-        """Whitespace-only / empty-string secret values (the rotation-gone-wrong
-        scenario the SRE flagged) must take the same short-circuit path."""
         self._clear_all_azure_env()
         os.environ["AZURE_API_KEY"] = "   "
         os.environ["AZURE_ENDPOINT"] = ""
@@ -627,26 +655,24 @@ class TestFmtTopInsightsMissingCreds(unittest.TestCase):
             self.mod, "_call_top_insights_llm"
         ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
             out = self.mod.fmt_top_insights({"x": 1}, {"date": "2026-05-12"})
-        self.assertIn("insights unavailable today", out)
+        self.assertTrue(out["_llm_unavailable"])
         self.assertEqual(llm.call_count, 0)
 
     def test_pre_check_runs_before_first_run_check(self) -> None:
-        """Missing creds + missing snapshot: the missing-creds branch wins
-        because it's a digest-config error, not a first-run state. The
-        operator should see the unavailable placeholder (with a warn log
-        naming the missing vars), not the first-run "begin tomorrow" line."""
+        """Missing creds + missing snapshot: the missing-creds branch wins.
+        The returned payload has _llm_unavailable=True (config error), not
+        the empty-insights first-run shape."""
         self._clear_all_azure_env()
         with mock.patch.object(
             self.mod, "_call_top_insights_llm"
         ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
             out = self.mod.fmt_top_insights({"x": 1}, None)
-        self.assertIn("insights unavailable today", out)
-        self.assertNotIn("insights begin tomorrow", out)
+        self.assertTrue(out["_llm_unavailable"])
         self.assertEqual(llm.call_count, 0)
+        text = self.mod._coerce_insights_to_text(out)
+        self.assertIn("insights unavailable today", text)
 
     def test_partial_creds_only_endpoint_set_still_short_circuits(self) -> None:
-        """Endpoint set but api_key missing: get_openai_client would sys.exit
-        on the missing api_key. Pre-check must catch this."""
         self._clear_all_azure_env()
         os.environ["AZURE_ENDPOINT"] = "https://test.openai.azure.com"
         os.environ["DEPLOYMENT_NAME"] = "gpt-4.1-test"
@@ -655,7 +681,7 @@ class TestFmtTopInsightsMissingCreds(unittest.TestCase):
             self.mod, "_call_top_insights_llm"
         ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
             out = self.mod.fmt_top_insights({"x": 1}, {"date": "2026-05-12"})
-        self.assertIn("insights unavailable today", out)
+        self.assertTrue(out["_llm_unavailable"])
         self.assertEqual(llm.call_count, 0)
 
     def test_fallback_endpoint_env_var_accepted(self) -> None:
@@ -665,11 +691,20 @@ class TestFmtTopInsightsMissingCreds(unittest.TestCase):
         os.environ["AZURE_OPENAI_API_KEY"] = "test-key"
         os.environ["AZURE_OPENAI_ENDPOINT"] = "https://test.openai.azure.com"
         os.environ["DEPLOYMENT_NAME"] = "gpt-4.1-test"
+        parsed = {
+            "headline": "Valid.",
+            "insights": [{
+                "topic_label": "ACCURACY", "icon": "🎯",
+                "claim": "Downvote rate spiking to 1.4% (was 0.8%).",
+                "evidence": "47 dv / 3350 traces.",
+                "context": None, "spark_series": None,
+            }],
+        }
         with mock.patch.object(
-            self.mod, "_call_top_insights_llm", return_value="1. valid 100"
+            self.mod, "_call_top_insights_llm", return_value=parsed
         ) as llm, mock.patch.object(sys, "stderr", io.StringIO()):
             out = self.mod.fmt_top_insights({"x": 1}, {"date": "2026-05-12"})
-        self.assertNotIn("insights unavailable today", out)
+        self.assertFalse(out["_llm_unavailable"])
         self.assertEqual(llm.call_count, 1)
 
 
