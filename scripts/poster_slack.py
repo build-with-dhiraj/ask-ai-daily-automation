@@ -179,7 +179,9 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
             "delta_text": "n/a",
             "delta_dir": "flat",
             "state": "neutral",
-            "note": "per-axial detail in thread",
+            # D6: dropped 'per-axial' jargon. Stakeholders read this band;
+            # they should not be expected to know our internal vocabulary.
+            "note": "details in thread",
         },
         {
             "label": "Overall PASS",
@@ -191,25 +193,41 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
         },
     ]
 
-    # Top drivers: pull from axial_fail_pct if present.
-    axial = snap.get("axial_fail_pct") or {}
+    # D5: top drivers are now the top 3 INDIVIDUAL open codes (e.g. A5, A1,
+    # A2) sourced from open_codes_fired_count. The previous build used
+    # axial_fail_pct (academic / tone / intent) which only restated the
+    # headline. Code-level counts are novel information stakeholders use
+    # to decide what to inspect in the deep-dive thread.
+    code_counts_raw = snap.get("open_codes_fired_count") or {}
+    code_counts: dict[str, int] = {
+        str(k): int(v or 0) for k, v in code_counts_raw.items()
+    }
     drivers_sorted = sorted(
-        ((k, float(v or 0.0)) for k, v in axial.items()),
-        key=lambda kv: kv[1],
-        reverse=True,
+        code_counts.items(), key=lambda kv: kv[1], reverse=True
     )[:3]
-    # The bar entries describe AXES (academic, tone, intent) not codes, so
-    # the left-column "code" slot is empty here. Leaving "code" == k duplicates
-    # the axis label visually (see dogfood QA #2). Template defends with a
-    # guard that hides the code when it duplicates the label.
+    top_count = drivers_sorted[0][1] if drivers_sorted else 0
+    # Code -> human label mapping mirrors judge_runner.CODE_LABELS so the
+    # poster does not import a circular dep at module-load time.
+    _CODE_LABELS = {
+        "A1": "Conceptual error",   "A2": "Misunderstood doubt",
+        "A3": "Wrong OCR",          "A4": "Calculation error",
+        "A5": "Answer incomplete",  "A6": "Incorrect validation",
+        "B1": "Ambiguous, badly handled",
+        "C1": "Equation unreadable","C2": "Steps not structured",
+        "C3": "Symbols corrupted",  "C4": "Chem notation broken",
+        "D1": "Too advanced",       "D2": "Too basic",
+        "D3": "No direct answer",   "D4": "No clarification asked",
+        "E1": "Too long",           "E2": "Minor details missing",
+        "E3": "Tone / naturalness",
+    }
     top_drivers = [
         {
-            "code": "",
-            "label": k.replace("_", " "),
-            "count": int(round(v * n_judged / 100.0)) if n_judged else 0,
-            "bar_pct": int(round(100.0 * v / drivers_sorted[0][1])) if drivers_sorted and drivers_sorted[0][1] else 0,
+            "code": code,
+            "label": _CODE_LABELS.get(code, code).lower(),
+            "count": count,
+            "bar_pct": int(round(100.0 * count / top_count)) if top_count else 0,
         }
-        for k, v in drivers_sorted
+        for code, count in drivers_sorted
     ]
 
     return {

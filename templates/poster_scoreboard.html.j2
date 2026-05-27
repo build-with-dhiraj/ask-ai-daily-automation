@@ -105,9 +105,13 @@
   </section>
 
   {# ── Top driver bars ──────────────────────────────────────────── #}
+  {# D5: bars now show the top 3 individual open codes (A5 152×, A1 107×,
+       A2 96×, ...) sourced from open_codes_fired_count, which is novel
+       information. Previous build used per-axis fail % which only
+       restated the Academic-FAIL headline. #}
   {% if top_drivers and top_drivers|length > 0 %}
-  <section class="px-7 pt-5 pb-2" aria-label="Top axis by fail rate">
-    <div class="eyebrow mb-3">Top axis by fail rate</div>
+  <section class="px-7 pt-5 pb-2" aria-label="Top driver codes">
+    <div class="eyebrow mb-3">Top driver codes</div>
     <ul class="space-y-2.5">
       {% for d in top_drivers %}
       <li class="grid grid-cols-[34px_1fr_56px] items-center gap-3" aria-label="{{ d.label }} count {{ d.count }}">

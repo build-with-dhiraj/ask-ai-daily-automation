@@ -879,6 +879,10 @@ def finalize_eval_run(
             "acc_fail_pct": acc_fail_pct_snap,
             "exp_fail_pct": exp_fail_pct_snap,
             "axial_fail_pct": dict(summary.axial_fail_pct),
+            # D5: ship per-code fire counts so the scoreboard poster can
+            # render the top 3 driver CODES (novel info) instead of axis
+            # fail rates (which only restate the headline).
+            "open_codes_fired_count": dict(summary.open_codes_fired_count),
             "formatting_hotspot_chapters": formatting_hotspot_chapters,
             # Run cost so the scoreboard Ops stripe can render real numbers
             # without re-parsing the slack block text.
@@ -948,6 +952,7 @@ def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -
         "acc_fail_pct": 0.0,
         "exp_fail_pct": 0.0,
         "axial_fail_pct": {},
+        "open_codes_fired_count": {},
         "formatting_hotspot_chapters": [],
         "run_cost_usd": 0.0,
         "run_tokens_in": 0,

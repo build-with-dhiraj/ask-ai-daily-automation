@@ -69,7 +69,10 @@ class TestPosterInputBuilders(unittest.TestCase):
         snap = {
             "date": "2026-05-27", "n_judged": 989,
             "acc_fail_pct": 8.2, "exp_fail_pct": 14.1, "pass_pct": 71.3,
-            "axial_fail_pct": {"A5": 13.8, "A2": 9.6, "A1": 9.3},
+            "axial_fail_pct": {"academic": 13.8, "tone": 9.6, "intent": 9.3},
+            # Design audit D5: bar entries now come from open_codes_fired_count
+            # (top 3 individual codes), not axial_fail_pct.
+            "open_codes_fired_count": {"A5": 152, "A1": 107, "A2": 96},
         }
         out = self.ps.build_scoreboard_poster_input(snap)
         self.assertTrue(out["kill_switch_breach"])
@@ -78,16 +81,14 @@ class TestPosterInputBuilders(unittest.TestCase):
         self.assertEqual(len(out["top_drivers"]), 3)
 
     def test_top_drivers_have_no_duplicate_axis_labels(self) -> None:
-        """Dogfood QA #2: bar chart rendered 'academic academic' / 'tone tone'
-        because the builder set both 'code' and 'label' to the same axis name.
-        Each entry should either have an empty code or a code that differs
-        from the label."""
+        """Dogfood QA #2 + design audit D5: bar entries are now per-code
+        (code != label by construction, e.g. code='A5' / label='answer
+        incomplete'). This regression test stays as a bumper against any
+        future builder that resets to axis labels."""
         snap = {
             "date": "2026-05-27", "n_judged": 1000,
             "acc_fail_pct": 5.0, "exp_fail_pct": 10.0, "pass_pct": 85.0,
-            "axial_fail_pct": {
-                "academic": 8.2, "tone": 5.0, "intent": 3.1,
-            },
+            "open_codes_fired_count": {"A5": 30, "E2": 18, "C1": 9},
         }
         out = self.ps.build_scoreboard_poster_input(snap)
         for d in out["top_drivers"]:
