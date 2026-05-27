@@ -24,6 +24,11 @@ on:
         required: false
         default: true
         type: boolean
+      poster_disable:
+        description: 'Skip the poster pipeline for THIS run only (incident kill-switch, per-run scope). For a sticky rollback across all runs, set the repo variable POSTER_DISABLE=1 instead, see docs/runbooks/poster-rollback.md.'
+        required: false
+        default: false
+        type: boolean
 
 # Single-queue across Daily Automation + Daily Eval + Daily Digest so the one
 # self-hosted Mac runner never has overlapping work. A second dispatch QUEUES;
@@ -104,6 +109,12 @@ jobs:
           # push toggle. Without this the eval-job poster render would always
           # treat itself as dry_run and never publish.
           POSTER_AUTO_PUSH: ${{ (github.event_name == 'schedule' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+          # Per-run poster kill-switch (SRE items 3+8). The repo-variable form
+          # (vars.POSTER_DISABLE) is sticky and slow to flip back, so we also
+          # honour a workflow_dispatch input: a single dispatch can skip the
+          # poster path without leaving the kill-switch armed for tomorrow.
+          # See docs/runbooks/poster-rollback.md.
+          POSTER_DISABLE: ${{ github.event.inputs.poster_disable == 'true' && '1' || vars.POSTER_DISABLE || '' }}
 
       # Guarantee a digest-readable JSON on disk so the artifact is never stale/missing keys
       # (digest C12 + upload both rely on this path).
@@ -243,6 +254,9 @@ jobs:
       # - workflow_dispatch + dry_run=false           → push posters (dogfooding "for real")
       # `github.event.inputs.dry_run` is the literal string "true"/"false" for booleans.
       POSTER_AUTO_PUSH: ${{ (github.event_name == 'schedule' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+      # Per-run poster kill-switch (SRE items 3+8). See eval job above for the
+      # full rationale; mirrored here so both surfaces honour the same flag.
+      POSTER_DISABLE: ${{ github.event.inputs.poster_disable == 'true' && '1' || vars.POSTER_DISABLE || '' }}
     steps:
       - uses: actions/checkout@v4
 

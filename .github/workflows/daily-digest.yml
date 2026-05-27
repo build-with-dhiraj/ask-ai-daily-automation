@@ -22,6 +22,11 @@ on:
         required: false
         default: true
         type: boolean
+      poster_disable:
+        description: 'Skip the poster pipeline for THIS run only (incident kill-switch, per-run scope). For a sticky rollback across all runs, set the repo variable POSTER_DISABLE=1 instead, see docs/runbooks/poster-rollback.md.'
+        required: false
+        default: false
+        type: boolean
 
 # Shares the queue with daily-automation.yml + daily-eval.yml so the single
 # self-hosted Mac runner never has two of these in flight at once. A second
@@ -70,6 +75,12 @@ jobs:
       # Poster publish gating (C1.3d): this workflow is workflow_dispatch only,
       # so dry_run=true (default) keeps posters local. Set dry_run=false to push.
       POSTER_AUTO_PUSH: ${{ github.event.inputs.dry_run == 'false' && '1' || '0' }}
+      # Per-run poster kill-switch (SRE items 3+8). The repo-variable form
+      # (vars.POSTER_DISABLE) is sticky and slow to flip back, so we also
+      # honour a workflow_dispatch input: a single dispatch can skip the
+      # poster path without leaving the kill-switch armed for tomorrow.
+      # See docs/runbooks/poster-rollback.md.
+      POSTER_DISABLE: ${{ github.event.inputs.poster_disable == 'true' && '1' || vars.POSTER_DISABLE || '' }}
     steps:
       - uses: actions/checkout@v4
 

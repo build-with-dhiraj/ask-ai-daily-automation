@@ -3,6 +3,12 @@ name: Daily Eval
 on:
   # Schedule moved to daily-automation.yml (eval → digest + artifact). Use workflow_dispatch for ad-hoc runs.
   workflow_dispatch:
+    inputs:
+      poster_disable:
+        description: 'Skip the poster pipeline for THIS run only (incident kill-switch, per-run scope). For a sticky rollback across all runs, set the repo variable POSTER_DISABLE=1 instead, see docs/runbooks/poster-rollback.md.'
+        required: false
+        default: false
+        type: boolean
 
 # Shares the queue with daily-automation.yml + daily-digest.yml so the single
 # self-hosted Mac runner never has two of these in flight at once. A second
@@ -59,3 +65,6 @@ jobs:
           # there is no `dry_run` input. Default to NO push so manual eval
           # dispatches never accidentally write to gh-pages.
           POSTER_AUTO_PUSH: "0"
+          # Per-run poster kill-switch (SRE items 3+8). See
+          # docs/runbooks/poster-rollback.md for the two rollback paths.
+          POSTER_DISABLE: ${{ github.event.inputs.poster_disable == 'true' && '1' || vars.POSTER_DISABLE || '' }}
