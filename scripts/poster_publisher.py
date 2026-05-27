@@ -49,6 +49,14 @@ class PosterPublishError(RuntimeError):
     """Raised when the publish flow cannot complete."""
 
 
+class PosterPublishUnreachableError(RuntimeError):
+    """Raised when a freshly-published gh-pages URL did not become reachable
+    within the verification window. Distinct from PosterPublishError so the
+    caller can degrade with a more specific cause string (`publish_unreachable`)
+    and so the verify step does not get swallowed by a publish-failure handler.
+    """
+
+
 def _run(cmd: list[str], cwd: Path) -> str:
     """Run a git/shell command, return stdout. Raise on non-zero."""
     log.debug("$ %s  (cwd=%s)", " ".join(cmd), cwd)

@@ -149,6 +149,48 @@ class TestRenderAndPublish(unittest.TestCase):
         self.assertEqual(m_render.call_count, 1)
         m_pub.assert_not_called()
 
+    def test_unreachable_url_raises_when_auto_push_on(self) -> None:
+        """SRE item 4: when POSTER_AUTO_PUSH=1 and the gh-pages URL does not
+        propagate within the verify window, raise PosterPublishUnreachableError
+        so the caller can degrade to legacy with cause=publish_unreachable
+        instead of letting Slack cache a 404 on a broken image."""
+        from scripts.poster_publisher import PosterPublishUnreachableError
+        with mock.patch(
+            "scripts.poster_renderer.render_poster", return_value=self.png
+        ), mock.patch(
+            "scripts.poster_publisher.publish_poster",
+            return_value="https://example/p.png",
+        ), mock.patch(
+            "scripts.poster_publisher._verify_url_reachable", return_value=False
+        ) as m_verify, _EnvScope(
+            POSTER_DRY_RUN=None, POSTER_AUTO_PUSH="1"
+        ), mock.patch.object(sys, "stderr"):
+            with self.assertRaises(PosterPublishUnreachableError):
+                self.ps.render_and_publish(
+                    "digest", {"date_iso": "2026-05-26"}, "2026-05-26"
+                )
+        m_verify.assert_called_once()
+
+    def test_verify_skipped_when_auto_push_off(self) -> None:
+        """POSTER_AUTO_PUSH=0 (local / dry-publish): URL is not pushed, so we
+        do not probe it. The function returns the synthetic URL without ever
+        calling _verify_url_reachable."""
+        with mock.patch(
+            "scripts.poster_renderer.render_poster", return_value=self.png
+        ), mock.patch(
+            "scripts.poster_publisher.publish_poster",
+            return_value="https://example/p.png",
+        ), mock.patch(
+            "scripts.poster_publisher._verify_url_reachable", return_value=False
+        ) as m_verify, _EnvScope(
+            POSTER_DRY_RUN=None, POSTER_AUTO_PUSH="0"
+        ):
+            url = self.ps.render_and_publish(
+                "digest", {"date_iso": "2026-05-26"}, "2026-05-26"
+            )
+        self.assertEqual(url, "https://example/p.png")
+        m_verify.assert_not_called()
+
 
 class TestAltTextAndFooters(unittest.TestCase):
     def setUp(self) -> None:

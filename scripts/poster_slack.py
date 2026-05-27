@@ -297,9 +297,14 @@ def render_and_publish(
     poster_input: dict,
     date_str: str,
 ) -> Optional[str]:
-    """Try to render + publish the poster. Return public URL or None on any
-    failure. POSTER_DRY_RUN=1 skips publish but still renders (validates the
-    template). Never raises.
+    """Try to render + publish the poster. Return public URL on success, or
+    None when the render path itself failed (template / Playwright / publish).
+    POSTER_DRY_RUN=1 skips publish but still renders (validates the template).
+
+    Raises PosterPublishUnreachableError when the gh-pages URL did NOT become
+    reachable within the verify window (caller catches this as recoverable and
+    degrades to legacy text). All other failures are logged and surfaced as
+    None so existing callers keep their None-check fallback.
     """
     try:
         from scripts.poster_renderer import (  # type: ignore
@@ -332,7 +337,11 @@ def render_and_publish(
         return f"file:///tmp/POSTER_DRY_RUN/{surface}/{date_str}.png"
 
     try:
-        from scripts.poster_publisher import publish_poster  # type: ignore
+        from scripts.poster_publisher import (  # type: ignore
+            PosterPublishUnreachableError,
+            _verify_url_reachable,
+            publish_poster,
+        )
         url = publish_poster(png, surface, date_str)  # type: ignore[arg-type]
     except Exception as exc:
         print(
@@ -340,6 +349,21 @@ def render_and_publish(
             file=sys.stderr,
         )
         return None
+
+    # gh-pages takes 5-30s+ to propagate a freshly-pushed file to the CDN.
+    # If Slack server-side fetches the image_url before propagation it caches
+    # a 404 forever and the message renders broken. So: probe the URL with a
+    # bounded retry loop and raise PosterPublishUnreachableError on timeout
+    # so the caller degrades to the legacy text post with the right cause.
+    #
+    # Skip the probe when POSTER_AUTO_PUSH=0: in that mode the publisher only
+    # commits locally and the public URL is not expected to be reachable.
+    auto_push = os.environ.get("POSTER_AUTO_PUSH", "").strip() == "1"
+    if auto_push:
+        if not _verify_url_reachable(url, timeout=120):
+            raise PosterPublishUnreachableError(
+                f"gh-pages URL not reachable within 120s: {url}"
+            )
     return url
 
 

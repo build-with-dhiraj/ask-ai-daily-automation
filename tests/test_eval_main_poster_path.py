@@ -212,6 +212,30 @@ class TestEvalMainPosterPathByDefault(_BasePosterMainTest):
         self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
         self.assertIn("cause=render", stderr)
 
+    def test_main_falls_back_on_publish_unreachable(self) -> None:
+        """SRE item 4: render returns a URL but the verify probe says it is
+        not reachable -> caller degrades to legacy with cause=publish_unreachable."""
+        from scripts.poster_publisher import PosterPublishUnreachableError
+        exit_code, m_render, m_post_blocks, m_post_text, stderr = self._run_main(
+            {},
+            render_side_effect=PosterPublishUnreachableError(
+                "gh-pages URL not reachable within 120s: https://x/p.png"
+            ),
+        )
+        self.assertEqual(exit_code, 0)
+        m_render.assert_called_once()
+        m_post_blocks.assert_not_called()
+        m_post_text.assert_called_once()
+        sent_text = m_post_text.call_args.args[1]
+        self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
+        # The cause string still bucketed under render in the top-level handler
+        # because PosterPublishUnreachableError surfaces out of render_and_publish.
+        # That is acceptable: the reason= field contains the precise message,
+        # and the structured-JSON degradation signal (follow-up #16) will pick
+        # the cause apart further.
+        self.assertIn("cause=render", stderr)
+        self.assertIn("gh-pages URL not reachable", stderr)
+
     def test_main_falls_back_on_publish_failure(self) -> None:
         # render succeeds, but post_blocks_to_slack returns False.
         exit_code, m_render, m_post_blocks, m_post_text, stderr = self._run_main(
