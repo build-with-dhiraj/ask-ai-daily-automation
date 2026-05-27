@@ -228,6 +228,43 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
     }
 
 
+def _synthesize_breach_insight(today: dict) -> dict:
+    """Manufacture a single insight describing why the safety floor breached.
+
+    Design audit D2: when kill_switch_breach=True but insights is empty, the
+    template would render a red 'SAFETY FLOOR BREACHED' band on top of a
+    'No anomalies today' panel. Internally contradictory. We resolve at the
+    data layer by emitting one synthetic insight derived from today_summary,
+    so the template never has to decide between a breach band and a quiet
+    panel.
+    """
+    acc_fail = float(today.get("acc_fail_pct") or 0.0)
+    exp_fail = float(today.get("exp_fail_pct") or 0.0)
+    if acc_fail > 6.0:
+        return {
+            "topic_label": "ACADEMIC",
+            "icon": "🚨",
+            "claim": f"Academic FAIL {acc_fail:.1f}% above the 6% floor.",
+            "evidence": "Kill switch tripped; see thread for the per-code breakdown.",
+            "context": None,
+            "spark_series": None,
+        }
+    # Fallback: a generic safety-floor insight when the acc_fail signal is
+    # not above the floor but some other gate flipped breach=True. Keep the
+    # surface honest about what we know.
+    return {
+        "topic_label": "FEEDBACK",
+        "icon": "🚨",
+        "claim": "Safety floor breached.",
+        "evidence": (
+            f"Academic FAIL {acc_fail:.1f}% · Experience FAIL {exp_fail:.1f}%. "
+            "Details in thread."
+        ),
+        "context": None,
+        "spark_series": None,
+    }
+
+
 def build_digest_poster_input(
     today_data: dict, insights_payload: dict
 ) -> dict:
@@ -241,13 +278,22 @@ def build_digest_poster_input(
     except Exception:
         date_human = date_iso
 
+    breach = bool(insights.get("kill_switch_breach"))
+    insight_list = list(insights.get("insights") or [])
+
+    # D2: resolve breach + empty insights contradiction by synthesizing one
+    # insight from today_summary, so the template never renders the
+    # 'No anomalies today' panel underneath a red breach band.
+    if breach and not insight_list:
+        insight_list = [_synthesize_breach_insight(today)]
+
     return {
         "date_human": date_human,
         "date_iso": date_iso,
-        "kill_switch_breach": bool(insights.get("kill_switch_breach")),
+        "kill_switch_breach": breach,
         "headline": insights.get("headline") or "",
         "subhead": "",
-        "insights": insights.get("insights") or [],
+        "insights": insight_list,
         "brand_mark": "Ask AI · daily digest",
     }
 
