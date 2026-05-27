@@ -1188,15 +1188,46 @@ def main() -> int:
                         today_snap = json.load(_sf)
                 except (OSError, ValueError) as exc:
                     poster_error = f"cause=snapshot reason={exc!r}"
-                poster_input = poster_slack.build_scoreboard_poster_input(today_snap)
-                date_str = today_snap.get("date") or date.today().isoformat()
-                try:
-                    image_url = poster_slack.render_and_publish(
-                        "scoreboard", poster_input, date_str
-                    )
-                except _POSTER_RECOVERABLE as exc:
+                # SRE item 9: if the snapshot was cleaned up between
+                # finalize_eval_run and here, today_snap is {} and the poster
+                # would render with all-zero metrics + a green kill-switch
+                # reading: a silent-wrong-output failure. Force degrade up
+                # front with cause=snapshot so the operator sees the cause.
+                # Must-have keys for the scoreboard (consumed by
+                # build_scoreboard_poster_input + the Ops/Safety stripes):
+                _SCOREBOARD_REQUIRED_KEYS = (
+                    "acc_fail_pct",
+                    "exp_fail_pct",
+                    "pass_pct",
+                    "n_judged",
+                )
+                if poster_error is None:
+                    if not today_snap:
+                        poster_error = (
+                            "cause=snapshot reason=snapshot is empty or missing on disk"
+                        )
+                    else:
+                        missing = [
+                            k for k in _SCOREBOARD_REQUIRED_KEYS
+                            if k not in today_snap
+                        ]
+                        if missing:
+                            poster_error = (
+                                "cause=snapshot reason=missing required snapshot keys: "
+                                + ", ".join(missing)
+                            )
+                if poster_error is not None:
                     image_url = None
-                    poster_error = poster_error or f"cause=render reason={exc!r}"
+                else:
+                    poster_input = poster_slack.build_scoreboard_poster_input(today_snap)
+                    date_str = today_snap.get("date") or date.today().isoformat()
+                    try:
+                        image_url = poster_slack.render_and_publish(
+                            "scoreboard", poster_input, date_str
+                        )
+                    except _POSTER_RECOVERABLE as exc:
+                        image_url = None
+                        poster_error = poster_error or f"cause=render reason={exc!r}"
                 if image_url is None:
                     poster_error = poster_error or (
                         "cause=render reason=render_and_publish returned None"

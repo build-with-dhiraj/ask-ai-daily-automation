@@ -232,6 +232,45 @@ class TestEvalMainPosterPathByDefault(_BasePosterMainTest):
         self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
         self.assertIn("cause=render", stderr)
 
+    def test_main_falls_back_when_snapshot_empty(self) -> None:
+        """SRE item 9: an empty snapshot on disk means the poster would render
+        all-zero metrics + green kill-switch (silent-wrong-output). Force
+        degrade with cause=snapshot up front."""
+        # Rewrite the snapshot to {} so the precondition fires.
+        with open(self.snapshot_path, "w") as fh:
+            json.dump({}, fh)
+        exit_code, m_render, m_post_blocks, m_post_text, stderr = self._run_main({})
+        self.assertEqual(exit_code, 0)
+        m_render.assert_not_called()
+        m_post_blocks.assert_not_called()
+        m_post_text.assert_called_once()
+        sent_text = m_post_text.call_args.args[1]
+        self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
+        self.assertIn("cause=snapshot", stderr)
+        self.assertIn("empty", stderr)
+
+    def test_main_falls_back_when_snapshot_missing_required_key(self) -> None:
+        """SRE item 9: a snapshot missing one of the must-have keys must also
+        degrade with cause=snapshot and the offending key listed in the
+        reason= field."""
+        # Write a snapshot missing acc_fail_pct.
+        with open(self.snapshot_path, "w") as fh:
+            json.dump({
+                "date": "2026-05-26",
+                "n_judged": 1,
+                "exp_fail_pct": 11.0,
+                "pass_pct": 81.0,
+            }, fh)
+        exit_code, m_render, m_post_blocks, m_post_text, stderr = self._run_main({})
+        self.assertEqual(exit_code, 0)
+        m_render.assert_not_called()
+        m_post_blocks.assert_not_called()
+        m_post_text.assert_called_once()
+        sent_text = m_post_text.call_args.args[1]
+        self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
+        self.assertIn("cause=snapshot", stderr)
+        self.assertIn("acc_fail_pct", stderr)
+
     def test_programming_error_propagates_not_swallowed(self) -> None:
         """B1: a NameError from render_and_publish is NOT recoverable;
         it must propagate so CI surfaces the bug red. Catching `Exception`

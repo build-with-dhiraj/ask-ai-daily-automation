@@ -86,9 +86,14 @@ class _EnvScope:
 
 
 def _minimal_today_summary() -> dict:
+    # Must carry every key listed in _DIGEST_REQUIRED_KEYS inside
+    # daily_digest.py:main()'s poster-path precondition (SRE item 9), so the
+    # default happy-path test doesn't trip the snapshot guard. If you add a
+    # new required key in main(), add it here too.
     return {
         "date": "2026-05-26",
         "downvote_rate_pct": 0.4,
+        "academic_fail_pct": 4.2,
         "langfuse_errors_total": 5,
         "total_traces_24h": 1000,
         "cost_latency_answer_by_model": {},
@@ -121,9 +126,16 @@ class _BaseDigestMainTest(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _run_main(self, env_overrides: dict, *, render_side_effect=None,
-                  publish_returns=True, render_returns_url="https://example/p.png"):
+                  publish_returns=True, render_returns_url="https://example/p.png",
+                  today_summary_override=None):
         """Patch everything heavy, run main(), return (exit_code, m_render,
-        m_post_blocks, m_post_text, stderr)."""
+        m_post_blocks, m_post_text, stderr).
+
+        today_summary_override: when not None, replaces the default
+        _minimal_today_summary() return value (used by the snapshot-precondition
+        tests to inject an empty / partial dict). None means "use the default
+        minimal happy-path summary".
+        """
         from io import StringIO
         stderr_buf = StringIO()
 
@@ -132,6 +144,10 @@ class _BaseDigestMainTest(unittest.TestCase):
             m_render.side_effect = render_side_effect
         m_post_blocks = mock.MagicMock(return_value=publish_returns)
         m_post_text = mock.MagicMock(return_value=True)
+        today_summary_value = (
+            today_summary_override if today_summary_override is not None
+            else _minimal_today_summary()
+        )
 
         env = {
             "GITHUB_ACTIONS": "true",
@@ -170,7 +186,7 @@ class _BaseDigestMainTest(unittest.TestCase):
             mock.patch.object(self.digest, "load_classifier_snapshot",
                               return_value=None),
             mock.patch.object(self.digest, "_summarise_today_for_snapshot",
-                              return_value=_minimal_today_summary()),
+                              return_value=today_summary_value),
             mock.patch.object(self.digest, "_load_yesterday_snapshot",
                               return_value=None),
             mock.patch.object(self.digest, "fmt_top_insights",
@@ -270,6 +286,40 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
         self.assertIn("p50=420ms", body)
         # Must NOT contain the insights headline (mocked above as "Test headline.").
         self.assertNotIn("Test headline.", body)
+
+    def test_main_falls_back_when_snapshot_empty(self) -> None:
+        """SRE item 9: an empty today_summary means the poster would render
+        all-zero metrics + green kill-switch (silent-wrong-output). Force
+        degrade with cause=snapshot up front."""
+        exit_code, m_render, m_post_blocks, m_post_text, stderr = self._run_main(
+            {}, today_summary_override={},
+        )
+        self.assertEqual(exit_code, 0)
+        m_render.assert_not_called()
+        m_post_blocks.assert_not_called()
+        m_post_text.assert_called_once()
+        sent_text = m_post_text.call_args.args[1]
+        self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
+        self.assertIn("cause=snapshot", stderr)
+        self.assertIn("empty", stderr)
+
+    def test_main_falls_back_when_snapshot_missing_required_key(self) -> None:
+        """SRE item 9: a today_summary missing one of the must-have keys must
+        also degrade with cause=snapshot and the offending key listed in
+        the reason= field."""
+        broken = _minimal_today_summary()
+        broken.pop("downvote_rate_pct", None)
+        exit_code, m_render, m_post_blocks, m_post_text, stderr = self._run_main(
+            {}, today_summary_override=broken,
+        )
+        self.assertEqual(exit_code, 0)
+        m_render.assert_not_called()
+        m_post_blocks.assert_not_called()
+        m_post_text.assert_called_once()
+        sent_text = m_post_text.call_args.args[1]
+        self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
+        self.assertIn("cause=snapshot", stderr)
+        self.assertIn("downvote_rate_pct", stderr)
 
     def test_programming_error_propagates_not_swallowed(self) -> None:
         """B1: a NameError from render_and_publish is NOT recoverable;

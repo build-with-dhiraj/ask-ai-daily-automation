@@ -3706,19 +3706,52 @@ def main() -> int:
                 TimeoutError,
                 ValueError,
             )
-            try:
-                poster_input = poster_slack.build_digest_poster_input(
-                    today_summary,
-                    top_insights_text if isinstance(top_insights_text, dict) else {},
+            # SRE item 9: if today_summary is empty or missing required keys
+            # the poster would render with all-zero metrics + a green
+            # kill-switch reading: a silent-wrong-output failure. Force
+            # degrade up front with cause=snapshot so the operator sees the
+            # cause string rather than a deceptively-green Slack image.
+            #
+            # Must-have keys for the digest poster + downstream consumers
+            # (Ops stripe, Safety stripe, kill-switch detector). Matches the
+            # set _summarise_today_for_snapshot guarantees on a normal day:
+            _DIGEST_REQUIRED_KEYS = (
+                "downvote_rate_pct",
+                "academic_fail_pct",
+                "total_traces_24h",
+                "cost_latency_answer_by_model",
+                "cost_latency_classifier",
+            )
+            if not today_summary:
+                poster_error = (
+                    "cause=snapshot reason=today_summary is empty"
                 )
-                date_str = today_summary.get("date") or today_str
-                try:
-                    image_url = poster_slack.render_and_publish(
-                        "digest", poster_input, date_str
+            else:
+                missing = [
+                    k for k in _DIGEST_REQUIRED_KEYS
+                    if k not in today_summary
+                ]
+                if missing:
+                    poster_error = (
+                        "cause=snapshot reason=missing required snapshot keys: "
+                        + ", ".join(missing)
                     )
-                except _POSTER_RECOVERABLE as exc:
+            try:
+                if poster_error is not None:
                     image_url = None
-                    poster_error = f"cause=render reason={exc!r}"
+                else:
+                    poster_input = poster_slack.build_digest_poster_input(
+                        today_summary,
+                        top_insights_text if isinstance(top_insights_text, dict) else {},
+                    )
+                    date_str = today_summary.get("date") or today_str
+                    try:
+                        image_url = poster_slack.render_and_publish(
+                            "digest", poster_input, date_str
+                        )
+                    except _POSTER_RECOVERABLE as exc:
+                        image_url = None
+                        poster_error = f"cause=render reason={exc!r}"
                 if image_url:
                     ops_text = _build_digest_ops_stripe_text(
                         today_summary, yesterday_snapshot, stream_logs_rows
