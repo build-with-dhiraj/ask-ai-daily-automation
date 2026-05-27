@@ -1,12 +1,12 @@
-"""Top Insights v2 — structured-dict generator tests.
+"""Top Insights v2 structured-dict generator tests.
 
 Covers the rewritten _call_top_insights_llm + fmt_top_insights pair:
-  • Strict JSON schema (headline + variable 0–5 insights)
+  • Strict JSON schema (headline plus variable 0 to 5 insights)
   • Quality filter: drops insights missing delta verb / comparison anchor /
     overlength claims
   • Quiet-day path returns empty insights list (no padding)
   • Deterministic kill-switch detection on Academic FAIL > 6% OR Downvote
-    rate > 1.0% — flagged into returned dict regardless of LLM output
+    rate > 1.0%, flagged into returned dict regardless of LLM output
   • LLM unavailable / malformed JSON → sentinel dict, never raises
 
 All tests are pure (no real HTTP, Azure client mocked).
@@ -184,7 +184,7 @@ class TestKillSwitch(_V2Base):
 
 
 class TestLLMUnavailable(unittest.TestCase):
-    """No env vars at all — sentinel dict, no Azure call attempt."""
+    """No env vars at all: sentinel dict, no Azure call attempt."""
 
     def setUp(self) -> None:
         self.mod = _load_digest()
