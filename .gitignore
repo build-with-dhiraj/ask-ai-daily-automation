@@ -7,3 +7,5 @@ __pycache__/
 *.pyo
 .DS_Store
 *.log
+.gh-pages-worktree/
+.pytest_cache/
