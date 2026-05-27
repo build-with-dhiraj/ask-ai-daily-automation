@@ -6,7 +6,7 @@ production poster output. Per user instruction (CLAUDE.md, em-dash sweep
 follow-ups), the rendered surfaces must contain ASCII-safe punctuation:
 middle-dot (·), hyphen, or rewritten sentences.
 
-This test is a regression bumper — fail loudly the next time an em-dash
+This test is a regression bumper. Fail loudly the next time an em-dash
 slips into a template, so the QA cycle doesn't have to catch it visually
 in Slack.
 """
