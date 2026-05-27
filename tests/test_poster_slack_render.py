@@ -405,8 +405,16 @@ class TestOpsAndSafetyStripes(unittest.TestCase):
             "cost_latency_classifier": {"cost_usd": 2.00},
             "langfuse_errors_total": 12,
             "total_traces_24h": 1000,
+            # Error rate denominator is observations, not traces (one trace
+            # fans out into many observation spans). 12 / 1000 observations
+            # = 1.2%; yesterday 8 / 1000 = 0.8% so the arrow points up.
+            "total_observations_24h": 1000,
         }
-        yest = {"langfuse_errors_total": 8, "total_traces_24h": 1000}
+        yest = {
+            "langfuse_errors_total": 8,
+            "total_traces_24h": 1000,
+            "total_observations_24h": 1000,
+        }
         text = self.digest._build_digest_ops_stripe_text(today, yest, None)
         self.assertIn("$20.00 spent", text)
         # Dominant traffic is gpt-4.1, student p90 = 5.90s

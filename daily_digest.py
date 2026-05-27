@@ -614,6 +614,24 @@ def fetch_langfuse_traces_total() -> Tuple[int, bool]:
         return 0, False
 
 
+def fetch_langfuse_observations_total() -> Tuple[int, bool]:
+    """Total observations in the last 24h, used as the denominator for the
+    error rate. One trace fans out into many observation spans; the error-obs
+    count is observation-grain, so the denominator must be observations too,
+    otherwise the rate exceeds 100% on any normal day."""
+    url = (
+        f"{LANGFUSE_HOST}/api/public/observations"
+        f"?fromTimestamp={urllib.parse.quote(from_24h)}&limit=1"
+    )
+    try:
+        data = _http_get_langfuse(url, {"Authorization": _langfuse_auth_header()})
+        n = int(data.get("meta", {}).get("totalItems") or 0)
+        return n, True
+    except Exception as exc:
+        print(f"[warn] Langfuse observations total failed: {repr(exc)}", file=sys.stderr)
+        return 0, False
+
+
 def _safe_pct_delta(today: Optional[float], prior: Optional[float]) -> Optional[float]:
     """Compute (today - prior) / prior * 100 with NaN/None/zero guards.
 
@@ -1801,6 +1819,7 @@ def _summarise_today_for_snapshot(
     score_items: List,
     dv_in_sample: int,
     total_traces: int,
+    total_observations: int = 0,
     dump_rows: Optional[List],
     academic_rows: Optional[List],
     non_academic_rows: Optional[List],
@@ -1969,6 +1988,7 @@ def _summarise_today_for_snapshot(
         "academic_fail_pct": academic_fail_pct_val,
         "score_rows_fetched": len(score_items or []),
         "total_traces_24h": int(total_traces),
+        "total_observations_24h": int(total_observations or 0),
         "snapshot_category_split": snapshot_cat_counts,
         "snapshot_top_tagged_reasons": [
             {"reason": r, "count": c} for r, c in top_reasons
@@ -3231,26 +3251,35 @@ def _build_digest_ops_stripe_text(
         p90_ms = student.get("p90")
         ttft_str = f"student TTFT p90 {_fmt_ms_as_seconds(p90_ms)} ({d_model})"
 
-    # Error rate: langfuse_errors_total / total_traces_24h. Compare to
-    # yesterday's same ratio to render an arrow.
+    # Error rate: langfuse_errors_total / total_observations_24h. The numerator
+    # is a count of error *observation spans* (one trace fans out into many
+    # observations), so the denominator must be observations too. Using traces
+    # here yields >100% on any normal day. If observations isn't in the
+    # snapshot (older snapshot or fetch failed), fall back to a raw count
+    # display rather than a misleading percentage.
     errs_today = float((today_summary or {}).get("langfuse_errors_total") or 0.0)
-    traces_today = float((today_summary or {}).get("total_traces_24h") or 0.0)
+    obs_today = float((today_summary or {}).get("total_observations_24h") or 0.0)
     err_rate_today: Optional[float] = (
-        (errs_today / traces_today * 100.0) if traces_today > 0 else None
+        (errs_today / obs_today * 100.0) if obs_today > 0 else None
     )
     err_rate_yest: Optional[float] = None
     if isinstance(yesterday_snapshot, dict):
         ey = float(yesterday_snapshot.get("langfuse_errors_total") or 0.0)
-        ty = float(yesterday_snapshot.get("total_traces_24h") or 0.0)
-        if ty > 0:
-            err_rate_yest = ey / ty * 100.0
+        oy = float(yesterday_snapshot.get("total_observations_24h") or 0.0)
+        if oy > 0:
+            err_rate_yest = ey / oy * 100.0
     arrow = ""
     if err_rate_today is not None and err_rate_yest is not None:
         diff = err_rate_today - err_rate_yest
         if abs(diff) >= 0.05:
             arrow = " ▲" if diff > 0 else " ▼"
     if err_rate_today is None:
-        err_str = "errors n/a"
+        # No observations denominator available, fall back to raw count so the
+        # reader still sees something useful instead of "n/a".
+        if errs_today > 0:
+            err_str = f"errors {int(errs_today):,} (24h)"
+        else:
+            err_str = "errors n/a"
     else:
         err_str = f"errors {err_rate_today:.1f}%{arrow}"
 
@@ -3485,6 +3514,10 @@ def main() -> int:
     _assert_langfuse_or_exit(errors_ok, "fetch_langfuse_errors")
     total_traces, traces_ok = fetch_langfuse_traces_total()
     _assert_langfuse_or_exit(traces_ok, "fetch_langfuse_traces_total")
+    # Total observations, used as the denominator for the error-rate stripe.
+    # Best-effort: if the fetch fails the stripe falls back to a raw error
+    # count, so we don't gate the whole digest on this.
+    total_observations, _obs_ok = fetch_langfuse_observations_total()
 
     # Cost + latency are BEST-EFFORT, sourced from cdp.central.silver_stream_logs
     # via Metabase /api/dataset. Never gated by the strict Langfuse fail-fast.
@@ -3583,6 +3616,7 @@ def main() -> int:
         score_items=score_items,
         dv_in_sample=dv_in_sample,
         total_traces=total_traces,
+        total_observations=total_observations,
         dump_rows=dump_rows,
         academic_rows=academic_rows,
         non_academic_rows=nonacademic_rows,
