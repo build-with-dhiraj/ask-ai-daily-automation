@@ -1,4 +1,4 @@
-"""Cost & Latency section unit tests — stream_logs (Metabase) source.
+"""Cost & Latency section unit tests , stream_logs (Metabase) source.
 
 This file used to cover the Langfuse-Metrics-API-backed implementation. As of
 the `feat/digest-cost-latency` refactor, the section's data source is
@@ -7,15 +7,15 @@ yesterday-only shape (no day-on-day deltas) and three TTFT views per answer
 model (server / student / llm-only) plus an aggregate classifier row.
 
 Covers:
-  • metabase_client.run_native_query — body shape, header, retry on 5xx,
+  • metabase_client.run_native_query , body shape, header, retry on 5xx,
     no-retry on 4xx, row-zipping from cols+rows
-  • fetch_yesterday_cost_and_latency_from_stream_logs — shape mapping
-  • fmt_cost_and_latency — full-data render, single-model, zero-data,
+  • fetch_yesterday_cost_and_latency_from_stream_logs , shape mapping
+  • fmt_cost_and_latency , full-data render, single-model, zero-data,
     classifier-only-no-answers
-  • _summarise_today_for_snapshot — new shape preserved through snapshot
+  • _summarise_today_for_snapshot , new shape preserved through snapshot
 
 All tests are pure: `urllib.request.urlopen` is patched whenever HTTP is
-exercised — no live Metabase calls.
+exercised , no live Metabase calls.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ def _dataset_response(cols_rows):
 class TestMetabaseClientRunNativeQuery(unittest.TestCase):
     def setUp(self):
         # Env reads are per-call (no module-level capture), so a simple import
-        # is enough — no reload workaround needed.
+        # is enough , no reload workaround needed.
         import metabase_client
         self.mc = metabase_client
 
@@ -148,7 +148,7 @@ class TestMetabaseClientRunNativeQuery(unittest.TestCase):
                 )
         self.assertEqual(rows, [{"c": 7}])
         # N8: prevent a future refactor from silently mutating `body` between
-        # retries — second attempt must send byte-identical bytes.
+        # retries , second attempt must send byte-identical bytes.
         self.assertEqual(len(sent_bodies), 2)
         self.assertEqual(sent_bodies[0], sent_bodies[1])
 
@@ -213,7 +213,7 @@ class TestMetabaseClientApiKeyGuard(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 2. fetch_yesterday_cost_and_latency_from_stream_logs — shape mapping
+# 2. fetch_yesterday_cost_and_latency_from_stream_logs , shape mapping
 # ---------------------------------------------------------------------------
 
 
@@ -367,7 +367,7 @@ class TestFetchYesterdayMixedFailure(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 3. fmt_cost_and_latency — render shapes
+# 3. fmt_cost_and_latency , render shapes
 # ---------------------------------------------------------------------------
 
 
@@ -494,7 +494,7 @@ class TestFmtCostAndLatencyFullData(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4. _summarise_today_for_snapshot — new shape
+# 4. _summarise_today_for_snapshot , new shape
 # ---------------------------------------------------------------------------
 
 
@@ -563,7 +563,7 @@ class TestBuildBlocksDefensive(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6. _yesterday_utc_window output format — regression guard
+# 6. _yesterday_utc_window output format , regression guard
 # ---------------------------------------------------------------------------
 
 
@@ -662,7 +662,7 @@ class TestFetchFeedbackBreakdownShape(unittest.TestCase):
         dv = bm["gpt-4.1"]["downvote"]
         self.assertAlmostEqual(dv["cost_per_response"], 31.00 / 2376, places=8)
         # Only two buckets emitted for gemini (empty upvote is NOT
-        # synthesised at the fetcher layer — renderer's job).
+        # synthesised at the fetcher layer , renderer's job).
         self.assertEqual(
             set(bm["gemini-3-flash-preview"].keys()), {"no_vote", "downvote"}
         )
@@ -676,7 +676,7 @@ class TestFetchFeedbackBreakdownShape(unittest.TestCase):
         self.assertEqual(out["by_model"], {})
 
     def test_fetcher_4xx_returns_ok_false(self):
-        """4xx never retries — single HTTP call, fetcher reports failure
+        """4xx never retries , single HTTP call, fetcher reports failure
         without exception escaping to the caller."""
         digest = _load_digest()
         err_4xx = urllib.error.HTTPError(
@@ -744,7 +744,7 @@ _FEEDBACK_BY_MODEL_FULL = {
     "gemini-3-flash-preview": {
         "no_vote":  {"count": 19500, "student_ttft_p50_ms": 6200.0, "cost_usd": 173.50, "cost_per_response": 173.50 / 19500},
         "downvote": {"count": 500,   "student_ttft_p50_ms": 6700.0, "cost_usd": 4.49,   "cost_per_response": 4.49 / 500},
-        # upvote bucket missing → renderer must synthesise `0 · — · —`.
+        # upvote bucket missing → renderer must synthesise `0 · n/a · n/a`.
     },
 }
 
@@ -782,7 +782,7 @@ class TestFmtCostAndLatencyWithEnrichments(unittest.TestCase):
         }
         body = digest.fmt_cost_and_latency(data)
         # Sub-block heading + intro text.
-        self.assertIn("Feedback breakdown — answer models only", body)
+        self.assertIn("Feedback breakdown · answer models only", body)
         # Code fence present.
         self.assertIn("```", body)
         # Both models appear in the table.
@@ -791,8 +791,8 @@ class TestFmtCostAndLatencyWithEnrichments(unittest.TestCase):
         # Count, ttft, $/req all rendered for upvote bucket of gpt-4.1.
         self.assertIn("1,200", body)
         self.assertIn("5800ms", body)
-        # gemini has empty upvote bucket → must show `0 · — · —`.
-        self.assertIn("0 · — · —", body)
+        # gemini has empty upvote bucket → must show `0 · n/a · n/a`.
+        self.assertIn("0 · n/a · n/a", body)
         # Bucket header order locked: upvote → no_vote → downvote.
         # Find the table line containing the column headers.
         table_start = body.index("```")
@@ -821,16 +821,16 @@ class TestFmtCostAndLatencyWithEnrichments(unittest.TestCase):
         # Italic unavailable line shown.
         self.assertIn("Feedback breakdown unavailable", body)
         # No code fence / no table header.
-        self.assertNotIn("Feedback breakdown — answer models only", body)
+        self.assertNotIn("Feedback breakdown · answer models only", body)
         self.assertNotIn("```", body)
         # Per-response cost additions still present.
         self.assertIn("/req", body)
 
     def test_feedback_empty_dict_when_ok_suppresses_block_cleanly(self):
         """If `ok=True` but `by_model` is empty (no qualifying rows
-        yesterday — extremely unlikely but possible if there's literally
+        yesterday , extremely unlikely but possible if there's literally
         zero traffic): suppress the entire sub-block silently. No
-        "unavailable" line — that's misleading."""
+        "unavailable" line , that's misleading."""
         digest = _load_digest()
         data = json.loads(json.dumps(_FULL_DATA))
         for model, m in data["answer_by_model"].items():
@@ -957,7 +957,7 @@ class TestCostLatencySectionSizeGuard(unittest.TestCase):
 
     def test_short_render_stays_single_section(self):
         """Regression guard: when the body is well under the limit
-        (common case — few models, no feedback table), don't split."""
+        (common case , few models, no feedback table), don't split."""
         digest = _load_digest()
         data = {
             "ok": True,
@@ -973,7 +973,7 @@ class TestCostLatencySectionSizeGuard(unittest.TestCase):
                 },
             },
             "classifier": None,
-            # No feedback breakdown at all — keep it short.
+            # No feedback breakdown at all , keep it short.
         }
         blocks = digest.build_blocks(
             academic_rows=None, nonacademic_rows=None, dump_rows=None,

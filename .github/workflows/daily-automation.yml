@@ -2,7 +2,7 @@
 # Passes eval snapshot JSON via artifact so digest always sees formatting_hotspot_chapters
 # even when eval and digest land on different self-hosted runners.
 #
-# Standalone workflows (daily-eval.yml, daily-digest.yml) are workflow_dispatch only — use this for cron.
+# Standalone workflows (daily-eval.yml, daily-digest.yml) are workflow_dispatch only; use this for cron.
 
 name: Daily Automation
 
@@ -19,6 +19,16 @@ on:
         options:
           - 'false'
           - 'true'
+      dry_run:
+        description: 'Dry run: render poster but do NOT push to gh-pages (safety toggle for dogfooding)'
+        required: false
+        default: true
+        type: boolean
+      poster_disable:
+        description: 'Skip the poster pipeline for THIS run only (incident kill-switch, per-run scope). For a sticky rollback across all runs, set the repo variable POSTER_DISABLE=1 instead, see docs/runbooks/poster-rollback.md.'
+        required: false
+        default: false
+        type: boolean
 
 # Single-queue across Daily Automation + Daily Eval + Daily Digest so the one
 # self-hosted Mac runner never has overlapping work. A second dispatch QUEUES;
@@ -32,7 +42,7 @@ jobs:
     name: Daily Eval
     runs-on: self-hosted
     # Hard cap for the WHOLE job (all steps). Must exceed EVAL_MAX_RUNTIME_SEC/60 plus Metabase,
-    # finalize, Langfuse flush, normalize, and artifact upload—or GitHub ends the job and
+    # finalize, Langfuse flush, normalize, and artifact upload-or GitHub ends the job and
     # upload-artifact fails with: (403) Forbidden: job is completed.
     timeout-minutes: 600
     steps:
@@ -69,11 +79,11 @@ jobs:
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
           # SDK HTTP timeout (seconds). Default is 5s, which is too tight under
-          # transient Langfuse Cloud slowness — bump to 20s. Applies to score
+          # transient Langfuse Cloud slowness; bump to 20s. Applies to score
           # REST writes (OTLP export is disabled below).
           # Bumped 20 → 120s: SDK HTTP timeout for score REST writes. The
           # previous 20s was tight enough that incident-day Langfuse Cloud
-          # slowness (60–90s p95) caused score-write retries to compound.
+          # slowness (60-90s p95) caused score-write retries to compound.
           LANGFUSE_TIMEOUT: "120"
           # Disable the SDK's auto-initialised OTLP trace exporter. We never call
           # @observe() so it produces no useful signal, only "Failed to export
@@ -92,8 +102,19 @@ jobs:
           JUDGE_CONCURRENCY: "16"
           # 0 = no soft cap; run until all rows judged. The job's timeout-minutes: 600
           # (10h) above is the runaway backstop, not a target. Previously 14400 (4h),
-          # but daily-eval has no hard duration requirement — let it run to completion.
+          # but daily-eval has no hard duration requirement; let it run to completion.
           EVAL_MAX_RUNTIME_SEC: "0"
+          # Poster publish gating (parity with the digest job below). The eval
+          # job posts the scoreboard poster, so it needs the same gh-pages
+          # push toggle. Without this the eval-job poster render would always
+          # treat itself as dry_run and never publish.
+          POSTER_AUTO_PUSH: ${{ (github.event_name == 'schedule' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+          # Per-run poster kill-switch (SRE items 3+8). The repo-variable form
+          # (vars.POSTER_DISABLE) is sticky and slow to flip back, so we also
+          # honour a workflow_dispatch input: a single dispatch can skip the
+          # poster path without leaving the kill-switch armed for tomorrow.
+          # See docs/runbooks/poster-rollback.md.
+          POSTER_DISABLE: ${{ github.event.inputs.poster_disable == 'true' && '1' || vars.POSTER_DISABLE || '' }}
 
       # Guarantee a digest-readable JSON on disk so the artifact is never stale/missing keys
       # (digest C12 + upload both rely on this path).
@@ -164,7 +185,7 @@ jobs:
       JUDGE_CONCURRENCY: "8"
       # NOTE: the classifier imports `get_openai_client` from judge_runner, which
       # reads JUDGE_HTTP_TIMEOUT_SEC (NOT the FEEDBACK_* var, which is currently
-      # dead — see daily_feedback_classifier._http_timeout_sec). The 240s default
+      # dead; see daily_feedback_classifier._http_timeout_sec). The 240s default
       # in judge_runner was effectively in force here; we now make it explicit
       # at 300s so the classifier matches eval-job semantics.
       JUDGE_HTTP_TIMEOUT_SEC: "300"
@@ -205,9 +226,9 @@ jobs:
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
-      # SDK HTTP timeout (seconds) — see eval job env above for rationale.
+      # SDK HTTP timeout (seconds); see eval job env above for rationale.
       LANGFUSE_TIMEOUT: "120"
-      # Disable OTLP trace exporter — see eval job env above for rationale.
+      # Disable OTLP trace exporter; see eval job env above for rationale.
       LANGFUSE_TRACING_ENABLED: "false"
       SLACK_WEBHOOK_URL: ${{ (github.event_name == 'schedule' || github.event.inputs.force_prod_slack == 'true') && secrets.SLACK_WEBHOOK_URL || secrets.SLACK_WEBHOOK_URL_TEST }}
       SLACK_TARGET: ${{ (github.event_name == 'schedule' || github.event.inputs.force_prod_slack == 'true') && 'prod' || 'staging' }}
@@ -216,17 +237,26 @@ jobs:
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
       # Phase 1 digest restructure: digest now calls Azure OpenAI gpt-4.1 for the
       # "Top 3 Insights" section. Wired here using the same secret names already
-      # in flight on the eval and classifier jobs above — no new secrets needed.
+      # in flight on the eval and classifier jobs above; no new secrets needed.
       # The LLM call is best-effort: any Azure failure falls back to a
       # placeholder ("(insights unavailable today)") and the digest still posts.
       AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
       AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_API_KEY }}
       DEPLOYMENT_NAME: ${{ secrets.DEPLOYMENT_NAME }}
       # Flipped 1 → 0 (2026-05-12): the strict gate was the proximate cause of
-      # yesterday's silent miss — one slow Langfuse page fail-fasted the whole
+      # yesterday's silent miss; one slow Langfuse page fail-fasted the whole
       # job. We now PREFER a degraded Slack post (with `_fetch failed_` filler)
       # over no post. Worst-case landing slips from ~10:00 IST to ~11:30 IST.
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
+      # Poster publish gating (C1.3d):
+      # - scheduled run            → push posters to origin/gh-pages
+      # - workflow_dispatch + dry_run=true (default) → render locally only, NO push
+      # - workflow_dispatch + dry_run=false           → push posters (dogfooding "for real")
+      # `github.event.inputs.dry_run` is the literal string "true"/"false" for booleans.
+      POSTER_AUTO_PUSH: ${{ (github.event_name == 'schedule' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
+      # Per-run poster kill-switch (SRE items 3+8). See eval job above for the
+      # full rationale; mirrored here so both surfaces honour the same flag.
+      POSTER_DISABLE: ${{ github.event.inputs.poster_disable == 'true' && '1' || vars.POSTER_DISABLE || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -249,7 +279,7 @@ jobs:
             cp "$src" "/tmp/daily_feedback_classifications.json"
             echo "[info] Classifier snapshot placed at /tmp/daily_feedback_classifications.json"
           else
-            echo "[info] No classifier snapshot — digest will skip the new section"
+            echo "[info] No classifier snapshot; digest will skip the new section"
           fi
 
       - name: Download eval summary
@@ -283,7 +313,7 @@ jobs:
             cp "$src" "/tmp/daily_digest_yesterday_summary.json"
             echo "[info] Yesterday's digest snapshot placed at /tmp/daily_digest_yesterday_summary.json"
           else
-            echo "[info] No yesterday digest snapshot — Top 3 Insights will use first-run placeholder"
+            echo "[info] No yesterday digest snapshot; Top 3 Insights will use first-run placeholder"
           fi
 
       - name: Verify behaviour Metabase env (values not printed)
@@ -309,7 +339,26 @@ jobs:
         # The digest itself uses only stdlib for HTTP, but the new Top 3 Insights
         # section calls Azure OpenAI via the same `openai` SDK already used by
         # eval/classifier. Install matches the eval job's `pip3 install openai langfuse`.
-        run: pip3 install openai langfuse
+        # `playwright` (pinned in requirements.txt) is added for C1.2b poster
+        # rendering (headless Chromium PNG). openai/langfuse stay inline to match
+        # the eval job's install for parity.
+        run: |
+          pip3 install openai langfuse
+          pip3 install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        # First Chromium install is ~60-120s and ~170 MB. Cache it across runs
+        # keyed on requirements.txt so it only re-downloads when deps move.
+        # Path is macOS-specific (self-hosted runner is a Mac).
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        # No `--with-deps` on macOS: that flag invokes apt-get which fails on Mac.
+        # macOS already has the system libs Chromium needs.
+        run: python3 -m playwright install chromium
 
       - name: Run daily digest
         shell: bash

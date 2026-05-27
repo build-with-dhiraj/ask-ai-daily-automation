@@ -2,12 +2,12 @@
 #
 # Network checklist if Metabase fails with curl (28) connection timed out:
 #   1. Metabase must listen on a URL reachable from the PUBLIC internet (or allowlisted below).
-#   2. Corporate VPN: GitHub-hosted runners are NOT on your VPN — use self-hosted runner or VPN gateway.
+#   2. Corporate VPN: GitHub-hosted runners are NOT on your VPN; use self-hosted runner or VPN gateway.
 #   3. Firewall / WAF / IP allowlist: allow GitHub Actions egress IPs → https://api.github.com/meta (key "actions")
 #   4. DNS: runner must resolve your hostname (see "Network diagnostics" in logs).
 #   5. TLS: some proxies need SNI; curl uses HTTPS by default.
 #
-# Timeouts (seconds) — tune via env on this job. Card query can be very slow; default max is 2 hours.
+# Timeouts (seconds); tune via env on this job. Card query can be very slow; default max is 2 hours.
 #
 # Repo → Settings → Secrets and variables → Actions
 
@@ -26,11 +26,11 @@ jobs:
       METABASE_URL: ${{ secrets.METABASE_URL }}
       METABASE_API_KEY: ${{ secrets.METABASE_API_KEY }}
       METABASE_SMOKE_CARD_ID: "24973"
-      # Seconds — TCP connect wait per curl(1) --connect-timeout
+      # Seconds; TCP connect wait per curl(1) --connect-timeout
       MB_CONNECT_TIMEOUT_SEC: "90"
-      # Seconds — full request budget for GET /api/user/current
+      # Seconds; full request budget for GET /api/user/current
       MB_USER_MAX_SEC: "120"
-      # Seconds — full request budget for POST card query (heavy questions); 7200 = 120 minutes
+      # Seconds; full request budget for POST card query (heavy questions); 7200 = 120 minutes
       MB_CARD_MAX_SEC: "7200"
     steps:
       - name: Probe Metabase API
@@ -58,7 +58,7 @@ jobs:
           if timeout 15 bash -c "echo >/dev/tcp/${host_try}/443" 2>/dev/null; then
             echo "TCP connect to ${host_try}:443 succeeded from runner."
           else
-            echo "TCP connect to ${host_try}:443 failed or timed out — firewall, VPN-only service, or no listener on public internet."
+            echo "TCP connect to ${host_try}:443 failed or timed out; firewall, VPN-only service, or no listener on public internet."
             echo "This is separate from HTTP auth; fix path or use self-hosted runner inside your network."
           fi
           echo "::endgroup::"
@@ -72,7 +72,7 @@ jobs:
           set -e
           cat /tmp/curl_tls_err.txt || true
           if [[ "${tls_exit}" != "0" ]]; then
-            echo "(TLS probe non-zero exit ${tls_exit} — often timeout or TLS error; Metabase may still require API path.)"
+            echo "(TLS probe non-zero exit ${tls_exit}; often timeout or TLS error; Metabase may still require API path.)"
           fi
           echo "::endgroup::"
 
@@ -116,7 +116,7 @@ jobs:
           [[ "${code}" == "200" ]] || { echo "::error::Metabase card query HTTP ${code}"; exit 1; }
           echo "::endgroup::"
 
-          echo "OK — Metabase reachable from GitHub-hosted runner."
+          echo "OK; Metabase reachable from GitHub-hosted runner."
 
   langfuse:
     name: Langfuse (GitHub egress)
@@ -157,7 +157,7 @@ jobs:
           set -e
           echo "HTTP ${code:-000} (curl_exit=${curl_exit})"
           if [[ "${curl_exit}" != "0" ]]; then
-            echo "::error::Langfuse curl failed (exit ${curl_exit}) — check host, keys, and network."
+            echo "::error::Langfuse curl failed (exit ${curl_exit}); check host, keys, and network."
             exit 1
           fi
           head -c 400 /tmp/lf_traces.json || true
@@ -165,4 +165,4 @@ jobs:
           [[ "${code}" == "200" ]] || { echo "::error::Langfuse traces HTTP ${code}"; exit 1; }
           echo "::endgroup::"
 
-          echo "OK — Langfuse reachable from GitHub-hosted runner."
+          echo "OK; Langfuse reachable from GitHub-hosted runner."

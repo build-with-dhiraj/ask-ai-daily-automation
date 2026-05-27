@@ -1,0 +1,147 @@
+{#-
+  Daily Digest poster — 640px wide, height grows with content.
+
+  Renders 0..5 insight cards. Quiet-day path: empty insights → calm
+  "no anomalies" panel. Breach path: kill_switch_breach=true draws
+  the red band; the LLM headline is unchanged but framed in red.
+
+  No cost figures, no raw student quotes, no per-chapter downvote
+  rates inside the image (locked plan decision #8).
+-#}
+{% from "_sparkline.html.j2" import sparkline -%}
+{%- set ks = kill_switch_breach -%}
+{%- set topic_palette = {
+  "CLARITY":  {"text": "#1d4ed8", "bg": "#eff6ff", "rail": "#3b82f6"},
+  "LATENCY":  {"text": "#a16207", "bg": "#fefce8", "rail": "#ca8a04"},
+  "FEEDBACK": {"text": "#7c3aed", "bg": "#f5f3ff", "rail": "#8b5cf6"},
+  "COST":     {"text": "#0e7490", "bg": "#ecfeff", "rail": "#06b6d4"},
+  "ACCURACY": {"text": "#15803d", "bg": "#f0fdf4", "rail": "#16a34a"},
+  "USAGE":    {"text": "#be123c", "bg": "#fff1f2", "rail": "#e11d48"}
+} -%}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Daily Digest — {{ date_iso }}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html, body { background: #f1f5f9; }
+  body { font-family: 'Inter', system-ui, sans-serif; font-feature-settings: "ss01","cv11"; -webkit-font-smoothing: antialiased; color: #0f172a; }
+  .mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-feature-settings: "tnum","zero"; font-variant-numeric: tabular-nums; }
+  .display { font-family: 'Inter', system-ui, sans-serif; font-weight: 700; letter-spacing: -0.02em; line-height: 1.18; }
+  .eyebrow { font-family: 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: 0.12em; text-transform: uppercase; font-size: 11px; color: #64748b; }
+  .rule { border-top: 1px solid #e2e8f0; }
+  .rule-thick { border-top: 2px solid #0f172a; }
+  .poster { width: 640px; }
+  .card-rail { width: 3px; }
+</style>
+</head>
+<body class="flex justify-center py-6">
+<article class="poster bg-white shadow-sm" role="article" aria-label="Daily Digest for {{ date_iso }}. {{ headline }}">
+
+  {# ── Masthead ─────────────────────────────────────────────────── #}
+  <header class="px-7 pt-6 pb-4">
+    <div class="flex items-baseline justify-between">
+      <div>
+        <div class="eyebrow">Daily Digest</div>
+        <div class="mt-1 mono text-[15px] text-slate-600">{{ date_human }}</div>
+      </div>
+      <div class="text-right">
+        <div class="eyebrow">Section</div>
+        <div class="mono text-[15px] text-slate-900">📰 Today’s story</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="px-7"><div class="rule-thick"></div></div>
+
+  {# ── Kill-switch / calm band ──────────────────────────────────── #}
+  {% if ks %}
+  <div class="mx-7 mt-4 mb-3 flex items-center gap-3 bg-red-50 border border-red-200 px-4 py-3" role="alert" aria-label="Kill-switch breached">
+    <span aria-hidden="true" class="text-[15px]">🔴</span>
+    <span class="mono text-[12px] tracking-widest uppercase text-red-700 font-semibold">Safety floor breached</span>
+  </div>
+  {% else %}
+  <div class="mx-7 mt-4 mb-3 flex items-center gap-3 bg-slate-50 border border-slate-200 px-4 py-2.5">
+    <span aria-hidden="true" class="text-[13px]">—</span>
+    <span class="mono text-[11px] tracking-widest uppercase text-slate-500">Safety floor holding</span>
+  </div>
+  {% endif %}
+
+  {# ── Headline + subhead ───────────────────────────────────────── #}
+  <h1 class="display px-7 pt-2 text-[26px] {{ 'text-red-900' if ks else 'text-slate-900' }}">{{ headline }}</h1>
+  {% if subhead %}
+  <p class="px-7 pt-3 pb-5 text-[15px] leading-relaxed text-slate-600">{{ subhead }}</p>
+  {% else %}
+  <div class="pb-5"></div>
+  {% endif %}
+
+  <div class="px-7"><div class="rule"></div></div>
+
+  {# ── Insights section ─────────────────────────────────────────── #}
+  {% if insights and insights|length > 0 %}
+  <section class="px-7 pt-5 pb-2" aria-label="Insights, {{ insights|length }} items">
+    <div class="flex items-center justify-between mb-4">
+      <span class="eyebrow">💡 Insights ({{ insights|length }})</span>
+      <span class="mono text-[11px] text-slate-500">ranked by signal</span>
+    </div>
+
+    <ul class="space-y-3" role="list">
+      {% for ins in insights %}
+      {%- set pal = topic_palette.get(ins.topic_label, topic_palette["USAGE"]) -%}
+      <li class="border border-slate-200 bg-white" aria-label="Insight {{ loop.index }}: {{ ins.topic_label }}. {{ ins.claim }}">
+        <div class="flex">
+          <div class="card-rail" style="background: {{ pal.rail }};" aria-hidden="true"></div>
+          <div class="flex-1 px-4 py-3.5">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <span class="mono text-[10px] font-semibold tracking-widest uppercase" style="color: {{ pal.text }};">
+                  <span class="mono text-slate-400 mr-1">{{ "%02d"|format(loop.index) }}</span>{{ ins.topic_label }}
+                </span>
+                <span aria-hidden="true" class="text-[13px]">{{ ins.icon }}</span>
+              </div>
+              {% if ins.spark_series %}
+              <span aria-hidden="true">
+                {{ sparkline(spark_series=ins.spark_series, width=96, height=20, stroke=pal.text, fill=none, last_dot=true, label=ins.topic_label ~ " 14-day trend") }}
+              </span>
+              {% endif %}
+            </div>
+            <p class="text-[15px] leading-snug text-slate-900 font-medium">{{ ins.claim }}</p>
+            <p class="text-[13px] leading-snug text-slate-600 mt-1.5">{{ ins.evidence }}</p>
+            {% if ins.context %}
+            <p class="text-[12px] leading-snug text-slate-500 mt-1.5 italic">{{ ins.context }}</p>
+            {% endif %}
+          </div>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% else %}
+  {# ── Quiet-day fallback ─────────────────────────────────────── #}
+  <section class="px-7 pt-6 pb-8" aria-label="No anomalies today">
+    <div class="flex items-center justify-between mb-4">
+      <span class="eyebrow">💡 Insights (0)</span>
+      <span class="mono text-[11px] text-slate-500">quiet day</span>
+    </div>
+    <div class="border border-slate-200 bg-slate-50 px-5 py-6 text-center">
+      <div class="display text-[18px] text-slate-900 mb-1">No anomalies today</div>
+      <div class="text-[13px] text-slate-600">All metrics within band — see thread for the full table.</div>
+    </div>
+  </section>
+  {% endif %}
+
+  <div class="px-7"><div class="rule"></div></div>
+
+  {# ── Brand mark ──────────────────────────────────────────────── #}
+  <footer class="px-7 py-4 flex items-center justify-between">
+    <div class="eyebrow text-slate-500">{{ brand_mark }}</div>
+    <div class="mono text-[10px] text-slate-400">{{ date_iso }}</div>
+  </footer>
+
+</article>
+</body>
+</html>

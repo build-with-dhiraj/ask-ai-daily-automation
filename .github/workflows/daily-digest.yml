@@ -1,8 +1,8 @@
-# Daily Digest — requires these Actions *repository* secrets (names must match exactly):
+# Daily Digest; requires these Actions *repository* secrets (names must match exactly):
 #   METABASE_URL, METABASE_API_KEY
 #   LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST
 #   SLACK_WEBHOOK_URL
-# Optional Metabase card ids (digits only in secrets — canonical PW prod questions):
+# Optional Metabase card ids (digits only in secrets; canonical PW prod questions):
 #   METABASE_BEHAVIOR_FOLLOWUP_CARD_ID → 33282
 #     https://metabase-prod.penpencil.co/question/33282-metabase-behavior-followup-card
 #   METABASE_BEHAVIOR_REPHRASE_CARD_ID → 33283
@@ -16,6 +16,17 @@ name: Daily Digest
 on:
   # Schedule moved to daily-automation.yml. Use workflow_dispatch for ad-hoc runs.
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: render poster but do NOT push to gh-pages (safety toggle for dogfooding)'
+        required: false
+        default: true
+        type: boolean
+      poster_disable:
+        description: 'Skip the poster pipeline for THIS run only (incident kill-switch, per-run scope). For a sticky rollback across all runs, set the repo variable POSTER_DISABLE=1 instead, see docs/runbooks/poster-rollback.md.'
+        required: false
+        default: false
+        type: boolean
 
 # Shares the queue with daily-automation.yml + daily-eval.yml so the single
 # self-hosted Mac runner never has two of these in flight at once. A second
@@ -27,7 +38,7 @@ concurrency:
 jobs:
   digest:
     runs-on: self-hosted
-    # Bumped 180 → 240 to match daily-automation.yml — accommodates the new
+    # Bumped 180 → 240 to match daily-automation.yml; accommodates the new
     # retry-tail budget across Metabase + Langfuse + Slack.
     timeout-minutes: 240
     env:
@@ -52,7 +63,7 @@ jobs:
       METABASE_BEHAVIOR_REPHRASE_CARD_ID: ${{ secrets.METABASE_BEHAVIOR_REPHRASE_CARD_ID }}
       METABASE_STREAM_LOGS_CARD_ID: ${{ secrets.METABASE_STREAM_LOGS_CARD_ID }}
       # Phase 1 digest restructure: digest now calls Azure OpenAI gpt-4.1 for the
-      # "Top 3 Insights" section. Same secret names as eval/classifier — no new
+      # "Top 3 Insights" section. Same secret names as eval/classifier; no new
       # secrets needed. The LLM call is best-effort; any failure falls back to
       # a placeholder and the digest still posts.
       AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
@@ -61,6 +72,15 @@ jobs:
       # Flipped 1 → 0 (2026-05-12): degraded post is preferred over silent miss.
       # Mirrors the change in daily-automation.yml; see commentary there.
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
+      # Poster publish gating (C1.3d): this workflow is workflow_dispatch only,
+      # so dry_run=true (default) keeps posters local. Set dry_run=false to push.
+      POSTER_AUTO_PUSH: ${{ github.event.inputs.dry_run == 'false' && '1' || '0' }}
+      # Per-run poster kill-switch (SRE items 3+8). The repo-variable form
+      # (vars.POSTER_DISABLE) is sticky and slow to flip back, so we also
+      # honour a workflow_dispatch input: a single dispatch can skip the
+      # poster path without leaving the kill-switch armed for tomorrow.
+      # See docs/runbooks/poster-rollback.md.
+      POSTER_DISABLE: ${{ github.event.inputs.poster_disable == 'true' && '1' || vars.POSTER_DISABLE || '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -102,14 +122,31 @@ jobs:
             cp "$src" "/tmp/daily_digest_yesterday_summary.json"
             echo "[info] Yesterday's digest snapshot placed at /tmp/daily_digest_yesterday_summary.json"
           else
-            echo "[info] No yesterday digest snapshot — Top 3 Insights will use first-run placeholder"
+            echo "[info] No yesterday digest snapshot; Top 3 Insights will use first-run placeholder"
           fi
 
       - name: Install Python deps for Top 3 Insights LLM call
         # Phase 1 digest restructure: digest now uses the openai SDK for Azure
         # OpenAI gpt-4.1 calls (Top 3 Insights). Mirrors the install in
         # daily-automation.yml's eval job.
-        run: pip3 install openai langfuse
+        # `playwright` (pinned in requirements.txt) is added for C1.2b poster
+        # rendering (headless Chromium PNG).
+        run: |
+          pip3 install openai langfuse
+          pip3 install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        # First Chromium install is ~60-120s and ~170 MB. Cache it across runs
+        # keyed on requirements.txt so it only re-downloads when deps move.
+        # Path is macOS-specific (self-hosted runner is a Mac).
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        # No `--with-deps` on macOS: that flag invokes apt-get which fails on Mac.
+        run: python3 -m playwright install chromium
 
       - name: Run daily digest
         run: python3 daily_digest.py

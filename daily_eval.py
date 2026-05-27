@@ -1,5 +1,5 @@
 """
-Daily eval orchestrator — runs every morning, posts a single Slack message
+Daily eval orchestrator: runs every morning, posts a single Slack message
 that complements (does NOT touch) the existing Cowork daily digest.
 
 Pipeline:
@@ -22,23 +22,23 @@ Required env (set in Cowork SKILL.md or shell before invoking):
   AZURE_API_VERSION
   DEPLOYMENT_NAME
   METABASE_URL                # e.g. https://metabase-prod.penpencil.co
-  METABASE_API_KEY            # preferred — use for SSO accounts (X-Api-Key auth)
-  METABASE_USERNAME           # fallback — only needed when METABASE_API_KEY is not set
-  METABASE_PASSWORD           # fallback — only needed when METABASE_API_KEY is not set
+  METABASE_API_KEY            # preferred, use for SSO accounts (X-Api-Key auth)
+  METABASE_USERNAME           # fallback, only needed when METABASE_API_KEY is not set
+  METABASE_PASSWORD           # fallback, only needed when METABASE_API_KEY is not set
   METABASE_QUESTION_ID        # the saved question id for daily_stratified_sample.sql
-  LANGFUSE_PUBLIC_KEY         # optional — enables score writes + tracing
+  LANGFUSE_PUBLIC_KEY         # optional, enables score writes + tracing
   LANGFUSE_SECRET_KEY         # optional
   LANGFUSE_HOST               # optional (default https://cloud.langfuse.com)
   SLACK_WEBHOOK_URL           # the incoming-webhook for the eval channel
                               # (separate from the existing digest channel,
-                              # OR same channel — your call)
-  JUDGE_HTTP_TIMEOUT_SEC      # optional — per LLM call HTTP timeout (default 240s;
+                              # OR same channel, your call)
+  JUDGE_HTTP_TIMEOUT_SEC      # optional, per LLM call HTTP timeout (default 240s;
                               # prevents one hung Azure request from stalling the whole run)
-  METABASE_QUERY_TIMEOUT_SEC  # optional — Metabase card query HTTP timeout (default 600s;
+  METABASE_QUERY_TIMEOUT_SEC  # optional, Metabase card query HTTP timeout (default 600s;
                               # prevents socket timeout if stratified sample query is slow)
-  JUDGE_CONCURRENCY           # optional — concurrent LLM judges (default 1; e.g. 8 in CI)
-  JUDGE_CHUNK_SIZE            # optional — samples per ThreadPool batch (default max(32, 4×concurrency))
-  EVAL_MAX_RUNTIME_SEC        # optional — soft time budget; stop between chunks & finalize (graceful vs SIGKILL)
+  JUDGE_CONCURRENCY           # optional, concurrent LLM judges (default 1; e.g. 8 in CI)
+  JUDGE_CHUNK_SIZE            # optional, samples per ThreadPool batch (default max(32, 4×concurrency))
+  EVAL_MAX_RUNTIME_SEC        # optional, soft time budget; stop between chunks & finalize (graceful vs SIGKILL)
 
 Usage:
   # Full daily run (Metabase pull → judge → Slack post)
@@ -70,12 +70,12 @@ from concurrent.futures import (
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urljoin
 
 
 # ---------------------------------------------------------------------------
-# Idempotency guard — prevents duplicate eval Slack posts on the same UTC day.
+# Idempotency guard: prevents duplicate eval Slack posts on the same UTC day.
 # Mirrors the guard in daily_digest.py. Marker is written ONLY after a
 # successful Slack post so failed posts can be retried. FORCE_REPOST=1
 # bypasses (debugging only).
@@ -151,7 +151,7 @@ _SIGTERM_REQUESTED = threading.Event()
 
 def _handle_sigterm(_signum: int, _frame: Any) -> None:
     print(
-        "\n⚠️  SIGTERM received — finishing current chunk, then finalizing.",
+        "\n⚠️  SIGTERM received, finishing current chunk, then finalizing.",
         file=sys.stderr,
     )
     _SIGTERM_REQUESTED.set()
@@ -319,7 +319,7 @@ def _metabase_eval_total_attempts() -> int:
     number of TOTAL attempts (not retries-after-the-first). Internally we
     convert to ``max_retries = total - 1`` for the existing range loop.
 
-    Default 5 (i.e. 4 retries) — yields 4 sleeps of 10/20/40/80s = 150s total
+    Default 5 (i.e. 4 retries): yields 4 sleeps of 10/20/40/80s = 150s total
     backoff budget, within the 600-min job cap.
     """
     raw = (os.environ.get("METABASE_EVAL_RETRIES") or "").strip()
@@ -421,6 +421,54 @@ def normalize_metabase_rows(rows: list[dict]) -> list[dict]:
 # Slack post (incoming webhook)
 # ---------------------------------------------------------------------------
 
+def post_blocks_to_slack(
+    webhook_url: str, blocks: list, fallback_text: str, timeout: float = 120.0
+) -> bool:
+    """Block Kit variant of post_to_slack, used by the C1.3 poster pipeline.
+
+    Parallel to post_to_slack(webhook, text) below; the text-only function is
+    preserved for the fallback path and existing tests. Returns True on Slack
+    `ok` body, False on any error or local-shell guard.
+    """
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
+        print(
+            "[info] Not running in GitHub Actions, skipping Slack post.",
+            file=sys.stderr,
+        )
+        return False
+    import urllib.request
+    import urllib.error
+
+    payload = json.dumps({"blocks": blocks, "text": fallback_text}).encode("utf-8")
+    retryable_codes = (429, 502, 503, 504)
+    for attempt in range(2):
+        req = urllib.request.Request(
+            webhook_url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8")
+            if body.strip() == "ok":
+                return True
+            print(f"⚠️  Slack webhook returned non-ok: {body}")
+            return False
+        except urllib.error.HTTPError as exc:
+            if exc.code in retryable_codes and attempt == 0:
+                time.sleep(5)
+                continue
+            print(f"⚠️  Slack webhook HTTP {exc.code}: {exc!r}")
+            return False
+        except urllib.error.URLError as exc:
+            if attempt == 0:
+                time.sleep(5)
+                continue
+            print(f"⚠️  Slack webhook failed after retry: {exc!r}")
+            return False
+    return False
+
+
 def post_to_slack(webhook_url: str, text: str, timeout: float = 120.0) -> bool:
     """Post to Slack incoming webhook with bounded retry. Returns True on success.
 
@@ -442,7 +490,7 @@ def post_to_slack(webhook_url: str, text: str, timeout: float = 120.0) -> bool:
     """
     if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
         print(
-            "[info] Not running in GitHub Actions — skipping Slack post. "
+            "[info] Not running in GitHub Actions, skipping Slack post. "
             "Set GITHUB_ACTIONS=true to override (debugging only).",
             file=sys.stderr,
         )
@@ -480,7 +528,7 @@ def post_to_slack(webhook_url: str, text: str, timeout: float = 120.0) -> bool:
             print(f"⚠️  Slack webhook HTTP {exc.code}: {exc!r}")
             return False
         except urllib.error.URLError as exc:
-            # Treat as pre-send connect/handshake failure — safe to retry.
+            # Treat as pre-send connect/handshake failure, safe to retry.
             # urllib does not distinguish before/after-send for URLError, but a
             # duplicate Slack post on a connect-side flake is the lesser evil
             # vs a silent miss; bounded to 1 retry caps duplicate risk.
@@ -747,7 +795,7 @@ def finalize_eval_run(
         )
 
     resumed_note = (
-        f"   _(resumed, {n_judged_total - n_judged_new} from checkpoint — cost reflects new judgements only)_"
+        f"   _(resumed, {n_judged_total - n_judged_new} from checkpoint, cost reflects new judgements only)_"
         if checkpoint_results
         else ""
     )
@@ -764,7 +812,7 @@ def finalize_eval_run(
         f"   By stratum:\n"
         f"{nl.join(strata_cost_lines)}"
         f"{(nl + resumed_note) if resumed_note else ''}"
-        f"\n❓ *What is this?* <{one_pager}|Eval one-pager — thresholds, cost, Metabase Q33193>\n"
+        f"\n❓ *What is this?* <{one_pager}|Eval one-pager: thresholds, cost, Metabase Q33193>\n"
     )
     if judge_outcome.stopped_reason != "complete":
         cost_footer += (
@@ -832,6 +880,11 @@ def finalize_eval_run(
             "exp_fail_pct": exp_fail_pct_snap,
             "axial_fail_pct": dict(summary.axial_fail_pct),
             "formatting_hotspot_chapters": formatting_hotspot_chapters,
+            # Run cost so the scoreboard Ops stripe can render real numbers
+            # without re-parsing the slack block text.
+            "run_cost_usd": round(float(est_usd), 4),
+            "run_tokens_in": int(in_tok),
+            "run_tokens_out": int(out_tok),
         }
         with open(prev_snapshot_path, "w") as _sf:
             json.dump(summary_snapshot, _sf, indent=2)
@@ -840,6 +893,38 @@ def finalize_eval_run(
         print(f"⚠️  Could not save today's snapshot ({_e}). WoW deltas may be missing tomorrow.")
 
     return block
+
+
+def _build_scoreboard_ops_stripe_text(snapshot: dict) -> str:
+    """Scoreboard Ops stripe one-line body. Shape:
+       `$X.XX run cost · N traces judged · Wilson CI +-X.Xpp on academic`
+
+    Sourced entirely from the eval snapshot (no slack-block re-parsing).
+    """
+    from judge_runner import wilson_ci_pp
+    snap = snapshot or {}
+    cost = float(snap.get("run_cost_usd") or 0.0)
+    n_judged = int(snap.get("n_judged") or 0)
+    n_judgable = int(snap.get("n_judgable") or n_judged)
+    acc_fail = float(snap.get("acc_fail_pct") or 0.0)
+    ci_pp = wilson_ci_pp(acc_fail, n_judgable) if n_judgable else 0.0
+    return (
+        f"   ${cost:.2f} run cost · {n_judged:,} traces judged · "
+        f"Wilson CI ±{ci_pp:.1f}pp on academic"
+    )
+
+
+def _build_scoreboard_safety_stripe_text(snapshot: dict, floor_pct: float = 6.0) -> str:
+    """Scoreboard Safety floor stripe one-line body. Shape:
+       `Academic FAIL X.X% (floor 6%) · Experience FAIL X.X%`
+    """
+    snap = snapshot or {}
+    acc_fail = float(snap.get("acc_fail_pct") or 0.0)
+    exp_fail = float(snap.get("exp_fail_pct") or 0.0)
+    return (
+        f"   Academic FAIL {acc_fail:.1f}% (floor {floor_pct:.0f}%) · "
+        f"Experience FAIL {exp_fail:.1f}%"
+    )
 
 
 def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -> None:
@@ -864,6 +949,9 @@ def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -
         "exp_fail_pct": 0.0,
         "axial_fail_pct": {},
         "formatting_hotspot_chapters": [],
+        "run_cost_usd": 0.0,
+        "run_tokens_in": 0,
+        "run_tokens_out": 0,
         "_eval_note": reason,
     }
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -877,6 +965,12 @@ def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    """Daily eval entry point.
+
+    Poster pipeline is the default per Locked Decision #6 (single design,
+    single ship). Set POSTER_DISABLE=1 only for emergency rollback to the
+    legacy text-only Slack post.
+    """
     p = argparse.ArgumentParser(description="Daily eval orchestrator")
     p.add_argument("--samples", help="Use this samples JSON instead of pulling from Metabase")
     p.add_argument("--dry-run", action="store_true",
@@ -936,7 +1030,7 @@ def main() -> int:
             print(f"⚠️  Could not load previous snapshot ({_e}). First-run mode.")
             prev_snapshot = None
     else:
-        print(f"📈 No previous snapshot at {prev_snapshot_path} — first-run mode (no WoW deltas).")
+        print(f"📈 No previous snapshot at {prev_snapshot_path}, first-run mode (no WoW deltas).")
 
     # Distribution by stratum
     by_strat: dict[str, int] = {}
@@ -1002,7 +1096,7 @@ def main() -> int:
 
     # 5. Slack post
     if args.dry_run:
-        print("(dry-run — skipping Slack post)")
+        print("(dry-run, skipping Slack post)")
         if (
             judge_outcome.stopped_reason == "complete"
             and os.path.exists(checkpoint_file)
@@ -1045,16 +1139,162 @@ def main() -> int:
                 pass
         return 0
 
-    try:
-        posted = post_to_slack(webhook, block)
-    except Exception as e:
-        print(f"❌ Slack post failed: {e}")
-        return 1
+    # C1.3 / Locked Decision #6: Poster pipeline is the DEFAULT (single design,
+    # single ship). The legacy text-only path is reachable only via:
+    #   (a) POSTER_DISABLE=1 (reserved kill-switch for emergency rollback), or
+    #   (b) the try/except fallback below when render or publish fails.
+    # POSTER_DRY_RUN=1 renders but skips the gh-pages push.
+    poster_disabled = os.environ.get("POSTER_DISABLE", "").strip() == "1"
+    posted = False
+    poster_error: Optional[str] = None
+    if poster_disabled:
+        poster_error = "cause=disabled"
+    else:
+        # Recoverable exception types: catching `Exception` here would
+        # swallow NameError / AttributeError / TypeError / KeyError /
+        # ImportError from programming errors and silently degrade to the
+        # legacy fallback, hiding real bugs from CI. Narrow to the set the
+        # render + publish + Slack-post path can actually raise; everything
+        # else propagates so a red CI run surfaces it.
+        import urllib.error as _urllib_error
+        try:
+            from scripts import poster_slack  # type: ignore
+            from scripts.poster_publisher import (  # type: ignore
+                PosterPublishError,
+                PosterPublishUnreachableError,
+            )
+            from scripts.poster_renderer import PosterRenderError  # type: ignore
+        except ImportError as exc:
+            # Module-load failure (missing deps in this environment): not a
+            # programming error, this IS recoverable; degrade to legacy.
+            poster_slack = None  # type: ignore[assignment]
+            poster_error = f"cause=render reason={exc!r}"
+        if poster_slack is not None and poster_error is None:
+            _POSTER_RECOVERABLE: tuple = (
+                PosterRenderError,
+                PosterPublishError,
+                PosterPublishUnreachableError,
+                _urllib_error.HTTPError,
+                _urllib_error.URLError,
+                OSError,
+                TimeoutError,
+                ValueError,
+            )
+            try:
+                # Reload today's snapshot from disk (finalize_eval_run wrote it).
+                today_snap = {}
+                try:
+                    with open(prev_snapshot_path) as _sf:
+                        today_snap = json.load(_sf)
+                except (OSError, ValueError) as exc:
+                    poster_error = f"cause=snapshot reason={exc!r}"
+                # SRE item 9: if the snapshot was cleaned up between
+                # finalize_eval_run and here, today_snap is {} and the poster
+                # would render with all-zero metrics + a green kill-switch
+                # reading: a silent-wrong-output failure. Force degrade up
+                # front with cause=snapshot so the operator sees the cause.
+                # Must-have keys for the scoreboard (consumed by
+                # build_scoreboard_poster_input + the Ops/Safety stripes):
+                _SCOREBOARD_REQUIRED_KEYS = (
+                    "acc_fail_pct",
+                    "exp_fail_pct",
+                    "pass_pct",
+                    "n_judged",
+                )
+                if poster_error is None:
+                    if not today_snap:
+                        poster_error = (
+                            "cause=snapshot reason=snapshot is empty or missing on disk"
+                        )
+                    else:
+                        missing = [
+                            k for k in _SCOREBOARD_REQUIRED_KEYS
+                            if k not in today_snap
+                        ]
+                        if missing:
+                            poster_error = (
+                                "cause=snapshot reason=missing required snapshot keys: "
+                                + ", ".join(missing)
+                            )
+                if poster_error is not None:
+                    image_url = None
+                else:
+                    poster_input = poster_slack.build_scoreboard_poster_input(today_snap)
+                    date_str = today_snap.get("date") or date.today().isoformat()
+                    try:
+                        image_url = poster_slack.render_and_publish(
+                            "scoreboard", poster_input, date_str
+                        )
+                    except _POSTER_RECOVERABLE as exc:
+                        image_url = None
+                        poster_error = poster_error or f"cause=render reason={exc!r}"
+                if image_url is None:
+                    poster_error = poster_error or (
+                        "cause=render reason=render_and_publish returned None"
+                    )
+                else:
+                    alt_text = poster_slack._alt_text_for(poster_input, "scoreboard")
+                    ops_stripe = _build_scoreboard_ops_stripe_text(today_snap)
+                    safety_stripe = _build_scoreboard_safety_stripe_text(today_snap)
+                    blocks: list = [
+                        poster_slack.make_image_block(image_url, alt_text),
+                        poster_slack.make_divider(),
+                        poster_slack.make_section(
+                            f"⚙️ *Ops* (yesterday)\n{ops_stripe}"
+                        ),
+                        poster_slack.make_section(
+                            f"🛟 *Safety floor*\n{safety_stripe}"
+                        ),
+                        poster_slack.make_section("🧵 Full breakdown in thread"),
+                        poster_slack.make_context(poster_slack.scoreboard_footer_links()),
+                    ]
+                    fallback_text = poster_input["headline"]
+                    try:
+                        posted = poster_slack.post_blocks_to_slack(
+                            webhook, blocks, fallback_text
+                        )
+                    except _POSTER_RECOVERABLE as exc:
+                        posted = False
+                        poster_error = poster_error or f"cause=publish reason={exc!r}"
+                    if posted:
+                        # Thread-reply (~2s later) with the full text breakdown.
+                        time.sleep(2)
+                        thread_blocks = [
+                            poster_slack.make_section(
+                                f"🧵 *Deep dive · {date_str}*\n```{block}```"
+                            )
+                        ]
+                        try:
+                            poster_slack.post_blocks_to_slack(
+                                webhook, thread_blocks, "thread"
+                            )
+                        except _POSTER_RECOVERABLE as exc:
+                            print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
+                    elif poster_error is None:
+                        poster_error = "cause=post reason=post_blocks_to_slack returned False"
+            except _POSTER_RECOVERABLE as exc:
+                poster_error = poster_error or f"cause=render reason={exc!r}"
+                print(f"[poster] [warn] pipeline failed: {exc!r}", file=sys.stderr)
+
+    if poster_disabled or poster_error is not None or not posted:
+        if poster_error:
+            print(
+                f"[poster] [warn] degraded {poster_error}",
+                file=sys.stderr,
+            )
+        degraded_block = (
+            "⚠️ Poster degraded (see workflow logs)\n\n" + block
+        )
+        try:
+            posted = post_to_slack(webhook, degraded_block)
+        except Exception as e:
+            print(f"❌ Slack post failed: {e}")
+            return 1
     if not posted:
         # post_to_slack already logged the reason (non-ok body, HTTP error,
         # local-run guard, etc.). Mirror digest behaviour: exit 1 so the
         # workflow surfaces a red run, and DO NOT write the idempotency
-        # marker — that way a same-day re-dispatch can actually retry.
+        # marker, that way a same-day re-dispatch can actually retry.
         print("❌ Slack post did not succeed (see warnings above).")
         return 1
     print("✅ Posted to Slack.")

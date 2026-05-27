@@ -1,0 +1,46 @@
+name: Prune old posters
+
+on:
+  schedule:
+    # Daily at 04:00 UTC (09:30 IST); before the daily eval/digest runs
+    - cron: "0 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+
+      - name: Delete posters older than 90 days
+        id: prune
+        run: |
+          set -euo pipefail
+          deleted=0
+          # -mtime +90 = modified more than 90 days ago
+          while IFS= read -r -d '' f; do
+            echo "deleting: $f"
+            git rm -f "$f"
+            deleted=$((deleted + 1))
+          done < <(find posters -type f -name "*.png" -mtime +90 -print0)
+          echo "deleted=$deleted" >> "$GITHUB_OUTPUT"
+          echo "Pruned $deleted poster(s)."
+
+      - name: Commit and push (if any deletions)
+        if: steps.prune.outputs.deleted != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(gh-pages): prune ${{ steps.prune.outputs.deleted }} poster(s) older than 90 days"
+          git push origin gh-pages
+
+      - name: No-op summary
+        if: steps.prune.outputs.deleted == '0'
+        run: echo "Nothing to prune."
