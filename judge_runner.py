@@ -1,12 +1,12 @@
 """
-v8 Master Judge runner — Ask AI online evaluation.
+v8 Master Judge runner for Ask AI online evaluation.
 
 Runs the locked 5-axial / 18-code rubric against a list of production traces.
 
 Usage:
     # 1) Set keys in env (NEVER paste keys into chat or commit them)
     export OPENAI_API_KEY=sk-...
-    export LANGFUSE_PUBLIC_KEY=pk-lf-...     # optional — enables tracing
+    export LANGFUSE_PUBLIC_KEY=pk-lf-...     # optional, enables tracing
     export LANGFUSE_SECRET_KEY=sk-lf-...     # optional
     export LANGFUSE_HOST=https://cloud.langfuse.com  # optional, default
 
@@ -19,9 +19,10 @@ Usage:
     # 4) Format last results as a Slack-ready rubric block
     python judge_runner.py --slack-block results.json
 
-This is an internal evaluation tool — does NOT touch the production answer pipeline,
-does NOT alter what students see, and does NOT mutate any production system.
-It only reads traces and writes scores to Langfuse (the eval system of record).
+This is an internal evaluation tool. It does NOT touch the production answer
+pipeline, does NOT alter what students see, and does NOT mutate any production
+system. It only reads traces and writes scores to Langfuse (the eval system
+of record).
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Constants — the locked taxonomy (mirrors v8_master_judge_prompt.md)
+# Constants: the locked taxonomy (mirrors v8_master_judge_prompt.md)
 # ---------------------------------------------------------------------------
 
 ACADEMIC_CODES = {"A1", "A2", "A3", "A4", "A5", "A6"}
@@ -83,8 +84,12 @@ DEFAULT_MODEL = "gpt-4.1-2025-04-14"
 
 
 # ---------------------------------------------------------------------------
-# System prompt — kept inline so the script is self-contained
-# Mirrors v8_master_judge_prompt.md "SYSTEM PROMPT" section
+# System prompt: kept inline so the script is self-contained.
+# Mirrors v8_master_judge_prompt.md "SYSTEM PROMPT" section.
+# NOTE: do NOT scrub em-dashes from the SYSTEM_PROMPT literal below; it is a
+# verbatim mirror of the versioned prompt spec and changing punctuation could
+# shift LLM behaviour. The em-dash scrub policy applies to code comments,
+# Slack/operator-facing output, and docstrings only.
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
@@ -207,7 +212,7 @@ Evaluate using the rubric. Output strict JSON.
 
 
 # ---------------------------------------------------------------------------
-# Validation — check the model output before trusting any score
+# Validation: check the model output before trusting any score
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -291,11 +296,11 @@ def validate_judge_output(parsed: dict) -> ValidationResult:
 
 
 # ---------------------------------------------------------------------------
-# OpenAI / Azure OpenAI client — lazy import so --test runs without openai installed
+# OpenAI / Azure OpenAI client (lazy import so --test runs without openai installed).
 #
 # Auto-detection:
-#   • If AZURE_ENDPOINT is set → use AzureOpenAI (PW prod path)
-#   • Else if OPENAI_API_KEY is set → use direct OpenAI
+#   • If AZURE_ENDPOINT is set, use AzureOpenAI (PW prod path).
+#   • Else if OPENAI_API_KEY is set, use direct OpenAI.
 #
 # When Azure is used, the `model` param to chat.completions.create
 # is the Azure DEPLOYMENT_NAME, NOT the underlying model id.
@@ -325,7 +330,7 @@ def get_openai_client():
     )
 
     if _is_azure():
-        # Azure path — used by PW production (Satyam's AzureChatOpenAI).
+        # Azure path (used by PW production, Satyam's AzureChatOpenAI).
         endpoint = os.environ.get("AZURE_ENDPOINT") or os.environ["AZURE_OPENAI_ENDPOINT"]
         api_key = os.environ.get("AZURE_API_KEY") or os.environ.get("AZURE_OPENAI_API_KEY")
         api_version = os.environ.get("AZURE_API_VERSION") or "2024-08-01-preview"
@@ -398,12 +403,12 @@ def _resolve_model_param(requested_model: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Langfuse score writer — push judge verdicts back to the PRODUCTION trace
+# Langfuse score writer: push judge verdicts back to the PRODUCTION trace
 # ---------------------------------------------------------------------------
 #
 # Per LANGFUSE_TRACING_PLAN.md §3.2: scores attach to the production trace_id
 # being judged, NOT to the judge run trace. That way the production trace
-# carries CSAT (existing) + judge axials (new) + SME band (when ingested) —
+# carries CSAT (existing) + judge axials (new) + SME band (when ingested),
 # all on one trace_id queryable from the Langfuse UI.
 #
 # This function is a no-op if Langfuse keys aren't set, so it's safe to call
@@ -503,7 +508,7 @@ def write_judge_scores_to_langfuse(production_trace_id: str, parsed: dict,
             )
             written += 1
 
-        # One boolean score per fired open code (sparse — only fired ones written)
+        # One boolean score per fired open code (sparse: only fired ones written)
         for code in parsed.get("all_open_codes_fired", []) or []:
             if code in ALL_CODES:
                 lf.create_score(
@@ -588,7 +593,7 @@ def call_judge(client, sample: dict, model: str = DEFAULT_MODEL) -> tuple[dict, 
 
 
 # ---------------------------------------------------------------------------
-# Aggregation — turn N judge outputs into digest-ready summary
+# Aggregation: turn N judge outputs into digest-ready summary
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -693,7 +698,7 @@ def render_slack_block(summary: DigestSummary, run_label: str = "yesterday",
     Per EVAL_STRATEGY.md §3.2: split into Accuracy track (academic axial only,
     calibrate to SME) and Experience track (intent + formatting + pedagogy +
     tone, calibrate to CSAT). Two separate calibration loops, two separate
-    health numbers — never collapsed into one.
+    health numbers, never collapsed into one.
 
     `prev_snapshot` (optional): a dict shaped like {pass_pct, fail_pct,
     neutral_pct, acc_fail_pct, exp_fail_pct, axial_fail_pct: {ax: pct}, date}.
@@ -799,7 +804,7 @@ def render_slack_block(summary: DigestSummary, run_label: str = "yesterday",
                 f"exp-FAIL {n_s_exp} ({exp_p}% ±{exp_ci}pp)"
             )
     stratum_block = (
-        f"\n🎚️ *By stratum* (calibration signal — accuracy FAIL should drop by stratum)\n"
+        f"\n🎚️ *By stratum* (calibration signal, accuracy FAIL should drop by stratum)\n"
         f"{chr(10).join(stratum_lines)}\n"
         if stratum_lines else ""
     )
@@ -875,7 +880,7 @@ def render_slack_block(summary: DigestSummary, run_label: str = "yesterday",
         )
     else:
         prev_acc = prev_exp = prev_pass = prev_neutral = prev_fail = None
-        wow_header = "_(first run — no WoW deltas)_\n"
+        wow_header = "_(first run, no WoW deltas)_\n"
 
     acc_delta = _delta_marker(acc_fail_pct, prev_acc, higher_is_bad=True) if has_prev else ""
     exp_delta = _delta_marker(exp_fail_pct, prev_exp, higher_is_bad=True) if has_prev else ""
@@ -886,17 +891,17 @@ def render_slack_block(summary: DigestSummary, run_label: str = "yesterday",
     block = f"""\
 🎯 *Rubric Scoreboard ({run_label}, n={n_total})*
 {wow_header}
-📚 *ACCURACY TRACK* [DS — calibrate to SME, NOT CSAT]
+📚 *ACCURACY TRACK* [DS: calibrate to SME, NOT CSAT]
   Academic FAIL rate: {n_acc_fail}/{summary.n_judgable} ({acc_fail_pct}% ±{acc_ci_top}pp){acc_delta}
   Top codes: {fmt_codes(acc_codes, 4)}
-  _Note: CSAT is silent on accuracy — only SME audit calibrates this._
+  _Note: CSAT is silent on accuracy; only SME audit calibrates this._
 
-✨ *EXPERIENCE TRACK* [PM, DS — calibrate to CSAT]
+✨ *EXPERIENCE TRACK* [PM, DS: calibrate to CSAT]
   Experience FAIL rate: {n_exp_fail}/{summary.n_judgable} ({exp_fail_pct}% ±{exp_ci_top}pp){exp_delta}
   By axial (count, % of judgable, ±Wilson 95% CI):
 {chr(10).join(exp_axial_lines)}
   Top codes: {fmt_codes(exp_codes_combined, 5)}
-  _Where leverage exists — prompt tuning targets these._
+  _Where leverage exists. Prompt tuning targets these._
 {stratum_block}{chapter_block}
 📊 *Overall band* (derived; reporting only)
   PASS {summary.n_pass} ({pass_pct}% ±{pass_ci}pp){pass_delta} | NEUTRAL {summary.n_neutral} ({neutral_pct}% ±{neutral_ci}pp){neutral_delta} | FAIL {summary.n_fail} ({fail_pct}% ±{fail_ci}pp){fail_delta}
@@ -983,7 +988,7 @@ def cmd_input(args: argparse.Namespace) -> None:
     print(f"Running judge on {len(samples)} samples...\n")
     client = get_openai_client()
 
-    # judge_run_id = single id for the whole batch — useful for grouping
+    # judge_run_id = single id for the whole batch (useful for grouping)
     judge_run_id = args.run_id or f"daily-eval-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
     write_scores = bool(args.write_scores)
     if write_scores:
