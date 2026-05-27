@@ -88,7 +88,10 @@
       <div class="grid grid-cols-[200px_1fr_auto] items-center gap-4 px-4 py-3.5 relative">
         <span class="absolute left-0 top-0 bottom-0 w-[3px]" style="background: {{ sc.rail }};" aria-hidden="true"></span>
         <div>
-          <div class="text-[12px] font-semibold tracking-wide uppercase text-slate-700">{{ row.label }}</div>
+          {# D4: row label uses the same mono register as the eyebrows
+               above. Two competing 'small caps' registers (Inter
+               semibold-uppercase vs IBM Plex Mono) collapse into one. #}
+          <div class="mono text-[12px] font-semibold tracking-wide uppercase text-slate-700">{{ row.label }}</div>
           {% if row.note %}<div class="text-[11px] text-slate-500 mt-0.5">{{ row.note }}</div>{% endif %}
         </div>
         <div class="mono text-[26px] font-semibold text-slate-900 leading-none" aria-label="{{ row.label }} value {{ row.value_text }}">{{ row.value_text }}</div>
