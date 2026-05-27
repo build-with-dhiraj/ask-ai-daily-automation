@@ -212,6 +212,13 @@ class TestEvalMainPosterPathByDefault(_BasePosterMainTest):
         self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
         self.assertIn("cause=render", stderr)
 
+    def test_programming_error_propagates_not_swallowed(self) -> None:
+        """B1: a NameError from render_and_publish is NOT recoverable;
+        it must propagate so CI surfaces the bug red. Catching `Exception`
+        would have silently degraded to the legacy fallback and hidden it."""
+        with self.assertRaises(NameError):
+            self._run_main({}, render_side_effect=NameError("oops"))
+
     def test_main_falls_back_on_publish_unreachable(self) -> None:
         """SRE item 4: render returns a URL but the verify probe says it is
         not reachable -> caller degrades to legacy with cause=publish_unreachable."""

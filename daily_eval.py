@@ -1150,71 +1150,100 @@ def main() -> int:
     if poster_disabled:
         poster_error = "cause=disabled"
     else:
+        # Recoverable exception types: catching `Exception` here would
+        # swallow NameError / AttributeError / TypeError / KeyError /
+        # ImportError from programming errors and silently degrade to the
+        # legacy fallback, hiding real bugs from CI. Narrow to the set the
+        # render + publish + Slack-post path can actually raise; everything
+        # else propagates so a red CI run surfaces it.
+        import urllib.error as _urllib_error
         try:
             from scripts import poster_slack  # type: ignore
-            # Reload today's snapshot from disk (finalize_eval_run wrote it).
-            today_snap = {}
+            from scripts.poster_publisher import (  # type: ignore
+                PosterPublishError,
+                PosterPublishUnreachableError,
+            )
+            from scripts.poster_renderer import PosterRenderError  # type: ignore
+        except ImportError as exc:
+            # Module-load failure (missing deps in this environment): not a
+            # programming error, this IS recoverable; degrade to legacy.
+            poster_slack = None  # type: ignore[assignment]
+            poster_error = f"cause=render reason={exc!r}"
+        if poster_slack is not None and poster_error is None:
+            _POSTER_RECOVERABLE: tuple = (
+                PosterRenderError,
+                PosterPublishError,
+                PosterPublishUnreachableError,
+                _urllib_error.HTTPError,
+                _urllib_error.URLError,
+                OSError,
+                TimeoutError,
+                ValueError,
+            )
             try:
-                with open(prev_snapshot_path) as _sf:
-                    today_snap = json.load(_sf)
-            except Exception as exc:
-                poster_error = f"cause=snapshot reason={exc!r}"
-            poster_input = poster_slack.build_scoreboard_poster_input(today_snap)
-            date_str = today_snap.get("date") or date.today().isoformat()
-            try:
-                image_url = poster_slack.render_and_publish(
-                    "scoreboard", poster_input, date_str
-                )
-            except Exception as exc:
-                image_url = None
-                poster_error = poster_error or f"cause=render reason={exc!r}"
-            if image_url is None:
-                poster_error = poster_error or (
-                    "cause=render reason=render_and_publish returned None"
-                )
-            else:
-                alt_text = poster_slack._alt_text_for(poster_input, "scoreboard")
-                ops_stripe = _build_scoreboard_ops_stripe_text(today_snap)
-                safety_stripe = _build_scoreboard_safety_stripe_text(today_snap)
-                blocks: list = [
-                    poster_slack.make_image_block(image_url, alt_text),
-                    poster_slack.make_divider(),
-                    poster_slack.make_section(
-                        f"⚙️ *Ops* (yesterday)\n{ops_stripe}"
-                    ),
-                    poster_slack.make_section(
-                        f"🛟 *Safety floor*\n{safety_stripe}"
-                    ),
-                    poster_slack.make_section("🧵 Full breakdown in thread"),
-                    poster_slack.make_context(poster_slack.scoreboard_footer_links()),
-                ]
-                fallback_text = poster_input["headline"]
+                # Reload today's snapshot from disk (finalize_eval_run wrote it).
+                today_snap = {}
                 try:
-                    posted = poster_slack.post_blocks_to_slack(
-                        webhook, blocks, fallback_text
+                    with open(prev_snapshot_path) as _sf:
+                        today_snap = json.load(_sf)
+                except (OSError, ValueError) as exc:
+                    poster_error = f"cause=snapshot reason={exc!r}"
+                poster_input = poster_slack.build_scoreboard_poster_input(today_snap)
+                date_str = today_snap.get("date") or date.today().isoformat()
+                try:
+                    image_url = poster_slack.render_and_publish(
+                        "scoreboard", poster_input, date_str
                     )
-                except Exception as exc:
-                    posted = False
-                    poster_error = poster_error or f"cause=publish reason={exc!r}"
-                if posted:
-                    # Thread-reply (~2s later) with the full text breakdown.
-                    time.sleep(2)
-                    thread_blocks = [
+                except _POSTER_RECOVERABLE as exc:
+                    image_url = None
+                    poster_error = poster_error or f"cause=render reason={exc!r}"
+                if image_url is None:
+                    poster_error = poster_error or (
+                        "cause=render reason=render_and_publish returned None"
+                    )
+                else:
+                    alt_text = poster_slack._alt_text_for(poster_input, "scoreboard")
+                    ops_stripe = _build_scoreboard_ops_stripe_text(today_snap)
+                    safety_stripe = _build_scoreboard_safety_stripe_text(today_snap)
+                    blocks: list = [
+                        poster_slack.make_image_block(image_url, alt_text),
+                        poster_slack.make_divider(),
                         poster_slack.make_section(
-                            f"🧵 *Deep dive · {date_str}*\n```{block}```"
-                        )
+                            f"⚙️ *Ops* (yesterday)\n{ops_stripe}"
+                        ),
+                        poster_slack.make_section(
+                            f"🛟 *Safety floor*\n{safety_stripe}"
+                        ),
+                        poster_slack.make_section("🧵 Full breakdown in thread"),
+                        poster_slack.make_context(poster_slack.scoreboard_footer_links()),
                     ]
+                    fallback_text = poster_input["headline"]
                     try:
-                        poster_slack.post_blocks_to_slack(
-                            webhook, thread_blocks, "thread"
+                        posted = poster_slack.post_blocks_to_slack(
+                            webhook, blocks, fallback_text
                         )
-                    except Exception as exc:
-                        print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
-                elif poster_error is None:
-                    poster_error = "cause=post reason=post_blocks_to_slack returned False"
-        except Exception as exc:
-            poster_error = poster_error or f"cause=render reason={exc!r}"
-            print(f"[poster] [warn] pipeline failed: {exc!r}", file=sys.stderr)
+                    except _POSTER_RECOVERABLE as exc:
+                        posted = False
+                        poster_error = poster_error or f"cause=publish reason={exc!r}"
+                    if posted:
+                        # Thread-reply (~2s later) with the full text breakdown.
+                        time.sleep(2)
+                        thread_blocks = [
+                            poster_slack.make_section(
+                                f"🧵 *Deep dive · {date_str}*\n```{block}```"
+                            )
+                        ]
+                        try:
+                            poster_slack.post_blocks_to_slack(
+                                webhook, thread_blocks, "thread"
+                            )
+                        except _POSTER_RECOVERABLE as exc:
+                            print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
+                    elif poster_error is None:
+                        poster_error = "cause=post reason=post_blocks_to_slack returned False"
+            except _POSTER_RECOVERABLE as exc:
+                poster_error = poster_error or f"cause=render reason={exc!r}"
+                print(f"[poster] [warn] pipeline failed: {exc!r}", file=sys.stderr)
 
     if poster_disabled or poster_error is not None or not posted:
         if poster_error:

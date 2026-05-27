@@ -3679,61 +3679,87 @@ def main() -> int:
     if poster_disabled:
         poster_error = "cause=disabled"
     else:
+        # Recoverable exception types: catching `Exception` here would
+        # swallow NameError / AttributeError / TypeError / KeyError /
+        # ImportError from programming errors and silently degrade to the
+        # legacy fallback, hiding real bugs. Narrow to the render + publish +
+        # Slack-post path's real exception types; everything else propagates.
+        import urllib.error as _urllib_error
         try:
             from scripts import poster_slack  # type: ignore
-            poster_input = poster_slack.build_digest_poster_input(
-                today_summary,
-                top_insights_text if isinstance(top_insights_text, dict) else {},
+            from scripts.poster_publisher import (  # type: ignore
+                PosterPublishError,
+                PosterPublishUnreachableError,
             )
-            date_str = today_summary.get("date") or today_str
+            from scripts.poster_renderer import PosterRenderError  # type: ignore
+        except ImportError as exc:
+            poster_slack = None  # type: ignore[assignment]
+            poster_error = f"cause=render reason={exc!r}"
+        if poster_slack is not None and poster_error is None:
+            _POSTER_RECOVERABLE: tuple = (
+                PosterRenderError,
+                PosterPublishError,
+                PosterPublishUnreachableError,
+                _urllib_error.HTTPError,
+                _urllib_error.URLError,
+                OSError,
+                TimeoutError,
+                ValueError,
+            )
             try:
-                image_url = poster_slack.render_and_publish(
-                    "digest", poster_input, date_str
+                poster_input = poster_slack.build_digest_poster_input(
+                    today_summary,
+                    top_insights_text if isinstance(top_insights_text, dict) else {},
                 )
-            except Exception as exc:
-                image_url = None
-                poster_error = f"cause=render reason={exc!r}"
-            if image_url:
-                ops_text = _build_digest_ops_stripe_text(
-                    today_summary, yesterday_snapshot, stream_logs_rows
-                )
-                safety_text = _build_digest_safety_stripe_text(
-                    today_summary, stream_logs_rows
-                )
-                footer = poster_slack.digest_footer_links()
-                main_blocks = build_main_blocks(
-                    image_url=image_url,
-                    poster_input=poster_input,
-                    ops_text=ops_text,
-                    safety_text=safety_text,
-                    footer_text=footer,
-                )
+                date_str = today_summary.get("date") or today_str
                 try:
-                    posted = poster_slack.post_blocks_to_slack(
-                        SLACK_WEBHOOK, main_blocks, fallback_text
+                    image_url = poster_slack.render_and_publish(
+                        "digest", poster_input, date_str
                     )
-                except Exception as exc:
-                    posted = False
-                    poster_error = f"cause=publish reason={exc!r}"
-                if posted:
-                    time.sleep(2)
-                    thread = build_thread_blocks(
-                        cost_latency_text=_coerce_insights_to_text(top_insights_text),
+                except _POSTER_RECOVERABLE as exc:
+                    image_url = None
+                    poster_error = f"cause=render reason={exc!r}"
+                if image_url:
+                    ops_text = _build_digest_ops_stripe_text(
+                        today_summary, yesterday_snapshot, stream_logs_rows
+                    )
+                    safety_text = _build_digest_safety_stripe_text(
+                        today_summary, stream_logs_rows
+                    )
+                    footer = poster_slack.digest_footer_links()
+                    main_blocks = build_main_blocks(
+                        image_url=image_url,
+                        poster_input=poster_input,
+                        ops_text=ops_text,
+                        safety_text=safety_text,
+                        footer_text=footer,
                     )
                     try:
-                        poster_slack.post_blocks_to_slack(
-                            SLACK_WEBHOOK, thread, "thread"
+                        posted = poster_slack.post_blocks_to_slack(
+                            SLACK_WEBHOOK, main_blocks, fallback_text
                         )
-                    except Exception as exc:
-                        print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
+                    except _POSTER_RECOVERABLE as exc:
+                        posted = False
+                        poster_error = f"cause=publish reason={exc!r}"
+                    if posted:
+                        time.sleep(2)
+                        thread = build_thread_blocks(
+                            cost_latency_text=_coerce_insights_to_text(top_insights_text),
+                        )
+                        try:
+                            poster_slack.post_blocks_to_slack(
+                                SLACK_WEBHOOK, thread, "thread"
+                            )
+                        except _POSTER_RECOVERABLE as exc:
+                            print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
+                    elif poster_error is None:
+                        poster_error = "cause=post reason=post_blocks_to_slack returned False"
                 elif poster_error is None:
-                    poster_error = "cause=post reason=post_blocks_to_slack returned False"
-            elif poster_error is None:
-                poster_error = "cause=render reason=render_and_publish returned None"
-        except Exception as exc:
-            poster_error = poster_error or f"cause=render reason={exc!r}"
-            print(f"[poster] [warn] pipeline raised: {exc!r}", file=sys.stderr)
-            posted = False
+                    poster_error = "cause=render reason=render_and_publish returned None"
+            except _POSTER_RECOVERABLE as exc:
+                poster_error = poster_error or f"cause=render reason={exc!r}"
+                print(f"[poster] [warn] pipeline raised: {exc!r}", file=sys.stderr)
+                posted = False
 
     if not posted:
         if poster_error:
