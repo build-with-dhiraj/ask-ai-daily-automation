@@ -208,9 +208,31 @@ class TestPostBlocksToSlack(unittest.TestCase):
         self.ps = _import("scripts.poster_slack", "scripts/poster_slack.py")
 
     def test_local_shell_guard_blocks_post(self) -> None:
-        with _EnvScope(GITHUB_ACTIONS=None):
+        with _EnvScope(
+            GITHUB_ACTIONS=None,
+            SLACK_WEBHOOK_URL=None,
+            SLACK_WEBHOOK_URL_TEST=None,
+            SLACK_WEBHOOK_URL_PROD=None,
+        ):
             posted = self.ps.post_blocks_to_slack(
                 "https://hooks.slack.test/x", [], "fb"
+            )
+        self.assertFalse(posted)
+
+    def test_github_actions_without_webhook_env_blocks_post(self) -> None:
+        """Tightened guard: GITHUB_ACTIONS=true alone is not enough.
+
+        Protects against `act` and local re-runners that set the flag but
+        do not configure the webhook secret.
+        """
+        with _EnvScope(
+            GITHUB_ACTIONS="true",
+            SLACK_WEBHOOK_URL=None,
+            SLACK_WEBHOOK_URL_TEST=None,
+            SLACK_WEBHOOK_URL_PROD=None,
+        ):
+            posted = self.ps.post_blocks_to_slack(
+                "https://hooks.slack.test/x", [{"type": "section"}], "fb"
             )
         self.assertFalse(posted)
 
@@ -222,8 +244,10 @@ class TestPostBlocksToSlack(unittest.TestCase):
             def __exit__(self, *a): return None
             def read(self): return b"ok"
 
-        with _EnvScope(GITHUB_ACTIONS="true"), \
-             mock.patch("urllib.request.urlopen", return_value=_Resp()):
+        with _EnvScope(
+            GITHUB_ACTIONS="true",
+            SLACK_WEBHOOK_URL="https://hooks.slack.test/x",
+        ), mock.patch("urllib.request.urlopen", return_value=_Resp()):
             posted = self.ps.post_blocks_to_slack(
                 "https://hooks.slack.test/x", [{"type": "section"}], "fb"
             )

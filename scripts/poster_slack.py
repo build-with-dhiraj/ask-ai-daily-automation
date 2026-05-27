@@ -61,9 +61,22 @@ def post_blocks_to_slack(
     function so existing text-only and digest-blocks paths and their
     tests are unaffected. Returns True on Slack `ok` body, else False.
     """
-    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
+    # Tightened guard: require BOTH that we're in GitHub Actions AND that a
+    # Slack webhook env var is actually configured. The earlier guard let
+    # `act` and any local re-runner that exports GITHUB_ACTIONS=true write to
+    # Slack as long as a webhook string was passed in. With this check, a
+    # local runner with no webhook secret configured cannot accidentally
+    # post even if it forges GITHUB_ACTIONS=true.
+    in_actions = os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true"
+    has_webhook = bool(
+        os.environ.get("SLACK_WEBHOOK_URL")
+        or os.environ.get("SLACK_WEBHOOK_URL_TEST")
+        or os.environ.get("SLACK_WEBHOOK_URL_PROD")
+    )
+    if not (in_actions and has_webhook):
         print(
-            "[info] Not running in GitHub Actions, skipping Slack post.",
+            "[info] Not running in GitHub Actions with a webhook env var set; "
+            "skipping Slack post.",
             file=sys.stderr,
         )
         return False
