@@ -14,7 +14,9 @@
   "neutral": {"text": "#334155", "bg": "#f8fafc", "rail": "#94a3b8", "dot": "#94a3b8"}
 } -%}
 {%- set dir_glyph = {"up": "▲", "down": "▼", "flat": "·"} -%}
-{%- set state_glyph = {"red": "🔴", "yellow": "🟡", "green": "🟢", "neutral": "·"} -%}
+{#- state_glyph removed: dogfood QA #D1, the per-row dot triple-encoded
+    state (left rail color + value color already convey it) and rendered a
+    red dot next to "n/a" deltas, reading as "this delta is bad". -#}
 <!doctype html>
 <html lang="en">
 <head>
@@ -91,7 +93,6 @@
         <div class="flex items-center gap-1.5" style="color: {{ sc.text }};">
           <span aria-hidden="true" class="text-[13px]">{{ dir_glyph[row.delta_dir] }}</span>
           <span class="mono text-[12px] font-medium" aria-label="delta {{ row.delta_text }}">{{ row.delta_text }}</span>
-          <span aria-hidden="true" class="text-[11px] ml-1">{{ state_glyph[row.state] }}</span>
         </div>
       </div>
       {% endfor %}
