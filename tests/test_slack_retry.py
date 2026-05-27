@@ -113,7 +113,7 @@ class TestDigestSlackRetry(unittest.TestCase):
 
     def test_two_consecutive_urlerror_gives_up(self) -> None:
         # Caps duplicate-post risk: a second connect failure within 5s means
-        # Slack is genuinely down, not flaky — give up rather than spin.
+        # Slack is genuinely down, not flaky; give up rather than spin.
         urlopen = patch(
             "urllib.request.urlopen",
             side_effect=[URLError("net1"), URLError("net2")],

@@ -20,6 +20,11 @@ concurrency:
 jobs:
   eval:
     runs-on: self-hosted
+    # scripts/poster_publisher.py pushes the scoreboard poster to gh-pages.
+    # Default GITHUB_TOKEN is contents:read which 403s on push. Mirror the
+    # pattern from prune-posters.yml. Mirrors daily-automation.yml's eval job.
+    permissions:
+      contents: write
     # Must exceed EVAL_MAX_RUNTIME_SEC/60 + margin or artifact/finalize steps hit 403 after job seal.
     timeout-minutes: 600
     steps:

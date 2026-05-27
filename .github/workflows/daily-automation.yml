@@ -41,6 +41,12 @@ jobs:
   eval:
     name: Daily Eval
     runs-on: self-hosted
+    # scripts/poster_publisher.py does `git push origin HEAD:gh-pages` for the
+    # scoreboard poster. The default GITHUB_TOKEN is contents:read which 403s
+    # on push (run #26532281104). Mirror the pattern from prune-posters.yml.
+    # main is unaffected: nothing in this job pushes to main.
+    permissions:
+      contents: write
     # Hard cap for the WHOLE job (all steps). Must exceed EVAL_MAX_RUNTIME_SEC/60 plus Metabase,
     # finalize, Langfuse flush, normalize, and artifact upload-or GitHub ends the job and
     # upload-artifact fails with: (403) Forbidden: job is completed.
@@ -214,6 +220,11 @@ jobs:
     needs: [eval, classifier]
     runs-on: self-hosted
     if: always()
+    # scripts/poster_publisher.py pushes the digest poster to gh-pages. Default
+    # GITHUB_TOKEN is contents:read which 403s on push (run #26532281104). Mirror
+    # the pattern from prune-posters.yml. No impact on main branch writes.
+    permissions:
+      contents: write
     # Bumped 180 → 240 to absorb the new max retry-tail budget: digest-card
     # backoff (~5 min) × multiple Metabase cards + Langfuse 8-attempt loop
     # (~8.5 min cumulative) + Slack 5s retry could push a degraded run past

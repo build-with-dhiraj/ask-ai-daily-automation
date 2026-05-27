@@ -297,31 +297,44 @@ def render_and_publish(
     poster_input: dict,
     date_str: str,
 ) -> Optional[str]:
-    """Try to render + publish the poster. Return public URL on success, or
-    None when the render path itself failed (template / Playwright / publish).
+    """Try to render + publish the poster. Return public URL on success.
+
     POSTER_DRY_RUN=1 skips publish but still renders (validates the template).
 
-    Raises PosterPublishUnreachableError when the gh-pages URL did NOT become
-    reachable within the verify window (caller catches this as recoverable and
-    degrades to legacy text). All other failures are logged and surfaced as
-    None so existing callers keep their None-check fallback.
+    On failure, this function PROPAGATES the underlying exception so the
+    caller can distinguish render vs publish vs publish_unreachable in its
+    operator-facing log line. The caller's _POSTER_RECOVERABLE tuple already
+    catches PosterRenderError, PosterPublishError, and
+    PosterPublishUnreachableError.
+
+    Returns None only for the small set of pre-flight conditions where there
+    is no exception to surface (renderer import failed, render produced
+    non-PNG bytes). In those cases the caller logs cause=render with
+    reason=render_and_publish returned None, which is accurate.
+
+    Previously this function caught bare `Exception` around both the render
+    and publish steps and returned None, causing the caller to log
+    `cause=render reason=render_and_publish returned None` even when the
+    actual failure was a PosterPublishError 403 from gh-pages. That misled
+    the operator on dogfood run #26532281104. Narrowing the excepts so the
+    typed exceptions propagate fixes the cause string.
     """
     try:
         from scripts.poster_renderer import (  # type: ignore
             PosterRenderError, render_poster,
         )
-    except Exception as exc:
+    except ImportError as exc:
+        # Module-load failure is recoverable (missing deps in this env) but
+        # is not a PosterRenderError; surface it as a render failure via the
+        # None path, the caller's "returned None" wording is correct here.
         print(f"[warn] poster_renderer import failed: {exc!r}", file=sys.stderr)
         return None
 
-    try:
-        png = render_poster(surface, poster_input)  # type: ignore[arg-type]
-    except PosterRenderError as exc:
-        print(f"[warn] poster render failed ({surface}): {exc}", file=sys.stderr)
-        return None
-    except Exception as exc:  # defensive
-        print(f"[warn] poster render unexpected error: {exc!r}", file=sys.stderr)
-        return None
+    # Narrowed: PosterRenderError propagates so caller logs cause=render with
+    # the actual exception message. The previous bare `except Exception:`
+    # swallowed AttributeError/TypeError/etc. silently. Now those programming
+    # errors surface in CI, exactly the contract _POSTER_RECOVERABLE assumes.
+    png = render_poster(surface, poster_input)  # type: ignore[arg-type]
 
     if not png or not png.startswith(b"\x89PNG"):
         print("[warn] render returned non-PNG bytes", file=sys.stderr)
@@ -336,19 +349,15 @@ def render_and_publish(
         # without hitting the network. Tests can pivot on this prefix.
         return f"file:///tmp/POSTER_DRY_RUN/{surface}/{date_str}.png"
 
-    try:
-        from scripts.poster_publisher import (  # type: ignore
-            PosterPublishUnreachableError,
-            _verify_url_reachable,
-            publish_poster,
-        )
-        url = publish_poster(png, surface, date_str)  # type: ignore[arg-type]
-    except Exception as exc:
-        print(
-            f"[warn] poster publish failed ({surface}): {exc!r}",
-            file=sys.stderr,
-        )
-        return None
+    from scripts.poster_publisher import (  # type: ignore
+        PosterPublishUnreachableError,
+        _verify_url_reachable,
+        publish_poster,
+    )
+    # Narrowed: PosterPublishError (and PosterPublishUnreachableError below)
+    # propagate so the caller's _POSTER_RECOVERABLE catch can read the type
+    # and log cause=publish (not cause=render). Previously bare-excepted.
+    url = publish_poster(png, surface, date_str)  # type: ignore[arg-type]
 
     # gh-pages takes 5-30s+ to propagate a freshly-pushed file to the CDN.
     # If Slack server-side fetches the image_url before propagation it caches

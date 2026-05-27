@@ -3749,7 +3749,17 @@ def main() -> int:
                         image_url = poster_slack.render_and_publish(
                             "digest", poster_input, date_str
                         )
+                    except PosterPublishUnreachableError as exc:
+                        image_url = None
+                        poster_error = f"cause=publish_unreachable reason={exc!r}"
+                    except PosterPublishError as exc:
+                        image_url = None
+                        poster_error = f"cause=publish reason={exc!r}"
                     except _POSTER_RECOVERABLE as exc:
+                        # PosterRenderError + the generic urllib/OS/timeout tail
+                        # all land here. The two typed clauses above handle the
+                        # publish path explicitly so the operator log matches
+                        # reality.
                         image_url = None
                         poster_error = f"cause=render reason={exc!r}"
                 if image_url:

@@ -330,7 +330,12 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
 
     def test_main_falls_back_on_publish_unreachable(self) -> None:
         """SRE item 4: render returns a URL but the verify probe says it is
-        not reachable -> caller degrades to legacy with cause=publish_unreachable."""
+        not reachable -> caller degrades to legacy with cause=publish_unreachable.
+
+        After F2 (narrowed internal except in render_and_publish), the typed
+        PosterPublishUnreachableError propagates out and the caller's typed
+        except clause logs cause=publish_unreachable specifically.
+        """
         from scripts.poster_publisher import PosterPublishUnreachableError
         exit_code, m_render, m_post_blocks, m_post_text, stderr = self._run_main(
             {},
@@ -344,8 +349,32 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
         m_post_text.assert_called_once()
         sent_text = m_post_text.call_args.args[1]
         self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
-        self.assertIn("cause=render", stderr)
+        self.assertIn("cause=publish_unreachable", stderr)
         self.assertIn("gh-pages URL not reachable", stderr)
+
+    def test_main_falls_back_on_publish_error(self) -> None:
+        """F2 regression: a PosterPublishError raised inside render_and_publish
+        (e.g. gh-pages git push 403) must surface as cause=publish, not the
+        misleading cause=render reason=render_and_publish returned None that
+        dogfood run #26532281104 produced before the bare-except was narrowed.
+        """
+        from scripts.poster_publisher import PosterPublishError
+        exit_code, m_render, m_post_blocks, m_post_text, stderr = self._run_main(
+            {},
+            render_side_effect=PosterPublishError(
+                "command failed (128): git push origin HEAD:gh-pages"
+            ),
+        )
+        self.assertEqual(exit_code, 0)
+        m_render.assert_called_once()
+        m_post_blocks.assert_not_called()
+        m_post_text.assert_called_once()
+        sent_text = m_post_text.call_args.args[1]
+        self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
+        # The whole point of F2: cause=publish, NOT cause=render.
+        self.assertIn("cause=publish", stderr)
+        self.assertNotIn("cause=render", stderr)
+        self.assertIn("git push origin HEAD:gh-pages", stderr)
 
     def test_main_falls_back_on_publish_failure(self) -> None:
         # render succeeds, but post_blocks_to_slack returns False.

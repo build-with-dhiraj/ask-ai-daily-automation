@@ -1,4 +1,4 @@
-"""Poster renderer — HTML+Jinja → PNG via Playwright (sync API).
+"""Poster renderer: HTML+Jinja to PNG via Playwright (sync API).
 
 Renders the Rubric Scoreboard and Daily Digest posters defined in
 `templates/poster_*.html.j2` to retina-density PNG bytes suitable for
@@ -7,7 +7,7 @@ posting to Slack via an `image_url` block.
 Public API:
     render_poster(surface, snapshot, output_path=None) -> bytes
 
-The caller (Slack payload assembler — C1.3, future) is expected to wrap
+The caller (Slack payload assembler, C1.3, future) is expected to wrap
 this in try/except PosterRenderError and fall back to text-only Block Kit
 on failure. See `scripts/README_poster_renderer.md`.
 
@@ -74,7 +74,7 @@ def render_poster(
     """Render a poster PNG.
 
     Args:
-        surface: "scoreboard" or "digest" — selects the Jinja template.
+        surface: "scoreboard" or "digest"; selects the Jinja template.
         snapshot: dict matching the schema in templates/README.md.
         output_path: optional path to also write the PNG to disk.
 
@@ -92,10 +92,10 @@ def render_poster(
 
     template_name = TEMPLATE_FOR_SURFACE[surface]
 
-    # Render Jinja to HTML — cheap, fail-fast before launching Chromium.
+    # Render Jinja to HTML; cheap, fail-fast before launching Chromium.
     try:
         html = _jinja_env.get_template(template_name).render(**snapshot)
-    except Exception as e:  # noqa: BLE001 — Jinja errors are varied
+    except Exception as e:  # noqa: BLE001 (Jinja errors are varied)
         raise PosterRenderError(template_name, f"jinja render failed: {e}") from e
 
     png_bytes = _screenshot_html(html, template_name)
@@ -163,12 +163,12 @@ def _screenshot_html(html: str, template_name: str) -> bytes:
         ) from e
     except PlaywrightError as e:
         raise PosterRenderError(template_name, f"playwright error: {e}") from e
-    except Exception as e:  # noqa: BLE001 — safety net on the 30s budget
+    except Exception as e:  # noqa: BLE001 (safety net on the 30s budget)
         raise PosterRenderError(template_name, f"unexpected render failure: {e}") from e
 
     elapsed_ms = int((time.monotonic() - start) * 1000)
     if elapsed_ms > RENDER_TIMEOUT_MS:
-        # Soft warning — Playwright should have raised already, but in case.
+        # Soft warning; Playwright should have raised already, but in case.
         raise PosterRenderError(
             template_name, f"render exceeded {RENDER_TIMEOUT_MS}ms budget ({elapsed_ms}ms)"
         )

@@ -9,7 +9,7 @@ Langfuse Cloud rejects `limit > 100` on `/api/public/observations` and
                "message":"Too big: expected number to be <=100"}]}
 
 These tests pin the new behaviour so we don't silently regress to limit=500.
-No network — `urllib.request.urlopen` is monkey-patched.
+No network; `urllib.request.urlopen` is monkey-patched.
 """
 
 import importlib
@@ -62,7 +62,7 @@ class TestLangfusePageSizeDefault(unittest.TestCase):
         self.assertEqual(mod.LANGFUSE_PAGE_SIZE, 100)
 
     def test_env_override_capped_at_100(self) -> None:
-        """Even if someone sets the env var to 500, we must clamp to 100 — otherwise we
+        """Even if someone sets the env var to 500, we must clamp to 100; otherwise we
         re-introduce the HTTP 400 bug on every run."""
         mod = _load_module({"LANGFUSE_OBSERVATION_PAGE_SIZE": "500"})
         self.assertLessEqual(mod.LANGFUSE_PAGE_SIZE, 100)
