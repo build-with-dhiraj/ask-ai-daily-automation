@@ -60,9 +60,11 @@
   <div class="px-7"><div class="rule-thick"></div></div>
 
   {# ── Kill-switch band ─────────────────────────────────────────── #}
+  {# D3: thinned — drop emoji, drop border, halve vertical padding. The
+       band still reads red but no longer screams louder than the
+       26px display headline below it. #}
   {% if ks %}
-  <div class="mx-7 mt-4 mb-3 flex items-center gap-3 bg-red-50 border border-red-200 px-4 py-3" role="alert" aria-label="Kill-switch breached">
-    <span aria-hidden="true" class="text-[15px]">🔴</span>
+  <div class="mx-7 mt-4 mb-3 flex items-center gap-3 bg-red-50 px-4 py-1.5" role="alert" aria-label="Kill-switch breached">
     <span class="mono text-[12px] tracking-widest uppercase text-red-700 font-semibold">Kill-switch breached</span>
   </div>
   {% else %}
