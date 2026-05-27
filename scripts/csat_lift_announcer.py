@@ -3,7 +3,7 @@
 One-shot Slack announcement of the SME-audit vs production CSAT correlation
 findings. Posts to a staging Slack channel via webhook (Block Kit payload).
 
-Runs in parallel isolation from daily_eval.py / judge_runner.py — no shared
+Runs in parallel isolation from daily_eval.py / judge_runner.py, no shared
 state, no shared secrets beyond `SLACK_WEBHOOK_URL_TEST`.
 
 Env vars:

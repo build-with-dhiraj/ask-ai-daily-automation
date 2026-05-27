@@ -69,13 +69,33 @@ class TestPosterInputBuilders(unittest.TestCase):
         snap = {
             "date": "2026-05-27", "n_judged": 989,
             "acc_fail_pct": 8.2, "exp_fail_pct": 14.1, "pass_pct": 71.3,
-            "axial_fail_pct": {"A5": 13.8, "A2": 9.6, "A1": 9.3},
+            "axial_fail_pct": {"academic": 13.8, "tone": 9.6, "intent": 9.3},
+            # Design audit D5: bar entries now come from open_codes_fired_count
+            # (top 3 individual codes), not axial_fail_pct.
+            "open_codes_fired_count": {"A5": 152, "A1": 107, "A2": 96},
         }
         out = self.ps.build_scoreboard_poster_input(snap)
         self.assertTrue(out["kill_switch_breach"])
         self.assertEqual(out["n_judged"], 989)
         self.assertIn("Academic FAIL", out["scoreboard"][0]["label"])
         self.assertEqual(len(out["top_drivers"]), 3)
+
+    def test_top_drivers_have_no_duplicate_axis_labels(self) -> None:
+        """Dogfood QA #2 + design audit D5: bar entries are now per-code
+        (code != label by construction, e.g. code='A5' / label='answer
+        incomplete'). This regression test stays as a bumper against any
+        future builder that resets to axis labels."""
+        snap = {
+            "date": "2026-05-27", "n_judged": 1000,
+            "acc_fail_pct": 5.0, "exp_fail_pct": 10.0, "pass_pct": 85.0,
+            "open_codes_fired_count": {"A5": 30, "E2": 18, "C1": 9},
+        }
+        out = self.ps.build_scoreboard_poster_input(snap)
+        for d in out["top_drivers"]:
+            self.assertTrue(
+                d["code"] == "" or d["code"] != d["label"],
+                f"duplicate code/label in driver entry: {d!r}",
+            )
 
     def test_digest_input_propagates_insights_and_kill_switch(self) -> None:
         today = {"date": "2026-05-26"}
@@ -405,8 +425,16 @@ class TestOpsAndSafetyStripes(unittest.TestCase):
             "cost_latency_classifier": {"cost_usd": 2.00},
             "langfuse_errors_total": 12,
             "total_traces_24h": 1000,
+            # Error rate denominator is observations, not traces (one trace
+            # fans out into many observation spans). 12 / 1000 observations
+            # = 1.2%; yesterday 8 / 1000 = 0.8% so the arrow points up.
+            "total_observations_24h": 1000,
         }
-        yest = {"langfuse_errors_total": 8, "total_traces_24h": 1000}
+        yest = {
+            "langfuse_errors_total": 8,
+            "total_traces_24h": 1000,
+            "total_observations_24h": 1000,
+        }
         text = self.digest._build_digest_ops_stripe_text(today, yest, None)
         self.assertIn("$20.00 spent", text)
         # Dominant traffic is gpt-4.1, student p90 = 5.90s

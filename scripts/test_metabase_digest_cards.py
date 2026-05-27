@@ -79,7 +79,7 @@ def main() -> int:
     failed = False
     for cid, label in cards:
         print(
-            f"... querying card {cid} ({label}) — can take up to {int(DEFAULT_QUERY_TIMEOUT_SEC)}s …",
+            f"... querying card {cid} ({label}), can take up to {int(DEFAULT_QUERY_TIMEOUT_SEC)}s ...",
             flush=True,
         )
         try:

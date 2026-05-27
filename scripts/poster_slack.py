@@ -179,7 +179,9 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
             "delta_text": "n/a",
             "delta_dir": "flat",
             "state": "neutral",
-            "note": "per-axial detail in thread",
+            # D6: dropped 'per-axial' jargon. Stakeholders read this band;
+            # they should not be expected to know our internal vocabulary.
+            "note": "details in thread",
         },
         {
             "label": "Overall PASS",
@@ -191,21 +193,41 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
         },
     ]
 
-    # Top drivers: pull from axial_fail_pct if present.
-    axial = snap.get("axial_fail_pct") or {}
+    # D5: top drivers are now the top 3 INDIVIDUAL open codes (e.g. A5, A1,
+    # A2) sourced from open_codes_fired_count. The previous build used
+    # axial_fail_pct (academic / tone / intent) which only restated the
+    # headline. Code-level counts are novel information stakeholders use
+    # to decide what to inspect in the deep-dive thread.
+    code_counts_raw = snap.get("open_codes_fired_count") or {}
+    code_counts: dict[str, int] = {
+        str(k): int(v or 0) for k, v in code_counts_raw.items()
+    }
     drivers_sorted = sorted(
-        ((k, float(v or 0.0)) for k, v in axial.items()),
-        key=lambda kv: kv[1],
-        reverse=True,
+        code_counts.items(), key=lambda kv: kv[1], reverse=True
     )[:3]
+    top_count = drivers_sorted[0][1] if drivers_sorted else 0
+    # Code -> human label mapping mirrors judge_runner.CODE_LABELS so the
+    # poster does not import a circular dep at module-load time.
+    _CODE_LABELS = {
+        "A1": "Conceptual error",   "A2": "Misunderstood doubt",
+        "A3": "Wrong OCR",          "A4": "Calculation error",
+        "A5": "Answer incomplete",  "A6": "Incorrect validation",
+        "B1": "Ambiguous, badly handled",
+        "C1": "Equation unreadable","C2": "Steps not structured",
+        "C3": "Symbols corrupted",  "C4": "Chem notation broken",
+        "D1": "Too advanced",       "D2": "Too basic",
+        "D3": "No direct answer",   "D4": "No clarification asked",
+        "E1": "Too long",           "E2": "Minor details missing",
+        "E3": "Tone / naturalness",
+    }
     top_drivers = [
         {
-            "code": k,
-            "label": k.replace("_", " "),
-            "count": int(round(v * n_judged / 100.0)) if n_judged else 0,
-            "bar_pct": int(round(100.0 * v / drivers_sorted[0][1])) if drivers_sorted and drivers_sorted[0][1] else 0,
+            "code": code,
+            "label": _CODE_LABELS.get(code, code).lower(),
+            "count": count,
+            "bar_pct": int(round(100.0 * count / top_count)) if top_count else 0,
         }
-        for k, v in drivers_sorted
+        for code, count in drivers_sorted
     ]
 
     return {
@@ -224,6 +246,43 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
     }
 
 
+def _synthesize_breach_insight(today: dict) -> dict:
+    """Manufacture a single insight describing why the safety floor breached.
+
+    Design audit D2: when kill_switch_breach=True but insights is empty, the
+    template would render a red 'SAFETY FLOOR BREACHED' band on top of a
+    'No anomalies today' panel. Internally contradictory. We resolve at the
+    data layer by emitting one synthetic insight derived from today_summary,
+    so the template never has to decide between a breach band and a quiet
+    panel.
+    """
+    acc_fail = float(today.get("acc_fail_pct") or 0.0)
+    exp_fail = float(today.get("exp_fail_pct") or 0.0)
+    if acc_fail > 6.0:
+        return {
+            "topic_label": "ACADEMIC",
+            "icon": "🚨",
+            "claim": f"Academic FAIL {acc_fail:.1f}% above the 6% floor.",
+            "evidence": "Kill switch tripped; see thread for the per-code breakdown.",
+            "context": None,
+            "spark_series": None,
+        }
+    # Fallback: a generic safety-floor insight when the acc_fail signal is
+    # not above the floor but some other gate flipped breach=True. Keep the
+    # surface honest about what we know.
+    return {
+        "topic_label": "FEEDBACK",
+        "icon": "🚨",
+        "claim": "Safety floor breached.",
+        "evidence": (
+            f"Academic FAIL {acc_fail:.1f}% · Experience FAIL {exp_fail:.1f}%. "
+            "Details in thread."
+        ),
+        "context": None,
+        "spark_series": None,
+    }
+
+
 def build_digest_poster_input(
     today_data: dict, insights_payload: dict
 ) -> dict:
@@ -237,13 +296,22 @@ def build_digest_poster_input(
     except Exception:
         date_human = date_iso
 
+    breach = bool(insights.get("kill_switch_breach"))
+    insight_list = list(insights.get("insights") or [])
+
+    # D2: resolve breach + empty insights contradiction by synthesizing one
+    # insight from today_summary, so the template never renders the
+    # 'No anomalies today' panel underneath a red breach band.
+    if breach and not insight_list:
+        insight_list = [_synthesize_breach_insight(today)]
+
     return {
         "date_human": date_human,
         "date_iso": date_iso,
-        "kill_switch_breach": bool(insights.get("kill_switch_breach")),
+        "kill_switch_breach": breach,
         "headline": insights.get("headline") or "",
         "subhead": "",
-        "insights": insights.get("insights") or [],
+        "insights": insight_list,
         "brand_mark": "Ask AI · daily digest",
     }
 
