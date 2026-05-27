@@ -30,10 +30,30 @@ if str(_ROOT) not in sys.path:
 def _import(name: str, relpath: str):
     """Import-or-reuse: if already in sys.modules, return that object so
     mock.patch.object targets the same module that `from X import Y`
-    inside main() resolves to via sys.modules."""
+    inside main() resolves to via sys.modules.
+
+    Code Reviewer F6 hardening: when we reuse the cached entry, assert
+    its __file__ resolves to the SAME path we'd otherwise load from. A
+    future test that does `del sys.modules['scripts.poster_slack']` or
+    assigns a fake module to that key would otherwise silently poison
+    the next test that calls _import; this raises early with a clear
+    cross-pollution message instead.
+    """
+    expected = (_ROOT / relpath).resolve()
     if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, _ROOT / relpath)
+        existing = sys.modules[name]
+        existing_file = getattr(existing, "__file__", "") or ""
+        try:
+            existing_resolved = Path(existing_file).resolve()
+        except (OSError, ValueError):
+            existing_resolved = None
+        if existing_resolved != expected:
+            raise RuntimeError(
+                f"sys.modules[{name!r}] points to {existing_file!r}, "
+                f"expected {str(expected)!r}; another test polluted the cache"
+            )
+        return existing
+    spec = importlib.util.spec_from_file_location(name, expected)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
