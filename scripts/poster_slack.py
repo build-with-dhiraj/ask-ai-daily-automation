@@ -198,9 +198,13 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
         key=lambda kv: kv[1],
         reverse=True,
     )[:3]
+    # The bar entries describe AXES (academic, tone, intent) not codes, so
+    # the left-column "code" slot is empty here. Leaving "code" == k duplicates
+    # the axis label visually (see dogfood QA #2). Template defends with a
+    # guard that hides the code when it duplicates the label.
     top_drivers = [
         {
-            "code": k,
+            "code": "",
             "label": k.replace("_", " "),
             "count": int(round(v * n_judged / 100.0)) if n_judged else 0,
             "bar_pct": int(round(100.0 * v / drivers_sorted[0][1])) if drivers_sorted and drivers_sorted[0][1] else 0,

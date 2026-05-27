@@ -77,6 +77,25 @@ class TestPosterInputBuilders(unittest.TestCase):
         self.assertIn("Academic FAIL", out["scoreboard"][0]["label"])
         self.assertEqual(len(out["top_drivers"]), 3)
 
+    def test_top_drivers_have_no_duplicate_axis_labels(self) -> None:
+        """Dogfood QA #2: bar chart rendered 'academic academic' / 'tone tone'
+        because the builder set both 'code' and 'label' to the same axis name.
+        Each entry should either have an empty code or a code that differs
+        from the label."""
+        snap = {
+            "date": "2026-05-27", "n_judged": 1000,
+            "acc_fail_pct": 5.0, "exp_fail_pct": 10.0, "pass_pct": 85.0,
+            "axial_fail_pct": {
+                "academic": 8.2, "tone": 5.0, "intent": 3.1,
+            },
+        }
+        out = self.ps.build_scoreboard_poster_input(snap)
+        for d in out["top_drivers"]:
+            self.assertTrue(
+                d["code"] == "" or d["code"] != d["label"],
+                f"duplicate code/label in driver entry: {d!r}",
+            )
+
     def test_digest_input_propagates_insights_and_kill_switch(self) -> None:
         today = {"date": "2026-05-26"}
         insights = {
