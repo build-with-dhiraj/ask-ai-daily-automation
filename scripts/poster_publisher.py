@@ -6,7 +6,7 @@ for the operational contract.
 
 Public surface:
     publish_poster(png_bytes, surface, date_str, *, short_sha=None) -> str
-    _verify_url_reachable(url, timeout=30) -> bool
+    _verify_url_reachable(url, timeout=120) -> bool
 
 Behavior:
     - Writes PNG into a local checkout of the gh-pages branch under
@@ -73,8 +73,14 @@ def _ensure_worktree() -> Path:
         _run(["git", "fetch", "origin", GH_PAGES_BRANCH], cwd=REPO_ROOT)
     except PosterPublishError as e:
         # Remote may not have gh-pages yet (first push). That's OK — local branch
-        # must still exist for the worktree to be created. We don't fail here.
-        log.warning("fetch gh-pages skipped: %s", e)
+        # must still exist for the worktree to be created. We don't fail here,
+        # but emit a clear hint so first-time operators know what to do.
+        log.warning(
+            "fetch gh-pages skipped: %s. "
+            "First run? Bootstrap origin/gh-pages once with: "
+            "`git push -u origin gh-pages` before triggering this workflow.",
+            e,
+        )
 
     if WORKTREE_DIR.exists():
         # Reset worktree to local gh-pages tip (or remote if available)
@@ -174,8 +180,13 @@ def publish_poster(
     return public_url
 
 
-def _verify_url_reachable(url: str, timeout: int = 30) -> bool:
+def _verify_url_reachable(url: str, timeout: int = 120) -> bool:
     """Poll a URL until it returns HTTP 200 or timeout elapses.
+
+    Note on default timeout: GitHub Pages takes 30s–2 min to serve a freshly
+    pushed file on the first publish (subsequent updates settle in ~30s). The
+    default of 120s covers the first-publish case; callers that know the file
+    is already cached can pass a shorter timeout.
 
     GitHub Pages takes ~30–60s to publish a freshly-pushed file. Callers
     should treat False as a soft failure (the push succeeded; serving lags).

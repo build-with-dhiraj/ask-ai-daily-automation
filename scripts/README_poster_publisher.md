@@ -2,6 +2,25 @@
 
 Publisher module for daily Slack poster PNGs. Part of C1.2c (poster-format redesign, Path C1).
 
+## One-time setup (FIRST RUN ONLY)
+
+Before the first daily workflow run that publishes a poster, an operator must:
+
+1. **Push the `gh-pages` branch to origin** (the branch exists locally but the workflow needs the remote ref):
+   ```bash
+   git push -u origin gh-pages
+   ```
+2. **Enable GitHub Pages** in repo settings:
+   - Settings → Pages → Source: `Deploy from a branch`
+   - Branch: `gh-pages` / `/ (root)` → Save
+3. **Verify** by visiting `https://build-with-dhiraj.github.io/ask-ai-daily-automation/` after ~1 minute. A 404 with the Pages footer is expected until the first poster is published.
+
+If the workflow is triggered before step 1, `publish_poster()` will fail with a clear hint pointing back to this section.
+
+## GitHub Pages publish lag
+
+First-publish lag for a new file is typically 30s to 2 minutes. Subsequent updates to existing files settle in ~30s. `_verify_url_reachable()` defaults to a 120s timeout to cover the first-publish case; callers that know the file is already cached can pass a shorter timeout.
+
 ## What it does
 
 `scripts/poster_publisher.py:publish_poster()` writes a PNG to a checkout of the `gh-pages` branch, commits it, and (optionally) pushes to origin. GitHub Pages then serves it at a predictable URL that the daily Slack message embeds via an `image_url` block.

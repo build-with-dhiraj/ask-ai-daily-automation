@@ -19,6 +19,11 @@ on:
         options:
           - 'false'
           - 'true'
+      dry_run:
+        description: 'Dry run: render poster but do NOT push to gh-pages (safety toggle for dogfooding)'
+        required: false
+        default: true
+        type: boolean
 
 # Single-queue across Daily Automation + Daily Eval + Daily Digest so the one
 # self-hosted Mac runner never has overlapping work. A second dispatch QUEUES;
@@ -227,6 +232,12 @@ jobs:
       # job. We now PREFER a degraded Slack post (with `_fetch failed_` filler)
       # over no post. Worst-case landing slips from ~10:00 IST to ~11:30 IST.
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
+      # Poster publish gating (C1.3d):
+      # - scheduled run            → push posters to origin/gh-pages
+      # - workflow_dispatch + dry_run=true (default) → render locally only, NO push
+      # - workflow_dispatch + dry_run=false           → push posters (dogfooding "for real")
+      # `github.event.inputs.dry_run` is the literal string "true"/"false" for booleans.
+      POSTER_AUTO_PUSH: ${{ (github.event_name == 'schedule' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -309,7 +320,26 @@ jobs:
         # The digest itself uses only stdlib for HTTP, but the new Top 3 Insights
         # section calls Azure OpenAI via the same `openai` SDK already used by
         # eval/classifier. Install matches the eval job's `pip3 install openai langfuse`.
-        run: pip3 install openai langfuse
+        # `playwright` (pinned in requirements.txt) is added for C1.2b poster
+        # rendering (headless Chromium PNG). openai/langfuse stay inline to match
+        # the eval job's install for parity.
+        run: |
+          pip3 install openai langfuse
+          pip3 install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        # First Chromium install is ~60-120s and ~170 MB. Cache it across runs
+        # keyed on requirements.txt so it only re-downloads when deps move.
+        # Path is macOS-specific (self-hosted runner is a Mac).
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        # No `--with-deps` on macOS: that flag invokes apt-get which fails on Mac.
+        # macOS already has the system libs Chromium needs.
+        run: python3 -m playwright install chromium
 
       - name: Run daily digest
         shell: bash

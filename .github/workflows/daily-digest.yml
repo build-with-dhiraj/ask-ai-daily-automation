@@ -16,6 +16,12 @@ name: Daily Digest
 on:
   # Schedule moved to daily-automation.yml. Use workflow_dispatch for ad-hoc runs.
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: render poster but do NOT push to gh-pages (safety toggle for dogfooding)'
+        required: false
+        default: true
+        type: boolean
 
 # Shares the queue with daily-automation.yml + daily-eval.yml so the single
 # self-hosted Mac runner never has two of these in flight at once. A second
@@ -61,6 +67,9 @@ jobs:
       # Flipped 1 → 0 (2026-05-12): degraded post is preferred over silent miss.
       # Mirrors the change in daily-automation.yml; see commentary there.
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
+      # Poster publish gating (C1.3d): this workflow is workflow_dispatch only,
+      # so dry_run=true (default) keeps posters local. Set dry_run=false to push.
+      POSTER_AUTO_PUSH: ${{ github.event.inputs.dry_run == 'false' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -109,7 +118,24 @@ jobs:
         # Phase 1 digest restructure: digest now uses the openai SDK for Azure
         # OpenAI gpt-4.1 calls (Top 3 Insights). Mirrors the install in
         # daily-automation.yml's eval job.
-        run: pip3 install openai langfuse
+        # `playwright` (pinned in requirements.txt) is added for C1.2b poster
+        # rendering (headless Chromium PNG).
+        run: |
+          pip3 install openai langfuse
+          pip3 install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        # First Chromium install is ~60-120s and ~170 MB. Cache it across runs
+        # keyed on requirements.txt so it only re-downloads when deps move.
+        # Path is macOS-specific (self-hosted runner is a Mac).
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        # No `--with-deps` on macOS: that flag invokes apt-get which fails on Mac.
+        run: python3 -m playwright install chromium
 
       - name: Run daily digest
         run: python3 daily_digest.py
