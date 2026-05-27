@@ -100,12 +100,12 @@
 
   {# ── Top driver bars ──────────────────────────────────────────── #}
   {% if top_drivers and top_drivers|length > 0 %}
-  <section class="px-7 pt-5 pb-2" aria-label="Top failure drivers (academic axis)">
-    <div class="eyebrow mb-3">Top driver · academic</div>
+  <section class="px-7 pt-5 pb-2" aria-label="Top axis by fail rate">
+    <div class="eyebrow mb-3">Top axis by fail rate</div>
     <ul class="space-y-2.5">
       {% for d in top_drivers %}
-      <li class="grid grid-cols-[34px_1fr_56px] items-center gap-3" aria-label="{{ d.code }} {{ d.label }} count {{ d.count }}">
-        <span class="mono text-[12px] text-slate-500">{{ d.code }}</span>
+      <li class="grid grid-cols-[34px_1fr_56px] items-center gap-3" aria-label="{{ d.label }} count {{ d.count }}">
+        <span class="mono text-[12px] text-slate-500">{% if d.code and d.code != d.label %}{{ d.code }}{% endif %}</span>
         <div>
           <div class="text-[13px] text-slate-800 mb-1">{{ d.label }}</div>
           <div class="bar-track h-1.5 w-full">
