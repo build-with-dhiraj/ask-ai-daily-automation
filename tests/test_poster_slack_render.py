@@ -306,5 +306,118 @@ class TestEvalPosterPipeline(unittest.TestCase):
         slept.assert_called()
 
 
+class TestOpsAndSafetyStripes(unittest.TestCase):
+    """C1.3b: real Ops + Safety floor stripe content (no placeholders)."""
+
+    def setUp(self) -> None:
+        self.digest = _import("daily_digest", "daily_digest.py")
+        self.eval_mod = _import("daily_eval", "daily_eval.py")
+
+    def test_digest_ops_stripe_contains_cost(self) -> None:
+        today = {
+            "cost_latency_answer_by_model": {
+                "gpt-4.1": {
+                    "request_count": 1200,
+                    "cost_usd": 12.34,
+                    "student_ttft_ms": {"p50": 4200, "p90": 5900, "p95": 7100},
+                },
+                "gemini": {
+                    "request_count": 800,
+                    "cost_usd": 5.66,
+                    "student_ttft_ms": {"p50": 3900, "p90": 5300, "p95": 6800},
+                },
+            },
+            "cost_latency_classifier": {"cost_usd": 2.00},
+            "langfuse_errors_total": 12,
+            "total_traces_24h": 1000,
+        }
+        yest = {"langfuse_errors_total": 8, "total_traces_24h": 1000}
+        text = self.digest._build_digest_ops_stripe_text(today, yest, None)
+        self.assertIn("$20.00 spent", text)
+        # Dominant traffic is gpt-4.1, student p90 = 5.90s
+        self.assertIn("student TTFT p90 5.90s", text)
+        self.assertIn("(gpt-4.1)", text)
+        # Errors today 1.2%, yesterday 0.8%, so triangle up
+        self.assertIn("errors 1.2%", text)
+        self.assertIn("▲", text)
+
+    def test_digest_safety_stripe_contains_downvote_rate(self) -> None:
+        today = {"downvote_rate_pct": 0.4523}
+        rows = [{
+            "n_requests": 10000, "n_success": 9856,
+        }]
+        text = self.digest._build_digest_safety_stripe_text(today, rows)
+        self.assertIn("Downvote rate 0.45%", text)
+        self.assertIn("VCP success 98.6%", text)
+
+    def test_digest_safety_stripe_handles_missing(self) -> None:
+        text = self.digest._build_digest_safety_stripe_text({}, None)
+        self.assertIn("Downvote rate n/a", text)
+        self.assertIn("VCP success n/a", text)
+
+    def test_scoreboard_ops_stripe_contains_run_cost(self) -> None:
+        snap = {
+            "run_cost_usd": 0.4567,
+            "n_judged": 989, "n_judgable": 989,
+            "acc_fail_pct": 4.2,
+        }
+        text = self.eval_mod._build_scoreboard_ops_stripe_text(snap)
+        self.assertIn("$0.46 run cost", text)
+        self.assertIn("989 traces judged", text)
+        self.assertIn("Wilson CI ±", text)
+        self.assertIn("pp on academic", text)
+
+    def test_scoreboard_safety_stripe_contains_academic_with_floor(self) -> None:
+        snap = {"acc_fail_pct": 5.1, "exp_fail_pct": 12.4}
+        text = self.eval_mod._build_scoreboard_safety_stripe_text(snap)
+        self.assertIn("Academic FAIL 5.1%", text)
+        self.assertIn("(floor 6%)", text)
+        self.assertIn("Experience FAIL 12.4%", text)
+
+
+class TestKillSwitchRoundTrip(unittest.TestCase):
+    """C1.3c: kill-switch detector reads what summariser writes."""
+
+    def setUp(self) -> None:
+        self.digest = _import("daily_digest", "daily_digest.py")
+
+    def _build(self, eval_summary):
+        return self.digest._summarise_today_for_snapshot(
+            error_obs=[], total_errors=0, score_items=[],
+            dv_in_sample=0, total_traces=1000, dump_rows=None,
+            academic_rows=None, non_academic_rows=None,
+            behavior_follow_rows=None, behavior_rephrase_rows=None,
+            classifier_snapshot=None, cost_latency_data=None,
+            eval_summary=eval_summary,
+        )
+
+    def test_summariser_writes_kill_switch_keys(self) -> None:
+        snap = self._build({"acc_fail_pct": 4.0})
+        self.assertIn("academic_fail_pct", snap)
+        self.assertIn("downvote_rate_pct", snap)
+        self.assertEqual(snap["academic_fail_pct"], 4.0)
+
+    def test_breach_above_floor(self) -> None:
+        snap = self._build({"acc_fail_pct": 6.5})
+        self.assertTrue(self.digest._detect_kill_switch_breach(snap))
+
+    def test_no_breach_below_floor(self) -> None:
+        snap = self._build({"acc_fail_pct": 5.9})
+        self.assertFalse(self.digest._detect_kill_switch_breach(snap))
+
+    def test_downvote_rate_computed_from_inputs(self) -> None:
+        # 15 / 1000 * 100 = 1.5% > 1.0% floor → breach
+        snap = self.digest._summarise_today_for_snapshot(
+            error_obs=[], total_errors=0, score_items=[],
+            dv_in_sample=15, total_traces=1000, dump_rows=None,
+            academic_rows=None, non_academic_rows=None,
+            behavior_follow_rows=None, behavior_rephrase_rows=None,
+            classifier_snapshot=None, cost_latency_data=None,
+            eval_summary=None,
+        )
+        self.assertAlmostEqual(snap["downvote_rate_pct"], 1.5, places=4)
+        self.assertTrue(self.digest._detect_kill_switch_breach(snap))
+
+
 if __name__ == "__main__":
     unittest.main()

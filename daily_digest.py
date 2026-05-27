@@ -1808,6 +1808,7 @@ def _summarise_today_for_snapshot(
     behavior_rephrase_rows: Optional[List],
     classifier_snapshot: Optional[dict],
     cost_latency_data: Optional[dict] = None,
+    eval_summary: Optional[dict] = None,
 ) -> dict:
     """Build a compact dict of today's digest data for snapshot + LLM input.
 
@@ -1936,10 +1937,36 @@ def _summarise_today_for_snapshot(
                         ),
                     }
 
+    # Kill-switch inputs. Both are surfaced as canonical top-level keys so
+    # `_detect_kill_switch_breach` can read them without poking at nested
+    # eval / Langfuse sub-objects.
+    #
+    #   downvote_rate_pct  = csat=0 / total_traces * 100 (Langfuse 24h)
+    #   academic_fail_pct  = mirrored from eval_summary["acc_fail_pct"] (eval
+    #                        is run separately; we read its snapshot here so
+    #                        the digest's kill-switch sees the same number
+    #                        the scoreboard reports).
+    if total_traces and total_traces > 0:
+        downvote_rate_pct_val: Optional[float] = round(
+            float(dv_in_sample) / float(total_traces) * 100.0, 4
+        )
+    else:
+        downvote_rate_pct_val = None
+    academic_fail_pct_val: Optional[float] = None
+    if isinstance(eval_summary, dict):
+        v = eval_summary.get("acc_fail_pct")
+        if v is not None and not isinstance(v, bool):
+            try:
+                academic_fail_pct_val = float(v)
+            except (TypeError, ValueError):
+                academic_fail_pct_val = None
+
     return {
         "langfuse_errors_total": int(total_errors),
         "langfuse_errors_breakdown": cat_counts,
         "downvotes_csat0_count": int(dv_in_sample),
+        "downvote_rate_pct": downvote_rate_pct_val,
+        "academic_fail_pct": academic_fail_pct_val,
         "score_rows_fetched": len(score_items or []),
         "total_traces_24h": int(total_traces),
         "snapshot_category_split": snapshot_cat_counts,
@@ -3163,6 +3190,105 @@ def build_blocks(
 # C1.3 — Poster pipeline main + thread block builders
 # ---------------------------------------------------------------------------
 
+def _build_digest_ops_stripe_text(
+    today_summary: dict,
+    yesterday_snapshot: Optional[dict],
+    stream_logs_rows: Optional[List],
+) -> str:
+    """Build the Ops stripe one-line body for the digest main message.
+
+    Returns plain mrkdwn (no header). Shape:
+      `$X.XX spent · student TTFT p90 X.Xs · errors X.X% [▲/▼]`
+
+    Defensive: any missing input degrades to `n/a` for that field.
+    """
+    # Cost: sum of answer-model + classifier cost from today's summary.
+    cost_total = 0.0
+    answer_models = (today_summary or {}).get("cost_latency_answer_by_model") or {}
+    for _model, m in answer_models.items():
+        try:
+            cost_total += float((m or {}).get("cost_usd") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    classifier_snap = (today_summary or {}).get("cost_latency_classifier") or None
+    if isinstance(classifier_snap, dict):
+        try:
+            cost_total += float(classifier_snap.get("cost_usd") or 0.0)
+        except (TypeError, ValueError):
+            pass
+    cost_str = f"${cost_total:.2f} spent"
+
+    # Student TTFT p90: pick the dominant-traffic answer model and report its
+    # student p90 in seconds. Falls back to n/a when no answer-model rows.
+    ttft_str = "student TTFT p90 n/a"
+    if answer_models:
+        dominant = max(
+            answer_models.items(),
+            key=lambda kv: (kv[1] or {}).get("request_count") or 0,
+        )
+        d_model, d_m = dominant
+        student = (d_m or {}).get("student_ttft_ms") or {}
+        p90_ms = student.get("p90")
+        ttft_str = f"student TTFT p90 {_fmt_ms_as_seconds(p90_ms)} ({d_model})"
+
+    # Error rate: langfuse_errors_total / total_traces_24h. Compare to
+    # yesterday's same ratio to render an arrow.
+    errs_today = float((today_summary or {}).get("langfuse_errors_total") or 0.0)
+    traces_today = float((today_summary or {}).get("total_traces_24h") or 0.0)
+    err_rate_today: Optional[float] = (
+        (errs_today / traces_today * 100.0) if traces_today > 0 else None
+    )
+    err_rate_yest: Optional[float] = None
+    if isinstance(yesterday_snapshot, dict):
+        ey = float(yesterday_snapshot.get("langfuse_errors_total") or 0.0)
+        ty = float(yesterday_snapshot.get("total_traces_24h") or 0.0)
+        if ty > 0:
+            err_rate_yest = ey / ty * 100.0
+    arrow = ""
+    if err_rate_today is not None and err_rate_yest is not None:
+        diff = err_rate_today - err_rate_yest
+        if abs(diff) >= 0.05:
+            arrow = " ▲" if diff > 0 else " ▼"
+    if err_rate_today is None:
+        err_str = "errors n/a"
+    else:
+        err_str = f"errors {err_rate_today:.1f}%{arrow}"
+
+    return f"   {cost_str} · {ttft_str} · {err_str}"
+
+
+def _build_digest_safety_stripe_text(
+    today_summary: dict,
+    stream_logs_rows: Optional[List],
+) -> str:
+    """Build the Safety floor stripe body for the digest main message.
+
+    Shape: `Downvote rate X.XX% · VCP success XX.X%`
+    """
+    dv_rate = (today_summary or {}).get("downvote_rate_pct")
+    if dv_rate is None:
+        dv_str = "Downvote rate n/a"
+    else:
+        try:
+            dv_str = f"Downvote rate {float(dv_rate):.2f}%"
+        except (TypeError, ValueError):
+            dv_str = "Downvote rate n/a"
+
+    vcp_str = "VCP success n/a"
+    if stream_logs_rows:
+        r = stream_logs_rows[0]
+        n_req = _stream_logs_get(r, "n_requests", 0) or 0
+        n_ok = _stream_logs_get(r, "n_success", 0) or 0
+        try:
+            if int(n_req) > 0:
+                pct = 100.0 * float(n_ok) / float(n_req)
+                vcp_str = f"VCP success {pct:.1f}%"
+        except (TypeError, ValueError):
+            pass
+
+    return f"   {dv_str} · {vcp_str}"
+
+
 def build_main_blocks(
     *, image_url: str, poster_input: dict,
     ops_text: str, safety_text: str, footer_text: str,
@@ -3458,6 +3584,7 @@ def main() -> int:
         behavior_rephrase_rows=rephrase_rows,
         classifier_snapshot=classifier_snap_for_summary,
         cost_latency_data=cost_latency_data,
+        eval_summary=eval_summary,
     )
 
     yesterday_snapshot = _load_yesterday_snapshot()
@@ -3553,8 +3680,12 @@ def main() -> int:
                 "digest", poster_input, date_str
             )
             if image_url:
-                ops_text = "(see thread)"
-                safety_text = "(see thread)"
+                ops_text = _build_digest_ops_stripe_text(
+                    today_summary, yesterday_snapshot, stream_logs_rows
+                )
+                safety_text = _build_digest_safety_stripe_text(
+                    today_summary, stream_logs_rows
+                )
                 footer = poster_slack.digest_footer_links()
                 main_blocks = build_main_blocks(
                     image_url=image_url,

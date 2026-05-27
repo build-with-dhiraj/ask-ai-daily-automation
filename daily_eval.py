@@ -880,6 +880,11 @@ def finalize_eval_run(
             "exp_fail_pct": exp_fail_pct_snap,
             "axial_fail_pct": dict(summary.axial_fail_pct),
             "formatting_hotspot_chapters": formatting_hotspot_chapters,
+            # Run cost so the scoreboard Ops stripe can render real numbers
+            # without re-parsing the slack block text.
+            "run_cost_usd": round(float(est_usd), 4),
+            "run_tokens_in": int(in_tok),
+            "run_tokens_out": int(out_tok),
         }
         with open(prev_snapshot_path, "w") as _sf:
             json.dump(summary_snapshot, _sf, indent=2)
@@ -888,6 +893,38 @@ def finalize_eval_run(
         print(f"⚠️  Could not save today's snapshot ({_e}). WoW deltas may be missing tomorrow.")
 
     return block
+
+
+def _build_scoreboard_ops_stripe_text(snapshot: dict) -> str:
+    """Scoreboard Ops stripe one-line body. Shape:
+       `$X.XX run cost · N traces judged · Wilson CI +-X.Xpp on academic`
+
+    Sourced entirely from the eval snapshot (no slack-block re-parsing).
+    """
+    from judge_runner import wilson_ci_pp
+    snap = snapshot or {}
+    cost = float(snap.get("run_cost_usd") or 0.0)
+    n_judged = int(snap.get("n_judged") or 0)
+    n_judgable = int(snap.get("n_judgable") or n_judged)
+    acc_fail = float(snap.get("acc_fail_pct") or 0.0)
+    ci_pp = wilson_ci_pp(acc_fail, n_judgable) if n_judgable else 0.0
+    return (
+        f"   ${cost:.2f} run cost · {n_judged:,} traces judged · "
+        f"Wilson CI ±{ci_pp:.1f}pp on academic"
+    )
+
+
+def _build_scoreboard_safety_stripe_text(snapshot: dict, floor_pct: float = 6.0) -> str:
+    """Scoreboard Safety floor stripe one-line body. Shape:
+       `Academic FAIL X.X% (floor 6%) · Experience FAIL X.X%`
+    """
+    snap = snapshot or {}
+    acc_fail = float(snap.get("acc_fail_pct") or 0.0)
+    exp_fail = float(snap.get("exp_fail_pct") or 0.0)
+    return (
+        f"   Academic FAIL {acc_fail:.1f}% (floor {floor_pct:.0f}%) · "
+        f"Experience FAIL {exp_fail:.1f}%"
+    )
 
 
 def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -> None:
@@ -912,6 +949,9 @@ def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -
         "exp_fail_pct": 0.0,
         "axial_fail_pct": {},
         "formatting_hotspot_chapters": [],
+        "run_cost_usd": 0.0,
+        "run_tokens_in": 0,
+        "run_tokens_out": 0,
         "_eval_note": reason,
     }
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -1118,16 +1158,16 @@ def main() -> int:
                 poster_error = poster_error or "render_and_publish returned None"
             else:
                 alt_text = poster_slack._alt_text_for(poster_input, "scoreboard")
+                ops_stripe = _build_scoreboard_ops_stripe_text(today_snap)
+                safety_stripe = _build_scoreboard_safety_stripe_text(today_snap)
                 blocks: list = [
                     poster_slack.make_image_block(image_url, alt_text),
                     poster_slack.make_divider(),
                     poster_slack.make_section(
-                        f"⚙️ *Ops* (yesterday)\n{block.split(chr(10))[0]}"
+                        f"⚙️ *Ops* (yesterday)\n{ops_stripe}"
                     ),
                     poster_slack.make_section(
-                        f"🛟 *Safety floor*\n"
-                        f"Academic FAIL {poster_input['scoreboard'][0]['value_text']} "
-                        f"· Experience FAIL {poster_input['scoreboard'][1]['value_text']}"
+                        f"🛟 *Safety floor*\n{safety_stripe}"
                     ),
                     poster_slack.make_section("🧵 Full breakdown in thread"),
                     poster_slack.make_context(poster_slack.scoreboard_footer_links()),
