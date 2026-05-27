@@ -38,6 +38,11 @@ concurrency:
 jobs:
   digest:
     runs-on: self-hosted
+    # scripts/poster_publisher.py pushes the digest poster to gh-pages.
+    # Default GITHUB_TOKEN is contents:read which 403s on push. Mirror the
+    # pattern from prune-posters.yml. Mirrors daily-automation.yml's digest job.
+    permissions:
+      contents: write
     # Bumped 180 → 240 to match daily-automation.yml; accommodates the new
     # retry-tail budget across Metabase + Langfuse + Slack.
     timeout-minutes: 240
