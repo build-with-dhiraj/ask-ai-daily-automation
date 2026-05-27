@@ -1,0 +1,42 @@
+{#
+  Sparkline macro — inline SVG, ~120×24px.
+
+  Usage:
+    {% from "_sparkline.html.j2" import sparkline %}
+    {{ sparkline(spark_series=[1,2,3,...], width=120, height=24, stroke="#0f172a") }}
+
+  Args:
+    spark_series : list[float]  (length 1..14; if None/empty, renders empty 1px baseline)
+    width        : int          default 120
+    height       : int          default 24
+    stroke       : str          default "#0f172a" (slate-900)
+    fill         : str|None     default None (no area fill); pass an rgba() for soft fill
+    last_dot     : bool         default True; emits a 2px dot on the final point
+    label        : str|None     screen-reader-friendly text equivalent
+
+  Renders a polyline normalised to the series min/max with 2px vertical padding.
+  Includes a <title> child for accessibility.
+#}
+{% macro sparkline(spark_series, width=120, height=24, stroke="#0f172a", fill=none, last_dot=true, label=none) -%}
+  {%- set series = spark_series or [] -%}
+  {%- if series|length == 0 -%}
+    <svg role="img" aria-label="{{ label or 'no data' }}" width="{{ width }}" height="{{ height }}" viewBox="0 0 {{ width }} {{ height }}" xmlns="http://www.w3.org/2000/svg"><title>{{ label or 'no data' }}</title><line x1="0" y1="{{ (height/2)|int }}" x2="{{ width }}" y2="{{ (height/2)|int }}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="2 2"/></svg>
+  {%- else -%}
+    {%- set lo = series|min -%}
+    {%- set hi = series|max -%}
+    {%- set rng = (hi - lo) if (hi - lo) > 0 else 1 -%}
+    {%- set pad = 2 -%}
+    {%- set h2 = height - 2*pad -%}
+    {%- set n = series|length -%}
+    {%- set step = (width / (n - 1)) if n > 1 else 0 -%}
+    {%- set points = [] -%}
+    {%- for v in series -%}
+      {%- set x = (loop.index0 * step) if n > 1 else (width / 2) -%}
+      {%- set y = pad + h2 - ((v - lo) / rng) * h2 -%}
+      {%- set _ = points.append("%.1f,%.1f"|format(x, y)) -%}
+    {%- endfor -%}
+    {%- set last_x = (((n - 1) * step) if n > 1 else (width / 2)) -%}
+    {%- set last_y = (pad + h2 - ((series[-1] - lo) / rng) * h2) -%}
+    <svg role="img" aria-label="{{ label or 'trend sparkline' }}" width="{{ width }}" height="{{ height }}" viewBox="0 0 {{ width }} {{ height }}" xmlns="http://www.w3.org/2000/svg"><title>{{ label or 'trend sparkline' }}</title>{% if fill %}<polygon points="0,{{ height }} {{ points|join(' ') }} {{ width }},{{ height }}" fill="{{ fill }}" stroke="none"/>{% endif %}<polyline points="{{ points|join(' ') }}" fill="none" stroke="{{ stroke }}" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>{% if last_dot %}<circle cx="{{ "%.1f"|format(last_x) }}" cy="{{ "%.1f"|format(last_y) }}" r="2" fill="{{ stroke }}"/>{% endif %}</svg>
+  {%- endif -%}
+{%- endmacro %}
