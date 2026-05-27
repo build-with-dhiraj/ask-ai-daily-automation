@@ -3159,6 +3159,71 @@ def build_blocks(
     return blocks
 
 
+# ---------------------------------------------------------------------------
+# C1.3 — Poster pipeline main + thread block builders
+# ---------------------------------------------------------------------------
+
+def build_main_blocks(
+    *, image_url: str, poster_input: dict,
+    ops_text: str, safety_text: str, footer_text: str,
+) -> list:
+    """Compose the digest main message: poster image + Ops + Safety + thread
+    anchor + footer. The thread reply is posted separately ~2s later."""
+    alt = (poster_input.get("headline") or "").strip()
+    insights = poster_input.get("insights") or []
+    if insights:
+        alt += " | " + " · ".join(
+            (ins.get("claim") or "").strip() for ins in insights if ins.get("claim")
+        )
+    return [
+        {"type": "image", "image_url": image_url, "alt_text": alt[:1900]},
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": f"⚙️ *Ops* (yesterday)\n{ops_text}"}},
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": f"🛟 *Safety floor*\n{safety_text}"}},
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": "🧵 Full breakdown in thread"}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": footer_text}]},
+    ]
+
+
+def build_thread_blocks(
+    *,
+    cost_latency_text: str = "",
+    feedback_breakdown_text: str = "",
+    errors_text: str = "",
+    vcp_text: str = "",
+    freetext_text: str = "",
+    downvoted_text: str = "",
+    multi_turn_text: str = "",
+    rephrase_text: str = "",
+) -> list:
+    """Compose the thread-reply deep-dive blocks. Sections that come through
+    as empty are omitted to keep the thread tight. Caller is responsible for
+    pre-rendering each section's mrkdwn body."""
+    sections: list = []
+    parts = [
+        ("💸 *Cost & Latency (yesterday)*", cost_latency_text),
+        ("📊 *Feedback breakdown*", feedback_breakdown_text),
+        ("🚨 *Langfuse Errors (last 24h)*", errors_text),
+        ("⚙️ *Video co-pilot API health*", vcp_text),
+        ("💬 *Free-text feedback*", freetext_text),
+        ("📊 *Yesterday's Downvoted Queries*", downvoted_text),
+        ("🔁 *Multi-turn burst*", multi_turn_text),
+        ("🗣️ *Rephrase / language-switch*", rephrase_text),
+    ]
+    for header, body in parts:
+        if not body or not str(body).strip():
+            continue
+        sections.append({"type": "divider"})
+        sections.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"{header}\n{body}"[:2900]},
+        })
+    return sections
+
+
 def post_to_slack(blocks: list, fallback_text: str) -> bool:
     # Production-only Slack post. GitHub Actions sets GITHUB_ACTIONS=true on every
     # job (github-hosted AND self-hosted). Local shells do not. This guard prevents
@@ -3471,7 +3536,59 @@ def main() -> int:
         )
         return 0
 
-    posted = post_to_slack(blocks, fallback_text)
+    # C1.3 — Poster pipeline (gated on POSTER_PIPELINE=1). On any render or
+    # publish failure, fall through to the legacy block-kit post so the
+    # day's data still lands.
+    poster_enabled = os.environ.get("POSTER_PIPELINE", "").strip() == "1"
+    posted = False
+    if poster_enabled:
+        try:
+            from scripts import poster_slack  # type: ignore
+            poster_input = poster_slack.build_digest_poster_input(
+                today_summary,
+                top_insights_text if isinstance(top_insights_text, dict) else {},
+            )
+            date_str = today_summary.get("date") or today_str
+            image_url = poster_slack.render_and_publish(
+                "digest", poster_input, date_str
+            )
+            if image_url:
+                ops_text = "(see thread)"
+                safety_text = "(see thread)"
+                footer = poster_slack.digest_footer_links()
+                main_blocks = build_main_blocks(
+                    image_url=image_url,
+                    poster_input=poster_input,
+                    ops_text=ops_text,
+                    safety_text=safety_text,
+                    footer_text=footer,
+                )
+                posted = poster_slack.post_blocks_to_slack(
+                    SLACK_WEBHOOK, main_blocks, fallback_text
+                )
+                if posted:
+                    time.sleep(2)
+                    thread = build_thread_blocks(
+                        cost_latency_text=_coerce_insights_to_text(top_insights_text),
+                    )
+                    try:
+                        poster_slack.post_blocks_to_slack(
+                            SLACK_WEBHOOK, thread, "thread"
+                        )
+                    except Exception as exc:
+                        print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
+            else:
+                print(
+                    "[warn] poster pipeline yielded no image_url; "
+                    "falling back to text Block Kit.",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(f"[warn] poster pipeline raised: {exc!r}", file=sys.stderr)
+            posted = False
+
+    if not posted:
+        posted = post_to_slack(blocks, fallback_text)
     exit_code = 0
     if not posted:
         exit_code = 1

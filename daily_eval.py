@@ -70,7 +70,7 @@ from concurrent.futures import (
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urljoin
 
 
@@ -420,6 +420,54 @@ def normalize_metabase_rows(rows: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Slack post (incoming webhook)
 # ---------------------------------------------------------------------------
+
+def post_blocks_to_slack(
+    webhook_url: str, blocks: list, fallback_text: str, timeout: float = 120.0
+) -> bool:
+    """Block Kit variant of post_to_slack — used by the C1.3 poster pipeline.
+
+    Parallel to post_to_slack(webhook, text) below; the text-only function is
+    preserved for the fallback path and existing tests. Returns True on Slack
+    `ok` body, False on any error or local-shell guard.
+    """
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
+        print(
+            "[info] Not running in GitHub Actions, skipping Slack post.",
+            file=sys.stderr,
+        )
+        return False
+    import urllib.request
+    import urllib.error
+
+    payload = json.dumps({"blocks": blocks, "text": fallback_text}).encode("utf-8")
+    retryable_codes = (429, 502, 503, 504)
+    for attempt in range(2):
+        req = urllib.request.Request(
+            webhook_url, data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8")
+            if body.strip() == "ok":
+                return True
+            print(f"⚠️  Slack webhook returned non-ok: {body}")
+            return False
+        except urllib.error.HTTPError as exc:
+            if exc.code in retryable_codes and attempt == 0:
+                time.sleep(5)
+                continue
+            print(f"⚠️  Slack webhook HTTP {exc.code}: {exc!r}")
+            return False
+        except urllib.error.URLError as exc:
+            if attempt == 0:
+                time.sleep(5)
+                continue
+            print(f"⚠️  Slack webhook failed after retry: {exc!r}")
+            return False
+    return False
+
 
 def post_to_slack(webhook_url: str, text: str, timeout: float = 120.0) -> bool:
     """Post to Slack incoming webhook with bounded retry. Returns True on success.
@@ -1045,11 +1093,79 @@ def main() -> int:
                 pass
         return 0
 
-    try:
-        posted = post_to_slack(webhook, block)
-    except Exception as e:
-        print(f"❌ Slack post failed: {e}")
-        return 1
+    # C1.3 — Poster pipeline (gated on POSTER_PIPELINE=1). On any render or
+    # publish failure, falls back to the legacy text-only post; the daily
+    # signal still lands. POSTER_DRY_RUN=1 renders but skips the gh-pages push.
+    poster_enabled = os.environ.get("POSTER_PIPELINE", "").strip() == "1"
+    posted = False
+    poster_error: Optional[str] = None
+    if poster_enabled:
+        try:
+            from scripts import poster_slack  # type: ignore
+            # Reload today's snapshot from disk (finalize_eval_run wrote it).
+            today_snap = {}
+            try:
+                with open(prev_snapshot_path) as _sf:
+                    today_snap = json.load(_sf)
+            except Exception as exc:
+                poster_error = f"snapshot load: {exc!r}"
+            poster_input = poster_slack.build_scoreboard_poster_input(today_snap)
+            date_str = today_snap.get("date") or date.today().isoformat()
+            image_url = poster_slack.render_and_publish(
+                "scoreboard", poster_input, date_str
+            )
+            if image_url is None:
+                poster_error = poster_error or "render_and_publish returned None"
+            else:
+                alt_text = poster_slack._alt_text_for(poster_input, "scoreboard")
+                blocks: list = [
+                    poster_slack.make_image_block(image_url, alt_text),
+                    poster_slack.make_divider(),
+                    poster_slack.make_section(
+                        f"⚙️ *Ops* (yesterday)\n{block.split(chr(10))[0]}"
+                    ),
+                    poster_slack.make_section(
+                        f"🛟 *Safety floor*\n"
+                        f"Academic FAIL {poster_input['scoreboard'][0]['value_text']} "
+                        f"· Experience FAIL {poster_input['scoreboard'][1]['value_text']}"
+                    ),
+                    poster_slack.make_section("🧵 Full breakdown in thread"),
+                    poster_slack.make_context(poster_slack.scoreboard_footer_links()),
+                ]
+                fallback_text = poster_input["headline"]
+                posted = poster_slack.post_blocks_to_slack(
+                    webhook, blocks, fallback_text
+                )
+                if posted:
+                    # Thread-reply (~2s later) with the full text breakdown.
+                    time.sleep(2)
+                    thread_blocks = [
+                        poster_slack.make_section(
+                            f"🧵 *Deep dive · {date_str}*\n```{block}```"
+                        )
+                    ]
+                    try:
+                        poster_slack.post_blocks_to_slack(
+                            webhook, thread_blocks, "thread"
+                        )
+                    except Exception as exc:
+                        print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
+        except Exception as exc:
+            poster_error = f"unexpected: {exc!r}"
+            print(f"[warn] poster pipeline failed: {exc!r}", file=sys.stderr)
+
+    if not poster_enabled or poster_error is not None or not posted:
+        if poster_error:
+            print(
+                f"[warn] poster pipeline degraded ({poster_error}); "
+                "falling back to text-only post.",
+                file=sys.stderr,
+            )
+        try:
+            posted = post_to_slack(webhook, block)
+        except Exception as e:
+            print(f"❌ Slack post failed: {e}")
+            return 1
     if not posted:
         # post_to_slack already logged the reason (non-ok body, HTTP error,
         # local-run guard, etc.). Mirror digest behaviour: exit 1 so the
