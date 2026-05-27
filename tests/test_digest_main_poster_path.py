@@ -223,6 +223,34 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
         self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
         self.assertIn("cause=render", stderr)
 
+    def test_thread_cost_latency_text_is_not_insights(self) -> None:
+        """Code Reviewer F4: the thread's Cost & Latency section must carry
+        real cost/latency data (from fmt_cost_and_latency), NOT the Top 3
+        Insights body. Regression test for the prior wiring that pasted the
+        insights headline under the cost/latency heading."""
+        captured: dict = {}
+
+        def capture_build_thread_blocks(**kwargs):
+            captured.update(kwargs)
+            return [{"type": "section",
+                     "text": {"type": "mrkdwn", "text": "thread"}}]
+
+        with mock.patch.object(
+            self.digest, "build_thread_blocks",
+            side_effect=capture_build_thread_blocks,
+        ), mock.patch.object(
+            self.digest, "fmt_cost_and_latency",
+            return_value="*Cost & latency body (gpt-4o-mini, p50=420ms, $0.012)*",
+        ):
+            exit_code, _, _, _, _ = self._run_main({})
+        self.assertEqual(exit_code, 0)
+        self.assertIn("cost_latency_text", captured)
+        body = captured["cost_latency_text"]
+        # Must contain the real cost/latency body we mocked.
+        self.assertIn("p50=420ms", body)
+        # Must NOT contain the insights headline (mocked above as "Test headline.").
+        self.assertNotIn("Test headline.", body)
+
     def test_programming_error_propagates_not_swallowed(self) -> None:
         """B1: a NameError from render_and_publish is NOT recoverable;
         it must propagate so CI surfaces the bug red. Catching `Exception`

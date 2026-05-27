@@ -3743,8 +3743,28 @@ def main() -> int:
                         poster_error = f"cause=publish reason={exc!r}"
                     if posted:
                         time.sleep(2)
+                        # Code Reviewer F4: the prior call passed
+                        # _coerce_insights_to_text(top_insights_text) under
+                        # the "Cost & Latency" heading, painting the Top 3
+                        # Insights body into the wrong section. Use the real
+                        # cost/latency renderer (fmt_cost_and_latency, same
+                        # one the legacy block uses) so the heading and body
+                        # match.
+                        try:
+                            thread_cost_latency_text = fmt_cost_and_latency(
+                                cost_latency_data
+                                or {"ok": False, "answer_by_model": {}, "classifier": None}
+                            )
+                        except Exception as exc:  # defensive, mirrors legacy
+                            print(
+                                f"[warn] fmt_cost_and_latency raised for thread: {exc!r}",
+                                file=sys.stderr,
+                            )
+                            thread_cost_latency_text = (
+                                "_(cost/latency unavailable, Metabase fetch failed)_"
+                            )
                         thread = build_thread_blocks(
-                            cost_latency_text=_coerce_insights_to_text(top_insights_text),
+                            cost_latency_text=thread_cost_latency_text,
                         )
                         try:
                             poster_slack.post_blocks_to_slack(
