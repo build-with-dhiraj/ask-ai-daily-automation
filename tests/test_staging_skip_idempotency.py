@@ -1,6 +1,6 @@
 """Staging skips per-UTC-date idempotency entirely.
 
-The staging Slack channel is a test surface — operators must be able to
+The staging Slack channel is a test surface; operators must be able to
 re-dispatch repeatedly throughout the same UTC day and see fresh posts. The
 day-level marker is therefore disabled for SLACK_TARGET=staging in both
 daily_digest.py and daily_eval.py. Prod (and the implicit-prod fallback)

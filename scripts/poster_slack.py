@@ -332,7 +332,7 @@ def render_and_publish(
 
     # Narrowed: PosterRenderError propagates so caller logs cause=render with
     # the actual exception message. The previous bare `except Exception:`
-    # swallowed AttributeError/TypeError/etc. silently — now those programming
+    # swallowed AttributeError/TypeError/etc. silently. Now those programming
     # errors surface in CI, exactly the contract _POSTER_RECOVERABLE assumes.
     png = render_poster(surface, poster_input)  # type: ignore[arg-type]
 

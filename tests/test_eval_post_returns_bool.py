@@ -147,7 +147,7 @@ class TestMarkerOnlyWrittenOnSuccess(unittest.TestCase):
         # Staging is a test surface: operators must be able to re-dispatch
         # repeatedly throughout the same UTC day and see fresh posts. The
         # day-level marker is therefore disabled entirely when
-        # SLACK_TARGET=staging — _eval_write_posted_marker must be a no-op
+        # SLACK_TARGET=staging: _eval_write_posted_marker must be a no-op
         # and no file should appear on disk. (Supersedes the prior
         # "marker filename includes -staging-" gate, which only prevented
         # cross-target blocking; staging→staging same-day blocking was the

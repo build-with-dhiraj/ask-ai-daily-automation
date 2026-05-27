@@ -1238,7 +1238,7 @@ def main() -> int:
                         # all land here. Render-time failures are the typical
                         # case; if a future publish-side exception slips past
                         # the two explicit clauses above, it'll be reported as
-                        # cause=render — narrow further if/when that happens.
+                        # cause=render; narrow further if/when that happens.
                         image_url = None
                         poster_error = poster_error or f"cause=render reason={exc!r}"
                 if image_url is None:

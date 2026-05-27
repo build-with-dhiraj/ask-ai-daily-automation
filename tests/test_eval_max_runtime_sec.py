@@ -3,8 +3,8 @@
 Context: cleanup-mess/eval-env-tuning changed the workflow default from
 `EVAL_MAX_RUNTIME_SEC="14400"` (4h soft cap) to `EVAL_MAX_RUNTIME_SEC="0"`
 (no soft cap; run to completion, with the job's `timeout-minutes: 600` as
-runaway backstop). The Python env-reader must therefore treat "0" — and
-any non-positive value — as "no cap" (None), the same as a missing/blank
+runaway backstop). The Python env-reader must therefore treat "0", and
+any non-positive value, as "no cap" (None), the same as a missing/blank
 env var.
 
 These tests pin the contract so we don't regress to interpreting "0" as
@@ -49,7 +49,7 @@ class TestEvalMaxRuntimeSec(unittest.TestCase):
         self.assertIsNone(_read_with_env("   "))
 
     def test_zero_returns_none_no_cap(self):
-        """'0' is the new workflow default — must mean 'no soft cap'."""
+        """'0' is the new workflow default; must mean 'no soft cap'."""
         self.assertIsNone(_read_with_env("0"))
         self.assertIsNone(_read_with_env("0.0"))
 

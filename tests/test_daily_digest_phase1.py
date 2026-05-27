@@ -1,13 +1,13 @@
 """Phase 1 digest restructure unit tests.
 
 Covers:
-  • fmt_top_insights (LLM call mocked) — happy path, Azure URLError fallback,
+  • fmt_top_insights (LLM call mocked): happy path, Azure URLError fallback,
     no-digit validation fallback, first-run (no snapshot) path
-  • _write_digest_snapshot / _load_yesterday_snapshot — round-trip + staleness
-  • fmt_downvote_reasons_table — junk-tag filter, count floor, top-6 cap
-  • fmt_multi_turn_burst / fmt_rephrase_rate — top-5 cap, context block, empty
-  • fmt_broken_chapter — plain English body (no `∩`); no-overlap message
-  • fmt_scores — anti-regression: no verbatim sample lines
+  • _write_digest_snapshot / _load_yesterday_snapshot: round-trip + staleness
+  • fmt_downvote_reasons_table: junk-tag filter, count floor, top-6 cap
+  • fmt_multi_turn_burst / fmt_rephrase_rate: top-5 cap, context block, empty
+  • fmt_broken_chapter: plain English body (no `∩`); no-overlap message
+  • fmt_scores: anti-regression, no verbatim sample lines
 
 All tests are pure (no real HTTP, no Slack contact).
 """
@@ -53,7 +53,7 @@ def _make_mock_openai_client(content: str):
 
 
 # ---------------------------------------------------------------------------
-# fmt_top_insights — Azure call mocked
+# fmt_top_insights: Azure call mocked
 # ---------------------------------------------------------------------------
 
 
@@ -253,7 +253,7 @@ class TestDigestSnapshot(unittest.TestCase):
 
     def test_missing_date_field_rejected(self) -> None:
         # Pre-#19 snapshots that lack the date field cannot be safely treated
-        # as yesterday's — refuse rather than risk a stale-by-hours baseline.
+        # as yesterday's; refuse rather than risk a stale-by-hours baseline.
         self.tmp.write_text(
             json.dumps({"errors_total": 5}), encoding="utf-8"
         )
@@ -479,7 +479,7 @@ class TestFmtBrokenChapter(unittest.TestCase):
 
     def test_no_judge_hotspots_renders_as_finding_with_cardinalities(self) -> None:
         # When daily eval reported no formatting hotspots, the cross-check
-        # still ran — just against an empty judge set. Empty state copy
+        # still ran, just against an empty judge set. Empty state copy
         # surfaces that cardinality (#20).
         eval_summary = {"formatting_hotspot_chapters": []}
         follow_rows = [
@@ -499,7 +499,7 @@ class TestFmtBrokenChapter(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# fmt_scores anti-regression — no verbatim sample lines
+# fmt_scores anti-regression: no verbatim sample lines
 # ---------------------------------------------------------------------------
 
 
@@ -523,7 +523,7 @@ class TestFmtScoresNoVerbatim(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# build_blocks ordering — Phase 1 layout
+# build_blocks ordering: Phase 1 layout
 # ---------------------------------------------------------------------------
 
 
@@ -589,10 +589,10 @@ class TestBuildBlocksPhase1Order(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# SRE-review regression — judge_runner.get_openai_client() calls sys.exit on
+# SRE-review regression: judge_runner.get_openai_client() calls sys.exit on
 # missing Azure creds. sys.exit raises SystemExit (BaseException), NOT
 # Exception, so the `except Exception` wrapper in fmt_top_insights /
-# _call_top_insights_llm would NOT catch it — the digest job would hard-crash
+# _call_top_insights_llm would NOT catch it; the digest job would hard-crash
 # with no Slack post. fmt_top_insights now pre-checks the required Azure env
 # vars and short-circuits to the placeholder before reaching get_openai_client.
 # ---------------------------------------------------------------------------
@@ -604,7 +604,7 @@ class TestFmtTopInsightsMissingCreds(unittest.TestCase):
 
     def setUp(self) -> None:
         self.mod = _load_digest()
-        # Snapshot env so we can restore in tearDown — we mutate broadly here.
+        # Snapshot env so we can restore in tearDown; we mutate broadly here.
         self._saved_env = {
             k: os.environ.get(k)
             for k in (
@@ -709,7 +709,7 @@ class TestFmtTopInsightsMissingCreds(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Architect-review regression — snapshot must be written EVEN when the
+# Architect-review regression: snapshot must be written EVEN when the
 # idempotency-marker check fires the early return. Otherwise any same-day
 # rerun (staging test, cron retry, manual repost) silently leaves tomorrow's
 # Top 3 Insights without a baseline.

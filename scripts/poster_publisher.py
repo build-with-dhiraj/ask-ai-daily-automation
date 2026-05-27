@@ -1,5 +1,5 @@
 """
-poster_publisher.py — Publish daily poster PNGs to the gh-pages branch.
+poster_publisher.py: publish daily poster PNGs to the gh-pages branch.
 
 Part of C1.2c (poster-format redesign). See scripts/README_poster_publisher.md
 for the operational contract.
@@ -80,7 +80,7 @@ def _ensure_worktree() -> Path:
     try:
         _run(["git", "fetch", "origin", GH_PAGES_BRANCH], cwd=REPO_ROOT)
     except PosterPublishError as e:
-        # Remote may not have gh-pages yet (first push). That's OK — local branch
+        # Remote may not have gh-pages yet (first push). That's OK; local branch
         # must still exist for the worktree to be created. We don't fail here,
         # but emit a clear hint so first-time operators know what to do.
         log.warning(
@@ -99,7 +99,7 @@ def _ensure_worktree() -> Path:
                 cwd=WORKTREE_DIR,
             )
         except PosterPublishError:
-            # No remote yet — reset to local gh-pages
+            # No remote yet; reset to local gh-pages
             _run(
                 ["git", "reset", "--hard", GH_PAGES_BRANCH], cwd=WORKTREE_DIR
             )
@@ -191,12 +191,12 @@ def publish_poster(
 def _verify_url_reachable(url: str, timeout: int = 120) -> bool:
     """Poll a URL until it returns HTTP 200 or timeout elapses.
 
-    Note on default timeout: GitHub Pages takes 30s–2 min to serve a freshly
+    Note on default timeout: GitHub Pages takes 30s to 2 min to serve a freshly
     pushed file on the first publish (subsequent updates settle in ~30s). The
     default of 120s covers the first-publish case; callers that know the file
     is already cached can pass a shorter timeout.
 
-    GitHub Pages takes ~30–60s to publish a freshly-pushed file. Callers
+    GitHub Pages takes ~30 to 60s to publish a freshly-pushed file. Callers
     should treat False as a soft failure (the push succeeded; serving lags).
 
     Args:

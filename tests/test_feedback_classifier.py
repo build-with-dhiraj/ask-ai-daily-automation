@@ -145,8 +145,8 @@ class TestClassifyRows(unittest.TestCase):
         self.assertEqual(disk["n_classified"], 2)
 
     def test_curly_apostrophe_in_response_normalises(self) -> None:
-        # The prompt uses a curly apostrophe in "Couldn't understand the question"
-        # — guard against the model returning either form.
+        # The prompt uses a curly apostrophe in "Couldn't understand the question";
+        # guard against the model returning either form.
         rows = [{"free_text_feedback": "didn't get my question", "aiintentid": "a"}]
         client = _make_mock_client(["Couldn’t understand the question"])
         snap = _mod.classify_rows(rows, client=client, deployment="d", prompt="p")
