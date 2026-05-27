@@ -3,12 +3,12 @@
   "date_iso": "2026-05-26",
   "kill_switch_breach": false,
   "headline": "Downvotes cost 1.6× more than upvotes, and three Physics chapters are driving 40% of the multi-turn retry burst.",
-  "subhead": "One chapter — Rotational Motion, Class 11 — appears on both lists. Likely first-answer failure, not content gap.",
+  "subhead": "Rotational Motion (Class 11) appears on both lists. Likely a first-answer failure, not a content gap.",
   "insights": [
     {
       "topic_label": "CLARITY",
       "icon": "📈",
-      "claim": "Rotational Motion retries spiking — 18% fire 3+ queries in 60s (was 7%).",
+      "claim": "Rotational Motion retries are spiking. 18% of students fire 3+ queries in 60s, up from 7%.",
       "evidence": "Same chapter is #2 downvote source today.",
       "context": "Pattern matches a first-answer failure, not a content gap.",
       "spark_series": [6, 7, 6, 7, 8, 7, 9, 10, 11, 12, 13, 15, 17, 18]
@@ -16,7 +16,7 @@
     {
       "topic_label": "LATENCY",
       "icon": "⚠️",
-      "claim": "gpt-5.2 student TTFT degraded — p90 9.0s ▲ +1.1s · student-only.",
+      "claim": "gpt-5.2 student TTFT degraded. p90 9.0s ▲ +1.1s, student-only.",
       "evidence": "Server-mode TTFT unchanged → pre-LLM path.",
       "context": "Isolated to the streaming gateway, not model inference.",
       "spark_series": [7.9, 7.9, 8.0, 7.9, 8.0, 7.9, 7.9, 8.0, 8.0, 8.0, 8.1, 8.4, 8.7, 9.0]
@@ -24,7 +24,7 @@
     {
       "topic_label": "FEEDBACK",
       "icon": "💬",
-      "claim": "\"Other\" free-text up 22% — language-switch theme dominates.",
+      "claim": "\"Other\" free-text up 22%. Language-switch theme dominates.",
       "evidence": "Language-mismatch tag appears 4× today, 0× last week.",
       "context": "Localisation, not content quality.",
       "spark_series": [0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 2, 2, 3, 4]
@@ -32,8 +32,8 @@
     {
       "topic_label": "USAGE",
       "icon": "🔥",
-      "claim": "Class 11 Physics traffic up 14% — exam-week pattern, not regression.",
-      "evidence": "Concentrated 19:00–22:00 IST; matches Mar 2026 cohort.",
+      "claim": "Class 11 Physics traffic up 14%. Exam-week pattern, not a regression.",
+      "evidence": "Concentrated 19:00 to 22:00 IST; matches Mar 2026 cohort.",
       "context": null,
       "spark_series": [100, 102, 99, 101, 103, 105, 104, 108, 110, 112, 113, 115, 116, 114]
     }

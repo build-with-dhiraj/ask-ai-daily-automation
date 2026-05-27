@@ -1,5 +1,5 @@
 {#-
-  Daily Digest poster — 640px wide, height grows with content.
+  Daily Digest poster. 640px wide, height grows with content.
 
   Renders 0..5 insight cards. Quiet-day path: empty insights → calm
   "no anomalies" panel. Breach path: kill_switch_breach=true draws
@@ -22,7 +22,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Daily Digest — {{ date_iso }}</title>
+<title>Daily Digest · {{ date_iso }}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
@@ -66,7 +66,7 @@
   </div>
   {% else %}
   <div class="mx-7 mt-4 mb-3 flex items-center gap-3 bg-slate-50 border border-slate-200 px-4 py-2.5">
-    <span aria-hidden="true" class="text-[13px]">—</span>
+    <span aria-hidden="true" class="text-[13px]">·</span>
     <span class="mono text-[11px] tracking-widest uppercase text-slate-500">Safety floor holding</span>
   </div>
   {% endif %}
@@ -129,7 +129,7 @@
     </div>
     <div class="border border-slate-200 bg-slate-50 px-5 py-6 text-center">
       <div class="display text-[18px] text-slate-900 mb-1">No anomalies today</div>
-      <div class="text-[13px] text-slate-600">All metrics within band — see thread for the full table.</div>
+      <div class="text-[13px] text-slate-600">All metrics within band. See thread for the full table.</div>
     </div>
   </section>
   {% endif %}

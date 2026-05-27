@@ -1,5 +1,5 @@
 {#-
-  Rubric Scoreboard poster — 640px wide, height grows with content.
+  Rubric Scoreboard poster. 640px wide, height grows with content.
 
   Renders from a snapshot dict; see templates/README.md for the JSON schema.
   No cost figures, no raw student feedback, no per-chapter downvote rates
@@ -13,13 +13,13 @@
   "green":   {"text": "#15803d", "bg": "#f0fdf4", "rail": "#16a34a", "dot": "#16a34a"},
   "neutral": {"text": "#334155", "bg": "#f8fafc", "rail": "#94a3b8", "dot": "#94a3b8"}
 } -%}
-{%- set dir_glyph = {"up": "▲", "down": "▼", "flat": "—"} -%}
-{%- set state_glyph = {"red": "🔴", "yellow": "🟡", "green": "🟢", "neutral": "—"} -%}
+{%- set dir_glyph = {"up": "▲", "down": "▼", "flat": "·"} -%}
+{%- set state_glyph = {"red": "🔴", "yellow": "🟡", "green": "🟢", "neutral": "·"} -%}
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Rubric Scoreboard — {{ date_iso }}</title>
+<title>Rubric Scoreboard · {{ date_iso }}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
@@ -65,7 +65,7 @@
   </div>
   {% else %}
   <div class="mx-7 mt-4 mb-3 flex items-center gap-3 bg-slate-50 border border-slate-200 px-4 py-2.5">
-    <span aria-hidden="true" class="text-[13px]">—</span>
+    <span aria-hidden="true" class="text-[13px]">·</span>
     <span class="mono text-[11px] tracking-widest uppercase text-slate-500">All metrics within band</span>
   </div>
   {% endif %}
