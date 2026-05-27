@@ -71,6 +71,9 @@ def post_blocks_to_slack(
     has_webhook = bool(
         os.environ.get("SLACK_WEBHOOK_URL")
         or os.environ.get("SLACK_WEBHOOK_URL_TEST")
+        # forward-compat: SLACK_WEBHOOK_URL_PROD is not currently set anywhere
+        # in this repo (we use SLACK_WEBHOOK_URL for prod), but kept here so a
+        # future _PROD secret naming pivot does not break this guard silently.
         or os.environ.get("SLACK_WEBHOOK_URL_PROD")
     )
     if not (in_actions and has_webhook):
@@ -123,7 +126,9 @@ def _fmt_delta_pp(delta: Optional[float]) -> tuple[str, str, str]:
     """Return (delta_text, delta_dir, state) for a percentage-point delta."""
     if delta is None:
         return ("n/a", "flat", "neutral")
-    sign = "+" if delta > 0 else ("" if delta == 0 else "")
+    # `:.1f` already prints "-1.4" with a leading minus; we only prepend "+"
+    # for strictly positive deltas (zero stays "0.0pp").
+    sign = "+" if delta > 0 else ""
     direction = "up" if delta > 0 else ("down" if delta < 0 else "flat")
     state = "neutral"
     return (f"{sign}{delta:.1f}pp", direction, state)

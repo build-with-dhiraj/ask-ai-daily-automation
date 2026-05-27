@@ -1148,7 +1148,7 @@ def main() -> int:
     posted = False
     poster_error: Optional[str] = None
     if poster_disabled:
-        poster_error = "POSTER_DISABLE=1"
+        poster_error = "cause=disabled"
     else:
         try:
             from scripts import poster_slack  # type: ignore
@@ -1158,7 +1158,7 @@ def main() -> int:
                 with open(prev_snapshot_path) as _sf:
                     today_snap = json.load(_sf)
             except Exception as exc:
-                poster_error = f"snapshot load: {exc!r}"
+                poster_error = f"cause=snapshot reason={exc!r}"
             poster_input = poster_slack.build_scoreboard_poster_input(today_snap)
             date_str = today_snap.get("date") or date.today().isoformat()
             try:
@@ -1167,9 +1167,11 @@ def main() -> int:
                 )
             except Exception as exc:
                 image_url = None
-                poster_error = poster_error or f"render failed: {exc!r}"
+                poster_error = poster_error or f"cause=render reason={exc!r}"
             if image_url is None:
-                poster_error = poster_error or "render failed: render_and_publish returned None"
+                poster_error = poster_error or (
+                    "cause=render reason=render_and_publish returned None"
+                )
             else:
                 alt_text = poster_slack._alt_text_for(poster_input, "scoreboard")
                 ops_stripe = _build_scoreboard_ops_stripe_text(today_snap)
@@ -1193,7 +1195,7 @@ def main() -> int:
                     )
                 except Exception as exc:
                     posted = False
-                    poster_error = poster_error or f"publish failed: {exc!r}"
+                    poster_error = poster_error or f"cause=publish reason={exc!r}"
                 if posted:
                     # Thread-reply (~2s later) with the full text breakdown.
                     time.sleep(2)
@@ -1209,15 +1211,15 @@ def main() -> int:
                     except Exception as exc:
                         print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
                 elif poster_error is None:
-                    poster_error = "publish failed: post_blocks_to_slack returned False"
+                    poster_error = "cause=post reason=post_blocks_to_slack returned False"
         except Exception as exc:
-            poster_error = poster_error or f"render failed: {exc!r}"
-            print(f"[warn] poster pipeline failed: {exc!r}", file=sys.stderr)
+            poster_error = poster_error or f"cause=render reason={exc!r}"
+            print(f"[poster] [warn] pipeline failed: {exc!r}", file=sys.stderr)
 
     if poster_disabled or poster_error is not None or not posted:
         if poster_error:
             print(
-                f"[warn] poster pipeline degraded: {poster_error}",
+                f"[poster] [warn] degraded {poster_error}",
                 file=sys.stderr,
             )
         degraded_block = (

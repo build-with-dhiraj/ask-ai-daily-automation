@@ -3677,7 +3677,7 @@ def main() -> int:
     posted = False
     poster_error: Optional[str] = None
     if poster_disabled:
-        poster_error = "POSTER_DISABLE=1"
+        poster_error = "cause=disabled"
     else:
         try:
             from scripts import poster_slack  # type: ignore
@@ -3692,7 +3692,7 @@ def main() -> int:
                 )
             except Exception as exc:
                 image_url = None
-                poster_error = f"render failed: {exc!r}"
+                poster_error = f"cause=render reason={exc!r}"
             if image_url:
                 ops_text = _build_digest_ops_stripe_text(
                     today_summary, yesterday_snapshot, stream_logs_rows
@@ -3714,7 +3714,7 @@ def main() -> int:
                     )
                 except Exception as exc:
                     posted = False
-                    poster_error = f"publish failed: {exc!r}"
+                    poster_error = f"cause=publish reason={exc!r}"
                 if posted:
                     time.sleep(2)
                     thread = build_thread_blocks(
@@ -3727,18 +3727,18 @@ def main() -> int:
                     except Exception as exc:
                         print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
                 elif poster_error is None:
-                    poster_error = "publish failed: post_blocks_to_slack returned False"
+                    poster_error = "cause=post reason=post_blocks_to_slack returned False"
             elif poster_error is None:
-                poster_error = "render failed: render_and_publish returned None"
+                poster_error = "cause=render reason=render_and_publish returned None"
         except Exception as exc:
-            poster_error = poster_error or f"render failed: {exc!r}"
-            print(f"[warn] poster pipeline raised: {exc!r}", file=sys.stderr)
+            poster_error = poster_error or f"cause=render reason={exc!r}"
+            print(f"[poster] [warn] pipeline raised: {exc!r}", file=sys.stderr)
             posted = False
 
     if not posted:
         if poster_error:
             print(
-                f"[warn] poster pipeline degraded: {poster_error}",
+                f"[poster] [warn] degraded {poster_error}",
                 file=sys.stderr,
             )
         degraded_marker = "⚠️ Poster degraded (see workflow logs)\n\n"

@@ -180,6 +180,10 @@ class _BaseDigestMainTest(unittest.TestCase):
 
 class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
 
+    # REGRESSION: any new opt-in gate keyed on an undefined env var must break
+    # this assertion. The whole point of the gate inversion was that the poster
+    # path is the DEFAULT and only POSTER_DISABLE=1 (or a render/publish/post
+    # failure) takes the legacy path.
     def test_main_runs_poster_path_by_default(self) -> None:
         """No POSTER_DISABLE in env: poster pipeline fires, legacy stays untouched."""
         exit_code, m_render, m_post_blocks, m_post_text, _ = self._run_main({})
@@ -203,7 +207,7 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
             sent_text.startswith("⚠️ Poster degraded (see workflow logs)"),
             f"missing degradation marker: {sent_text[:80]!r}",
         )
-        self.assertIn("POSTER_DISABLE=1", stderr)
+        self.assertIn("cause=disabled", stderr)
 
     def test_main_falls_back_on_render_failure(self) -> None:
         from scripts.poster_renderer import PosterRenderError
@@ -217,7 +221,7 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
         m_post_text.assert_called_once()
         sent_text = m_post_text.call_args.args[1]
         self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
-        self.assertIn("render failed", stderr)
+        self.assertIn("cause=render", stderr)
 
     def test_main_falls_back_on_publish_failure(self) -> None:
         # render succeeds, but post_blocks_to_slack returns False.
@@ -231,7 +235,7 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
         m_post_text.assert_called_once()
         sent_text = m_post_text.call_args.args[1]
         self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
-        self.assertIn("publish failed", stderr)
+        self.assertIn("cause=post", stderr)
 
 
 if __name__ == "__main__":
