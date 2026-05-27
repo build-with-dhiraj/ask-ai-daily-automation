@@ -2270,35 +2270,87 @@ def _call_top_insights_llm(today_data: dict, yesterday_snapshot: dict) -> dict:
     raise RuntimeError("Top insights LLM call exhausted retries")  # pragma: no cover
 
 
+def _detect_kill_switch_breach(today_data: dict) -> bool:
+    """Pre-LLM deterministic breach check.
+
+    Breach when EITHER:
+      • today_data["academic_fail_pct"] > 6.0  (Academic FAIL floor)
+      • today_data["downvote_rate_pct"]  > 1.0 (Downvote rate SLO)
+
+    Both fields are caller-supplied. Missing / None / non-numeric → False.
+    We do NOT derive these from raw snapshot internals here — the caller
+    (digest) owns the upstream computation and passes the canonical numbers
+    in. This keeps the kill-switch readable and testable in isolation.
+    """
+    if not isinstance(today_data, dict):
+        return False
+    for key, threshold in (
+        ("academic_fail_pct", _KILL_SWITCH_ACADEMIC_FAIL_PCT),
+        ("downvote_rate_pct", _KILL_SWITCH_DOWNVOTE_RATE_PCT),
+    ):
+        v = today_data.get(key)
+        if v is None or isinstance(v, bool):
+            continue
+        try:
+            if float(v) > threshold:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _empty_insights_payload(
+    *,
+    headline: str = "",
+    kill_switch_breach: bool = False,
+    llm_unavailable: bool = False,
+) -> dict:
+    return {
+        "headline": headline,
+        "insights": [],
+        "kill_switch_breach": kill_switch_breach,
+        "_llm_unavailable": llm_unavailable,
+    }
+
+
 def fmt_top_insights(
     today_data: dict, yesterday_snapshot: Optional[dict]
-) -> str:
-    """Build the Top 3 Insights body. Reader sees no "LLM" wording.
+) -> dict:
+    """Build the Top Insights structured payload for the downstream renderer.
 
-    Returns a string suitable for embedding under a "Top 3 Insights" header.
-    Failure modes:
-      • Azure creds missing/empty   → "(insights unavailable today)" placeholder
-                                      (must run BEFORE the snapshot check —
-                                       missing creds is a digest-config error,
-                                       not a first-run state)
-      • yesterday_snapshot is None  → first-run placeholder (no Azure call)
-      • Azure call raises           → "(insights unavailable today)" placeholder
-      • Output has zero digit chars → same fallback (proxy for missing number citations)
+    v2 returns a STRUCTURED DICT, not a string. The Slack/poster renderer
+    (C1.3) is responsible for prose formatting; this function's job is to
+    produce a clean, validated data structure.
 
-    NEVER raises; always returns a string. The digest must keep posting.
+    Schema:
+      {
+        "headline":           str,   # narrative one-liner, may be empty
+        "insights":           list,  # 0..5 normalized insight dicts
+        "kill_switch_breach": bool,  # deterministic, computed pre-LLM
+        "_llm_unavailable":   bool,  # True on missing creds / call failure
+      }
+
+    Failure modes (all degrade gracefully — NEVER raise):
+      • Azure creds missing/empty   → sentinel payload (_llm_unavailable=True).
+                                      kill_switch_breach is still computed
+                                      so the renderer can banner the breach.
+      • yesterday_snapshot is None  → first-run payload (no Azure call).
+                                      Empty insights, but kill-switch still
+                                      flagged from today_data.
+      • Azure call raises (network, ValueError on JSON parse, anything)
+                                    → sentinel payload (_llm_unavailable=True),
+                                      kill-switch preserved.
     """
-    # SRE review fix: judge_runner.get_openai_client() calls sys.exit(...) when
-    # required Azure env vars are missing — sys.exit raises SystemExit, which
-    # is BaseException, NOT Exception. Our `except Exception` wrapper below
-    # would NOT catch it, and the digest job would hard-crash with no Slack
-    # post. Pre-check here so a future credential rotation to empty values
-    # degrades to the placeholder instead of taking the digest down.
-    #
-    # Names mirror judge_runner.get_openai_client: api_key from either
-    # AZURE_API_KEY or AZURE_OPENAI_API_KEY; endpoint from either
-    # AZURE_ENDPOINT or AZURE_OPENAI_ENDPOINT; deployment from DEPLOYMENT_NAME
-    # or AZURE_DEPLOYMENT_NAME. We do NOT modify judge_runner — eval and
-    # classifier callers legitimately want the loud sys.exit on missing creds.
+    # Deterministic kill-switch check runs FIRST and is preserved across every
+    # downstream branch — the renderer's breach banner must fire even when the
+    # LLM is unavailable.
+    breach = _detect_kill_switch_breach(today_data)
+
+    # SRE review fix (carried over from v1): judge_runner.get_openai_client()
+    # calls sys.exit(...) on missing Azure env vars. SystemExit is
+    # BaseException, NOT Exception, so the except wrapper below would NOT
+    # catch it and the digest job would hard-crash. Pre-check here so a
+    # credential rotation to empty values degrades to the sentinel.
     api_key_present = bool(
         (os.environ.get("AZURE_API_KEY") or os.environ.get("AZURE_OPENAI_API_KEY") or "").strip()
     )
@@ -2319,41 +2371,50 @@ def fmt_top_insights(
     ]
     if missing:
         print(
-            f"[warn] Top 3 Insights skipped — Azure env vars missing or empty: "
+            f"[warn] Top Insights v2 skipped — Azure env vars missing or empty: "
             f"{', '.join(missing)}",
             file=sys.stderr,
         )
-        return "_(insights unavailable today)_"
+        return _empty_insights_payload(
+            kill_switch_breach=breach, llm_unavailable=True
+        )
 
     if yesterday_snapshot is None:
-        return "_(insights begin tomorrow once a baseline exists)_"
+        # First-run: no baseline to compare against. Renderer shows the
+        # appropriate empty state. Kill-switch still flagged from today.
+        return _empty_insights_payload(kill_switch_breach=breach)
 
     try:
-        raw = _call_top_insights_llm(today_data, yesterday_snapshot)
+        parsed = _call_top_insights_llm(today_data, yesterday_snapshot)
     except Exception as exc:
         print(
-            f"[warn] Top 3 Insights LLM call failed; using fallback: {exc!r}",
+            f"[warn] Top Insights v2 LLM call failed; degrading to sentinel: {exc!r}",
             file=sys.stderr,
         )
-        return "_(insights unavailable today)_"
+        return _empty_insights_payload(
+            kill_switch_breach=breach, llm_unavailable=True
+        )
 
-    text = (raw or "").strip()
-    if not text:
-        print("[warn] Top 3 Insights returned empty; using fallback", file=sys.stderr)
-        return "_(insights unavailable today)_"
-
-    # Validation: bullets must cite numbers. The fixed "no significant change"
-    # sentence is the one allowed exception (no digits required).
-    if "No significant day-on-day changes today" in text:
-        return text
-    if not any(ch.isdigit() for ch in text):
+    if not isinstance(parsed, dict):
         print(
-            "[warn] Top 3 Insights output has no digit characters — failing validation",
+            "[warn] Top Insights v2 parsed payload not a dict; sentinel",
             file=sys.stderr,
         )
-        return "_(insights unavailable today)_"
+        return _empty_insights_payload(
+            kill_switch_breach=breach, llm_unavailable=True
+        )
 
-    return text
+    # Re-normalize defensively. _call_top_insights_llm already applies the
+    # quality filter in production, but a test (or future caller) may swap
+    # in a mock that returns raw model output. Running the filter here makes
+    # fmt_top_insights' contract self-enforcing regardless of caller path.
+    normalized = _normalize_insights_payload(parsed)
+    return {
+        "headline": normalized["headline"],
+        "insights": normalized["insights"],
+        "kill_switch_breach": breach,
+        "_llm_unavailable": False,
+    }
 
 
 # ---------------------------------------------------------------------------
