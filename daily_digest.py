@@ -3444,6 +3444,12 @@ def post_to_slack(blocks: list, fallback_text: str) -> bool:
 
 
 def main() -> int:
+    """Daily digest entry point.
+
+    Poster pipeline is the default per Locked Decision #6 (single design,
+    single ship). Set POSTER_DISABLE=1 only for emergency rollback to the
+    legacy Block Kit text post.
+    """
     print(f"[info] Fetching data for digest ({today_str}, yesterday={yesterday}) …", file=sys.stderr)
 
     _preflight_langfuse_or_exit()
@@ -3663,12 +3669,16 @@ def main() -> int:
         )
         return 0
 
-    # C1.3: Poster pipeline (gated on POSTER_PIPELINE=1). On any render or
-    # publish failure, fall through to the legacy block-kit post so the
-    # day's data still lands.
-    poster_enabled = os.environ.get("POSTER_PIPELINE", "").strip() == "1"
+    # C1.3 / Locked Decision #6: Poster pipeline is the DEFAULT (single design,
+    # single ship). Legacy Block Kit text path is reachable only via:
+    #   (a) POSTER_DISABLE=1 (reserved kill-switch for emergency rollback), or
+    #   (b) the try/except fallback below when render or publish fails.
+    poster_disabled = os.environ.get("POSTER_DISABLE", "").strip() == "1"
     posted = False
-    if poster_enabled:
+    poster_error: Optional[str] = None
+    if poster_disabled:
+        poster_error = "POSTER_DISABLE=1"
+    else:
         try:
             from scripts import poster_slack  # type: ignore
             poster_input = poster_slack.build_digest_poster_input(
@@ -3676,9 +3686,13 @@ def main() -> int:
                 top_insights_text if isinstance(top_insights_text, dict) else {},
             )
             date_str = today_summary.get("date") or today_str
-            image_url = poster_slack.render_and_publish(
-                "digest", poster_input, date_str
-            )
+            try:
+                image_url = poster_slack.render_and_publish(
+                    "digest", poster_input, date_str
+                )
+            except Exception as exc:
+                image_url = None
+                poster_error = f"render failed: {exc!r}"
             if image_url:
                 ops_text = _build_digest_ops_stripe_text(
                     today_summary, yesterday_snapshot, stream_logs_rows
@@ -3694,9 +3708,13 @@ def main() -> int:
                     safety_text=safety_text,
                     footer_text=footer,
                 )
-                posted = poster_slack.post_blocks_to_slack(
-                    SLACK_WEBHOOK, main_blocks, fallback_text
-                )
+                try:
+                    posted = poster_slack.post_blocks_to_slack(
+                        SLACK_WEBHOOK, main_blocks, fallback_text
+                    )
+                except Exception as exc:
+                    posted = False
+                    poster_error = f"publish failed: {exc!r}"
                 if posted:
                     time.sleep(2)
                     thread = build_thread_blocks(
@@ -3708,18 +3726,35 @@ def main() -> int:
                         )
                     except Exception as exc:
                         print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
-            else:
-                print(
-                    "[warn] poster pipeline yielded no image_url; "
-                    "falling back to text Block Kit.",
-                    file=sys.stderr,
-                )
+                elif poster_error is None:
+                    poster_error = "publish failed: post_blocks_to_slack returned False"
+            elif poster_error is None:
+                poster_error = "render failed: render_and_publish returned None"
         except Exception as exc:
+            poster_error = poster_error or f"render failed: {exc!r}"
             print(f"[warn] poster pipeline raised: {exc!r}", file=sys.stderr)
             posted = False
 
     if not posted:
-        posted = post_to_slack(blocks, fallback_text)
+        if poster_error:
+            print(
+                f"[warn] poster pipeline degraded: {poster_error}",
+                file=sys.stderr,
+            )
+        degraded_marker = "⚠️ Poster degraded (see workflow logs)\n\n"
+        degraded_fallback_text = degraded_marker + fallback_text
+        degraded_blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": degraded_marker.rstrip() + "\n"},
+            },
+            *blocks,
+        ]
+        try:
+            posted = post_to_slack(degraded_blocks, degraded_fallback_text)
+        except Exception as exc:
+            print(f"❌ Slack post failed: {exc!r}", file=sys.stderr)
+            posted = False
     exit_code = 0
     if not posted:
         exit_code = 1

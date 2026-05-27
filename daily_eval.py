@@ -965,6 +965,12 @@ def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    """Daily eval entry point.
+
+    Poster pipeline is the default per Locked Decision #6 (single design,
+    single ship). Set POSTER_DISABLE=1 only for emergency rollback to the
+    legacy text-only Slack post.
+    """
     p = argparse.ArgumentParser(description="Daily eval orchestrator")
     p.add_argument("--samples", help="Use this samples JSON instead of pulling from Metabase")
     p.add_argument("--dry-run", action="store_true",
@@ -1133,13 +1139,17 @@ def main() -> int:
                 pass
         return 0
 
-    # C1.3: Poster pipeline (gated on POSTER_PIPELINE=1). On any render or
-    # publish failure, falls back to the legacy text-only post; the daily
-    # signal still lands. POSTER_DRY_RUN=1 renders but skips the gh-pages push.
-    poster_enabled = os.environ.get("POSTER_PIPELINE", "").strip() == "1"
+    # C1.3 / Locked Decision #6: Poster pipeline is the DEFAULT (single design,
+    # single ship). The legacy text-only path is reachable only via:
+    #   (a) POSTER_DISABLE=1 (reserved kill-switch for emergency rollback), or
+    #   (b) the try/except fallback below when render or publish fails.
+    # POSTER_DRY_RUN=1 renders but skips the gh-pages push.
+    poster_disabled = os.environ.get("POSTER_DISABLE", "").strip() == "1"
     posted = False
     poster_error: Optional[str] = None
-    if poster_enabled:
+    if poster_disabled:
+        poster_error = "POSTER_DISABLE=1"
+    else:
         try:
             from scripts import poster_slack  # type: ignore
             # Reload today's snapshot from disk (finalize_eval_run wrote it).
@@ -1151,11 +1161,15 @@ def main() -> int:
                 poster_error = f"snapshot load: {exc!r}"
             poster_input = poster_slack.build_scoreboard_poster_input(today_snap)
             date_str = today_snap.get("date") or date.today().isoformat()
-            image_url = poster_slack.render_and_publish(
-                "scoreboard", poster_input, date_str
-            )
+            try:
+                image_url = poster_slack.render_and_publish(
+                    "scoreboard", poster_input, date_str
+                )
+            except Exception as exc:
+                image_url = None
+                poster_error = poster_error or f"render failed: {exc!r}"
             if image_url is None:
-                poster_error = poster_error or "render_and_publish returned None"
+                poster_error = poster_error or "render failed: render_and_publish returned None"
             else:
                 alt_text = poster_slack._alt_text_for(poster_input, "scoreboard")
                 ops_stripe = _build_scoreboard_ops_stripe_text(today_snap)
@@ -1173,9 +1187,13 @@ def main() -> int:
                     poster_slack.make_context(poster_slack.scoreboard_footer_links()),
                 ]
                 fallback_text = poster_input["headline"]
-                posted = poster_slack.post_blocks_to_slack(
-                    webhook, blocks, fallback_text
-                )
+                try:
+                    posted = poster_slack.post_blocks_to_slack(
+                        webhook, blocks, fallback_text
+                    )
+                except Exception as exc:
+                    posted = False
+                    poster_error = poster_error or f"publish failed: {exc!r}"
                 if posted:
                     # Thread-reply (~2s later) with the full text breakdown.
                     time.sleep(2)
@@ -1190,19 +1208,23 @@ def main() -> int:
                         )
                     except Exception as exc:
                         print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
+                elif poster_error is None:
+                    poster_error = "publish failed: post_blocks_to_slack returned False"
         except Exception as exc:
-            poster_error = f"unexpected: {exc!r}"
+            poster_error = poster_error or f"render failed: {exc!r}"
             print(f"[warn] poster pipeline failed: {exc!r}", file=sys.stderr)
 
-    if not poster_enabled or poster_error is not None or not posted:
+    if poster_disabled or poster_error is not None or not posted:
         if poster_error:
             print(
-                f"[warn] poster pipeline degraded ({poster_error}); "
-                "falling back to text-only post.",
+                f"[warn] poster pipeline degraded: {poster_error}",
                 file=sys.stderr,
             )
+        degraded_block = (
+            "⚠️ Poster degraded (see workflow logs)\n\n" + block
+        )
         try:
-            posted = post_to_slack(webhook, block)
+            posted = post_to_slack(webhook, degraded_block)
         except Exception as e:
             print(f"❌ Slack post failed: {e}")
             return 1
