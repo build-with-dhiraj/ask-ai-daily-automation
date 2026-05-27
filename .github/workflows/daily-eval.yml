@@ -55,3 +55,7 @@ jobs:
           # is the runaway backstop. Previously 14400 (4h), but daily-eval has no
           # hard duration requirement.
           EVAL_MAX_RUNTIME_SEC: "0"
+          # Poster publish gating: this workflow is workflow_dispatch only, so
+          # there is no `dry_run` input. Default to NO push so manual eval
+          # dispatches never accidentally write to gh-pages.
+          POSTER_AUTO_PUSH: "0"

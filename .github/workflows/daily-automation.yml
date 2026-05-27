@@ -97,8 +97,13 @@ jobs:
           JUDGE_CONCURRENCY: "16"
           # 0 = no soft cap; run until all rows judged. The job's timeout-minutes: 600
           # (10h) above is the runaway backstop, not a target. Previously 14400 (4h),
-          # but daily-eval has no hard duration requirement — let it run to completion.
+          # but daily-eval has no hard duration requirement; let it run to completion.
           EVAL_MAX_RUNTIME_SEC: "0"
+          # Poster publish gating (parity with the digest job below). The eval
+          # job posts the scoreboard poster, so it needs the same gh-pages
+          # push toggle. Without this the eval-job poster render would always
+          # treat itself as dry_run and never publish.
+          POSTER_AUTO_PUSH: ${{ (github.event_name == 'schedule' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
 
       # Guarantee a digest-readable JSON on disk so the artifact is never stale/missing keys
       # (digest C12 + upload both rely on this path).
