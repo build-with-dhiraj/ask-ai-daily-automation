@@ -1044,7 +1044,7 @@ def _fmt_delta_arrow(delta_pct: Optional[float]) -> str:
     Negative → `↓N%` (absolute value).
     """
     if delta_pct is None:
-        return "—"
+        return "n/a"
     if abs(delta_pct) < 0.5:
         return "↑0%"
     if delta_pct >= 0:
@@ -1058,34 +1058,34 @@ def _fmt_ms_as_seconds(ms: Optional[float]) -> str:
     None → `,`. Negative or non-numeric → `,`.
     """
     if ms is None:
-        return "—"
+        return "n/a"
     try:
         v = float(ms)
     except (TypeError, ValueError):
-        return "—"
+        return "n/a"
     if v < 0:
-        return "—"
+        return "n/a"
     return f"{v / 1000.0:.2f}s"
 
 
 def _fmt_ms_int(ms: Optional[float]) -> str:
     """Render milliseconds as a compact integer ms string, or `,` for None."""
     if ms is None:
-        return "—"
+        return "n/a"
     try:
         return str(int(round(float(ms))))
     except (TypeError, ValueError):
-        return "—"
+        return "n/a"
 
 
 def _fmt_tokens(n: Optional[int]) -> str:
     """Render a token count compactly: 330_960_000 → '331.0M'."""
     if n is None:
-        return "—"
+        return "n/a"
     try:
         v = float(n)
     except (TypeError, ValueError):
-        return "—"
+        return "n/a"
     if v >= 1_000_000:
         return f"{v / 1_000_000:.1f}M"
     if v >= 1_000:
@@ -1103,11 +1103,11 @@ def _fmt_cost_per_response(v: Optional[float]) -> str:
     `None` → em-dash placeholder (renderer uses this for empty/zero rows).
     """
     if v is None:
-        return "—"
+        return "n/a"
     try:
         x = float(v)
     except (TypeError, ValueError):
-        return "—"
+        return "n/a"
     if x <= 0:
         return f"${x:.4f}"
     # Pick decimals so the first 4 significant digits show:
@@ -1125,11 +1125,11 @@ def _fmt_ms_p50_only(ms: Optional[float]) -> str:
     `None` → em-dash placeholder.
     """
     if ms is None:
-        return "—"
+        return "n/a"
     try:
         return f"{int(round(float(ms)))}ms"
     except (TypeError, ValueError):
-        return "—"
+        return "n/a"
 
 
 # Bucket display order (locked product decision).
@@ -1166,10 +1166,10 @@ def _render_feedback_breakdown_table(
     # `0 ·, · ,`.
     def _cell(bucket: Optional[Dict[str, Any]]) -> str:
         if not bucket:
-            return "0 · — · —"
+            return "0 · n/a · n/a"
         cnt = int(bucket.get("count") or 0)
         if cnt <= 0:
-            return "0 · — · —"
+            return "0 · n/a · n/a"
         ttft = _fmt_ms_p50_only(bucket.get("student_ttft_p50_ms"))
         cpr = _fmt_cost_per_response(bucket.get("cost_per_response"))
         return f"{cnt:,} · {ttft} · {cpr}"
@@ -1355,7 +1355,7 @@ def fmt_cost_and_latency(data: dict) -> str:
             for buckets in fb_by_model.values()
         ):
             lines.append("")
-            lines.append("📊 *Feedback breakdown — answer models only*")
+            lines.append("📊 *Feedback breakdown · answer models only*")
             lines.append(
                 "_Yesterday's responses bucketed by student feedback. "
                 "`ttft` = student p50 (end-to-end UX). "
@@ -2998,7 +2998,7 @@ def build_blocks(
     _CL_SOFT_LIMIT = 2700
     _CL_PREFIX = ":money_with_wings: *Cost & Latency (yesterday)*\n"
     full_body = f"{_CL_PREFIX}{cost_latency_block}"
-    fb_marker = "📊 *Feedback breakdown — answer models only*"
+    fb_marker = "📊 *Feedback breakdown · answer models only*"
     if len(full_body) > _CL_SOFT_LIMIT and fb_marker in cost_latency_block:
         head, _, tail = cost_latency_block.partition(fb_marker)
         head_section = f"{_CL_PREFIX}{head.rstrip()}"
