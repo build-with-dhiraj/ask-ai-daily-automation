@@ -1225,7 +1225,20 @@ def main() -> int:
                         image_url = poster_slack.render_and_publish(
                             "scoreboard", poster_input, date_str
                         )
+                    except PosterPublishUnreachableError as exc:
+                        image_url = None
+                        poster_error = poster_error or (
+                            f"cause=publish_unreachable reason={exc!r}"
+                        )
+                    except PosterPublishError as exc:
+                        image_url = None
+                        poster_error = poster_error or f"cause=publish reason={exc!r}"
                     except _POSTER_RECOVERABLE as exc:
+                        # PosterRenderError + the generic urllib/OS/timeout tail
+                        # all land here. Render-time failures are the typical
+                        # case; if a future publish-side exception slips past
+                        # the two explicit clauses above, it'll be reported as
+                        # cause=render — narrow further if/when that happens.
                         image_url = None
                         poster_error = poster_error or f"cause=render reason={exc!r}"
                 if image_url is None:

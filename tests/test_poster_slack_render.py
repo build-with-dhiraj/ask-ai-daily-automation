@@ -110,7 +110,11 @@ class TestRenderAndPublish(unittest.TestCase):
         self.assertEqual(m_render.call_count, 1)
         self.assertEqual(m_pub.call_count, 1)
 
-    def test_render_error_returns_none(self) -> None:
+    def test_render_error_propagates(self) -> None:
+        """F2: PosterRenderError used to be swallowed and returned as None,
+        making the caller log a misleading 'render_and_publish returned None'.
+        Now it propagates so the caller's typed except clause attaches the
+        real exception message to cause=render."""
         from scripts.poster_renderer import PosterRenderError
         with mock.patch(
             "scripts.poster_renderer.render_poster",
@@ -118,23 +122,28 @@ class TestRenderAndPublish(unittest.TestCase):
         ), mock.patch(
             "scripts.poster_publisher.publish_poster"
         ) as m_pub, mock.patch.object(sys, "stderr"):
-            url = self.ps.render_and_publish(
-                "scoreboard", {"date_iso": "2026-05-27"}, "2026-05-27"
-            )
-        self.assertIsNone(url)
+            with self.assertRaises(PosterRenderError):
+                self.ps.render_and_publish(
+                    "scoreboard", {"date_iso": "2026-05-27"}, "2026-05-27"
+                )
         m_pub.assert_not_called()
 
-    def test_publish_failure_returns_none(self) -> None:
+    def test_publish_error_propagates(self) -> None:
+        """F2: PosterPublishError (e.g. gh-pages git push 403) used to be
+        swallowed by a bare except and returned as None, making the caller log
+        cause=render reason=render_and_publish returned None on dogfood run
+        #26532281104. Now it propagates so cause=publish is logged accurately."""
+        from scripts.poster_publisher import PosterPublishError
         with mock.patch(
             "scripts.poster_renderer.render_poster", return_value=self.png
         ), mock.patch(
             "scripts.poster_publisher.publish_poster",
-            side_effect=RuntimeError("git push failed"),
+            side_effect=PosterPublishError("git push origin HEAD:gh-pages: 403"),
         ), _EnvScope(POSTER_DRY_RUN=None), mock.patch.object(sys, "stderr"):
-            url = self.ps.render_and_publish(
-                "digest", {"date_iso": "2026-05-26"}, "2026-05-26"
-            )
-        self.assertIsNone(url)
+            with self.assertRaises(PosterPublishError):
+                self.ps.render_and_publish(
+                    "digest", {"date_iso": "2026-05-26"}, "2026-05-26"
+                )
 
     def test_dry_run_skips_publish_but_runs_render(self) -> None:
         with mock.patch(
