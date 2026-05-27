@@ -1,4 +1,4 @@
-"""C1.3 — Poster Slack render orchestration.
+"""C1.3: Poster Slack render orchestration.
 
 Bridges the data layers (eval snapshot, digest summary) to the poster
 renderer (HTML+Jinja+Playwright PNG) + publisher (gh-pages) + Slack
@@ -19,7 +19,7 @@ Design contract:
       Block Kit (caller passes it in) and logs a warning.
     • POSTER_DRY_RUN=1 short-circuits publish_poster (render still
       runs, validating the template + data shape).
-    • Thread reply orchestration is delegated to the caller — we
+    • Thread reply orchestration is delegated to the caller; we
       provide `post_thread_reply(...)` as a convenience helper.
 
 This module does not perform any I/O at import time.
@@ -57,7 +57,7 @@ def post_blocks_to_slack(
     """POST a Block Kit payload to a Slack incoming webhook.
 
     Parallel to daily_eval.post_to_slack(webhook, text) and
-    daily_digest.post_to_slack(blocks, fallback_text) — kept as a NEW
+    daily_digest.post_to_slack(blocks, fallback_text), kept as a NEW
     function so existing text-only and digest-blocks paths and their
     tests are unaffected. Returns True on Slack `ok` body, else False.
     """
@@ -103,13 +103,13 @@ def post_blocks_to_slack(
 
 
 # ---------------------------------------------------------------------------
-# Poster input builders — adapt snapshot/summary dicts to the template schema
+# Poster input builders: adapt snapshot/summary dicts to the template schema
 # ---------------------------------------------------------------------------
 
 def _fmt_delta_pp(delta: Optional[float]) -> tuple[str, str, str]:
     """Return (delta_text, delta_dir, state) for a percentage-point delta."""
     if delta is None:
-        return ("—", "flat", "neutral")
+        return ("n/a", "flat", "neutral")
     sign = "+" if delta > 0 else ("" if delta == 0 else "")
     direction = "up" if delta > 0 else ("down" if delta < 0 else "flat")
     state = "neutral"
@@ -150,7 +150,7 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
         {
             "label": "Academic FAIL",
             "value_text": f"{acc_fail:.1f}%",
-            "delta_text": "—",
+            "delta_text": "n/a",
             "delta_dir": "flat",
             "state": "red" if kill_switch_breach else "green",
             "note": "above 6% floor" if kill_switch_breach else "within 6% floor",
@@ -158,7 +158,7 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
         {
             "label": "Experience FAIL",
             "value_text": f"{exp_fail:.1f}%",
-            "delta_text": "—",
+            "delta_text": "n/a",
             "delta_dir": "flat",
             "state": "neutral",
             "note": "per-axial detail in thread",
@@ -166,7 +166,7 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
         {
             "label": "Overall PASS",
             "value_text": f"{pass_pct:.1f}%",
-            "delta_text": "—",
+            "delta_text": "n/a",
             "delta_dir": "flat",
             "state": "neutral",
             "note": f"n={n_judged}",

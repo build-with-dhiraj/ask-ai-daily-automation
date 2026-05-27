@@ -2907,7 +2907,7 @@ def build_plain_fallback(
 
 
 # ---------------------------------------------------------------------------
-# C1.3 — Insights coercion + poster wiring helpers
+# C1.3: Insights coercion + poster wiring helpers
 # ---------------------------------------------------------------------------
 
 _PLACEHOLDER_INSIGHTS = "_(insights begin tomorrow once a baseline exists)_"
@@ -2945,12 +2945,12 @@ def _coerce_insights_to_text(value) -> str:
             label = ins.get("topic_label") or ""
             claim = ins.get("claim") or ""
             evidence = ins.get("evidence") or ""
-            head = f"{i}. {icon} *{label}* — {claim}".strip()
+            head = f"{i}. {icon} *{label}*: {claim}".strip()
             lines.append(head)
             if evidence:
                 lines.append(f"   {evidence}")
         return "\n".join(lines)
-    # Unknown shape — degrade safely.
+    # Unknown shape; degrade safely.
     return _PLACEHOLDER_UNAVAILABLE
 
 
@@ -3187,7 +3187,7 @@ def build_blocks(
 
 
 # ---------------------------------------------------------------------------
-# C1.3 — Poster pipeline main + thread block builders
+# C1.3: Poster pipeline main + thread block builders
 # ---------------------------------------------------------------------------
 
 def _build_digest_ops_stripe_text(
@@ -3663,7 +3663,7 @@ def main() -> int:
         )
         return 0
 
-    # C1.3 — Poster pipeline (gated on POSTER_PIPELINE=1). On any render or
+    # C1.3: Poster pipeline (gated on POSTER_PIPELINE=1). On any render or
     # publish failure, fall through to the legacy block-kit post so the
     # day's data still lands.
     poster_enabled = os.environ.get("POSTER_PIPELINE", "").strip() == "1"

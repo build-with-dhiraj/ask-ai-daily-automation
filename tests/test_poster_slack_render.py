@@ -1,4 +1,4 @@
-"""C1.3 — poster + Slack render orchestration tests.
+"""C1.3: poster + Slack render orchestration tests.
 
 All Playwright/Chromium and gh-pages git operations are mocked. These tests
 cover the wiring contract:
@@ -172,7 +172,7 @@ class TestAltTextAndFooters(unittest.TestCase):
         pi = {
             "headline": "Downvotes cost 1.6× more.",
             "insights": [
-                {"claim": "Retries spiking — 18%."},
+                {"claim": "Retries spiking, 18%."},
                 {"claim": "TTFT degraded."},
             ],
         }

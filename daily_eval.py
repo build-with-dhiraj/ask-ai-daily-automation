@@ -1,5 +1,5 @@
 """
-Daily eval orchestrator — runs every morning, posts a single Slack message
+Daily eval orchestrator: runs every morning, posts a single Slack message
 that complements (does NOT touch) the existing Cowork daily digest.
 
 Pipeline:
@@ -22,23 +22,23 @@ Required env (set in Cowork SKILL.md or shell before invoking):
   AZURE_API_VERSION
   DEPLOYMENT_NAME
   METABASE_URL                # e.g. https://metabase-prod.penpencil.co
-  METABASE_API_KEY            # preferred — use for SSO accounts (X-Api-Key auth)
-  METABASE_USERNAME           # fallback — only needed when METABASE_API_KEY is not set
-  METABASE_PASSWORD           # fallback — only needed when METABASE_API_KEY is not set
+  METABASE_API_KEY            # preferred, use for SSO accounts (X-Api-Key auth)
+  METABASE_USERNAME           # fallback, only needed when METABASE_API_KEY is not set
+  METABASE_PASSWORD           # fallback, only needed when METABASE_API_KEY is not set
   METABASE_QUESTION_ID        # the saved question id for daily_stratified_sample.sql
-  LANGFUSE_PUBLIC_KEY         # optional — enables score writes + tracing
+  LANGFUSE_PUBLIC_KEY         # optional, enables score writes + tracing
   LANGFUSE_SECRET_KEY         # optional
   LANGFUSE_HOST               # optional (default https://cloud.langfuse.com)
   SLACK_WEBHOOK_URL           # the incoming-webhook for the eval channel
                               # (separate from the existing digest channel,
-                              # OR same channel — your call)
-  JUDGE_HTTP_TIMEOUT_SEC      # optional — per LLM call HTTP timeout (default 240s;
+                              # OR same channel, your call)
+  JUDGE_HTTP_TIMEOUT_SEC      # optional, per LLM call HTTP timeout (default 240s;
                               # prevents one hung Azure request from stalling the whole run)
-  METABASE_QUERY_TIMEOUT_SEC  # optional — Metabase card query HTTP timeout (default 600s;
+  METABASE_QUERY_TIMEOUT_SEC  # optional, Metabase card query HTTP timeout (default 600s;
                               # prevents socket timeout if stratified sample query is slow)
-  JUDGE_CONCURRENCY           # optional — concurrent LLM judges (default 1; e.g. 8 in CI)
-  JUDGE_CHUNK_SIZE            # optional — samples per ThreadPool batch (default max(32, 4×concurrency))
-  EVAL_MAX_RUNTIME_SEC        # optional — soft time budget; stop between chunks & finalize (graceful vs SIGKILL)
+  JUDGE_CONCURRENCY           # optional, concurrent LLM judges (default 1; e.g. 8 in CI)
+  JUDGE_CHUNK_SIZE            # optional, samples per ThreadPool batch (default max(32, 4×concurrency))
+  EVAL_MAX_RUNTIME_SEC        # optional, soft time budget; stop between chunks & finalize (graceful vs SIGKILL)
 
 Usage:
   # Full daily run (Metabase pull → judge → Slack post)
@@ -75,7 +75,7 @@ from urllib.parse import urljoin
 
 
 # ---------------------------------------------------------------------------
-# Idempotency guard — prevents duplicate eval Slack posts on the same UTC day.
+# Idempotency guard: prevents duplicate eval Slack posts on the same UTC day.
 # Mirrors the guard in daily_digest.py. Marker is written ONLY after a
 # successful Slack post so failed posts can be retried. FORCE_REPOST=1
 # bypasses (debugging only).
@@ -151,7 +151,7 @@ _SIGTERM_REQUESTED = threading.Event()
 
 def _handle_sigterm(_signum: int, _frame: Any) -> None:
     print(
-        "\n⚠️  SIGTERM received — finishing current chunk, then finalizing.",
+        "\n⚠️  SIGTERM received, finishing current chunk, then finalizing.",
         file=sys.stderr,
     )
     _SIGTERM_REQUESTED.set()
@@ -319,7 +319,7 @@ def _metabase_eval_total_attempts() -> int:
     number of TOTAL attempts (not retries-after-the-first). Internally we
     convert to ``max_retries = total - 1`` for the existing range loop.
 
-    Default 5 (i.e. 4 retries) — yields 4 sleeps of 10/20/40/80s = 150s total
+    Default 5 (i.e. 4 retries): yields 4 sleeps of 10/20/40/80s = 150s total
     backoff budget, within the 600-min job cap.
     """
     raw = (os.environ.get("METABASE_EVAL_RETRIES") or "").strip()
@@ -424,7 +424,7 @@ def normalize_metabase_rows(rows: list[dict]) -> list[dict]:
 def post_blocks_to_slack(
     webhook_url: str, blocks: list, fallback_text: str, timeout: float = 120.0
 ) -> bool:
-    """Block Kit variant of post_to_slack — used by the C1.3 poster pipeline.
+    """Block Kit variant of post_to_slack, used by the C1.3 poster pipeline.
 
     Parallel to post_to_slack(webhook, text) below; the text-only function is
     preserved for the fallback path and existing tests. Returns True on Slack
@@ -490,7 +490,7 @@ def post_to_slack(webhook_url: str, text: str, timeout: float = 120.0) -> bool:
     """
     if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true":
         print(
-            "[info] Not running in GitHub Actions — skipping Slack post. "
+            "[info] Not running in GitHub Actions, skipping Slack post. "
             "Set GITHUB_ACTIONS=true to override (debugging only).",
             file=sys.stderr,
         )
@@ -528,7 +528,7 @@ def post_to_slack(webhook_url: str, text: str, timeout: float = 120.0) -> bool:
             print(f"⚠️  Slack webhook HTTP {exc.code}: {exc!r}")
             return False
         except urllib.error.URLError as exc:
-            # Treat as pre-send connect/handshake failure — safe to retry.
+            # Treat as pre-send connect/handshake failure, safe to retry.
             # urllib does not distinguish before/after-send for URLError, but a
             # duplicate Slack post on a connect-side flake is the lesser evil
             # vs a silent miss; bounded to 1 retry caps duplicate risk.
@@ -795,7 +795,7 @@ def finalize_eval_run(
         )
 
     resumed_note = (
-        f"   _(resumed, {n_judged_total - n_judged_new} from checkpoint — cost reflects new judgements only)_"
+        f"   _(resumed, {n_judged_total - n_judged_new} from checkpoint, cost reflects new judgements only)_"
         if checkpoint_results
         else ""
     )
@@ -812,7 +812,7 @@ def finalize_eval_run(
         f"   By stratum:\n"
         f"{nl.join(strata_cost_lines)}"
         f"{(nl + resumed_note) if resumed_note else ''}"
-        f"\n❓ *What is this?* <{one_pager}|Eval one-pager — thresholds, cost, Metabase Q33193>\n"
+        f"\n❓ *What is this?* <{one_pager}|Eval one-pager: thresholds, cost, Metabase Q33193>\n"
     )
     if judge_outcome.stopped_reason != "complete":
         cost_footer += (
@@ -1024,7 +1024,7 @@ def main() -> int:
             print(f"⚠️  Could not load previous snapshot ({_e}). First-run mode.")
             prev_snapshot = None
     else:
-        print(f"📈 No previous snapshot at {prev_snapshot_path} — first-run mode (no WoW deltas).")
+        print(f"📈 No previous snapshot at {prev_snapshot_path}, first-run mode (no WoW deltas).")
 
     # Distribution by stratum
     by_strat: dict[str, int] = {}
@@ -1090,7 +1090,7 @@ def main() -> int:
 
     # 5. Slack post
     if args.dry_run:
-        print("(dry-run — skipping Slack post)")
+        print("(dry-run, skipping Slack post)")
         if (
             judge_outcome.stopped_reason == "complete"
             and os.path.exists(checkpoint_file)
@@ -1133,7 +1133,7 @@ def main() -> int:
                 pass
         return 0
 
-    # C1.3 — Poster pipeline (gated on POSTER_PIPELINE=1). On any render or
+    # C1.3: Poster pipeline (gated on POSTER_PIPELINE=1). On any render or
     # publish failure, falls back to the legacy text-only post; the daily
     # signal still lands. POSTER_DRY_RUN=1 renders but skips the gh-pages push.
     poster_enabled = os.environ.get("POSTER_PIPELINE", "").strip() == "1"
@@ -1210,7 +1210,7 @@ def main() -> int:
         # post_to_slack already logged the reason (non-ok body, HTTP error,
         # local-run guard, etc.). Mirror digest behaviour: exit 1 so the
         # workflow surfaces a red run, and DO NOT write the idempotency
-        # marker — that way a same-day re-dispatch can actually retry.
+        # marker, that way a same-day re-dispatch can actually retry.
         print("❌ Slack post did not succeed (see warnings above).")
         return 1
     print("✅ Posted to Slack.")
