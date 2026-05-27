@@ -79,7 +79,11 @@ jobs:
       DIGEST_FAIL_ON_LANGFUSE_ERROR: "0"
       # Poster publish gating (C1.3d): this workflow is workflow_dispatch only,
       # so dry_run=true (default) keeps posters local. Set dry_run=false to push.
-      POSTER_AUTO_PUSH: ${{ github.event.inputs.dry_run == 'false' && '1' || '0' }}
+      # Defensive: include schedule branch in case a cron trigger is added later
+      # (mirrors the canonical expression in daily-automation.yml). If neither
+      # condition holds, evaluates to '0' and the publish path is skipped, which
+      # is what caused the dogfood Slack 404 to almost cache on first publish.
+      POSTER_AUTO_PUSH: ${{ (github.event_name == 'schedule' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
       # Per-run poster kill-switch (SRE items 3+8). The repo-variable form
       # (vars.POSTER_DISABLE) is sticky and slow to flip back, so we also
       # honour a workflow_dispatch input: a single dispatch can skip the

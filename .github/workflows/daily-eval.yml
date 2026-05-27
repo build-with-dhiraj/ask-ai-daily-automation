@@ -66,10 +66,13 @@ jobs:
           # is the runaway backstop. Previously 14400 (4h), but daily-eval has no
           # hard duration requirement.
           EVAL_MAX_RUNTIME_SEC: "0"
-          # Poster publish gating: this workflow is workflow_dispatch only, so
-          # there is no `dry_run` input. Default to NO push so manual eval
-          # dispatches never accidentally write to gh-pages.
-          POSTER_AUTO_PUSH: "0"
+          # Poster publish gating: this workflow is workflow_dispatch only and
+          # has no `dry_run` input, so manual dispatches never push. Defensive
+          # schedule branch is included so if a cron trigger is added later it
+          # auto-pushes by default (mirrors daily-automation.yml). Today
+          # github.event_name is always 'workflow_dispatch' here, so this
+          # evaluates to '0'.
+          POSTER_AUTO_PUSH: ${{ github.event_name == 'schedule' && '1' || '0' }}
           # Per-run poster kill-switch (SRE items 3+8). See
           # docs/runbooks/poster-rollback.md for the two rollback paths.
           POSTER_DISABLE: ${{ github.event.inputs.poster_disable == 'true' && '1' || vars.POSTER_DISABLE || '' }}
