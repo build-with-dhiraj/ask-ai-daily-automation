@@ -1983,20 +1983,175 @@ def _summarise_today_for_snapshot(
 # ---------------------------------------------------------------------------
 
 _TOP_INSIGHTS_SYSTEM_PROMPT = (
-    "You are a data analyst summarising day-on-day deltas in an analytics digest.\n"
-    "Inputs:\n"
-    "  • TODAY: today's digest data (compact JSON).\n"
-    "  • YESTERDAY: yesterday's snapshot (compact JSON), or null if unavailable.\n"
+    "You are the analyst behind a daily product-quality digest. Your job is to surface "
+    "the most signal-rich day-on-day movements as structured JSON. A renderer downstream "
+    "turns your JSON into a poster; you do NOT format prose.\n"
     "\n"
-    "Rules — follow exactly:\n"
-    "  1. Output exactly 3 numbered bullets, one per line, format `1. <text>` etc.\n"
-    "  2. Each bullet ≤180 characters.\n"
-    "  3. Cite EXACT numbers from the input — never invent metrics, percentages, or chapter names.\n"
-    "  4. Reference only chapters / categories / tags that appear in the input.\n"
-    "  5. If there is no actionable day-on-day delta, return ONLY this exact line:\n"
-    "     No significant day-on-day changes today; baseline behavior.\n"
-    "  6. No preamble, no closing line, no markdown headers.\n"
+    "Inputs (in the user message as JSON):\n"
+    "  • TODAY: today's digest data.\n"
+    "  • YESTERDAY: yesterday's snapshot, or null on first run.\n"
+    "\n"
+    "Output: a single JSON object, no markdown, no preamble. Schema:\n"
+    "{\n"
+    "  \"headline\": string ≤180 chars, ends with a period, one narrative claim about the day,\n"
+    "  \"insights\": [  // 0 to 5 entries — variable, quality-gated\n"
+    "    {\n"
+    "      \"topic_label\": one of CLARITY|LATENCY|FEEDBACK|COST|ACCURACY|USAGE,\n"
+    "      \"icon\": one of 📈|⚠️|💬|💸|🎯|🔥,\n"
+    "      \"claim\": string ≤90 chars, MUST contain a delta verb AND a comparison anchor,\n"
+    "      \"evidence\": string ≤90 chars, one supporting metric OR one quoted artifact,\n"
+    "      \"context\": string ≤90 chars OR null (optional cross-signal join),\n"
+    "      \"spark_series\": array of ≤14 floats OR null\n"
+    "    }\n"
+    "  ]\n"
+    "}\n"
+    "\n"
+    "Hard rules:\n"
+    "  1. Fixed delta vocabulary — the claim MUST contain one of: spiking, degraded, "
+    "up, down, flat-but-anomalous, new.\n"
+    "  2. Comparison anchor — the claim MUST contain one of: \"was \", \"vs \", \"WoW\", "
+    "\"DoD\", or a paired numeric like \"3.1% → 4.8%\".\n"
+    "  3. Cite ONLY values that appear in the input JSON. Never invent metrics, percentages, "
+    "or chapter names.\n"
+    "  4. Cross-signal joins are PREFERRED. An insight that ties two underlying datasets "
+    "together (e.g. multi-turn chapter + downvote chapter) ranks above a single-source "
+    "insight. Use the optional `context` field to surface the join.\n"
+    "  5. Quality bar — if an insight does not clear (delta verb + anchor + relevance), "
+    "do NOT include it. Return an empty `insights` array rather than padding. Zero insights "
+    "is a valid, expected output on quiet days.\n"
+    "  6. Do not exceed 5 insights even if more clear the bar — pick the 5 most consequential.\n"
+    "  7. The renderer prepends its own breach banner on kill-switch days. Your `headline` "
+    "should still be a narrative claim; the renderer may override it.\n"
+    "  8. Output JSON only. No code fences, no leading text, no trailing text.\n"
 )
+
+
+# Fixed vocabulary used by the post-LLM quality filter. Kept module-level so
+# tests can introspect / extend if needed.
+_INSIGHT_DELTA_VERBS = (
+    "spiking",
+    "degraded",
+    "up",
+    "down",
+    "flat-but-anomalous",
+    "new",
+)
+_INSIGHT_ANCHOR_TOKENS = ("was ", "vs ", "wow", "dod", "→")
+_INSIGHT_TOPIC_LABELS = {
+    "CLARITY",
+    "LATENCY",
+    "FEEDBACK",
+    "COST",
+    "ACCURACY",
+    "USAGE",
+}
+_INSIGHT_MAX_CLAIM_CHARS = 90
+_INSIGHT_MAX_EVIDENCE_CHARS = 90
+_INSIGHT_MAX_CONTEXT_CHARS = 90
+_INSIGHT_MAX_HEADLINE_CHARS = 180
+_INSIGHT_MAX_COUNT = 5
+_INSIGHT_MAX_SPARK_POINTS = 14
+
+# Kill-switch thresholds — match the locked plan (academic FAIL > 6%,
+# downvote rate > 1.0%). Kept as module constants so the renderer can read
+# the same numbers.
+_KILL_SWITCH_ACADEMIC_FAIL_PCT = 6.0
+_KILL_SWITCH_DOWNVOTE_RATE_PCT = 1.0
+
+
+def _claim_clears_quality_bar(claim: str) -> bool:
+    """True iff `claim` has a delta verb AND a comparison anchor AND ≤90 chars."""
+    if not isinstance(claim, str):
+        return False
+    if len(claim) > _INSIGHT_MAX_CLAIM_CHARS or not claim.strip():
+        return False
+    lc = claim.lower()
+    # Delta verb match must be word-ish to avoid e.g. "up" matching "support".
+    # Cheap heuristic: surround with spaces or use punctuation boundaries.
+    padded = f" {lc} "
+    has_delta = any(
+        f" {verb} " in padded
+        or f" {verb}." in padded
+        or f" {verb}," in padded
+        for verb in _INSIGHT_DELTA_VERBS
+    )
+    if not has_delta:
+        return False
+    has_anchor = any(tok in lc for tok in _INSIGHT_ANCHOR_TOKENS)
+    return has_anchor
+
+
+def _normalize_insight(raw: Any) -> Optional[dict]:
+    """Validate one LLM-emitted insight. Returns clean dict or None to drop."""
+    if not isinstance(raw, dict):
+        return None
+    topic = str(raw.get("topic_label") or "").strip().upper()
+    if topic not in _INSIGHT_TOPIC_LABELS:
+        return None
+    icon = raw.get("icon") or ""
+    if not isinstance(icon, str) or not icon.strip():
+        return None
+    claim = raw.get("claim") or ""
+    if not _claim_clears_quality_bar(claim):
+        return None
+    evidence = raw.get("evidence") or ""
+    if not isinstance(evidence, str) or not evidence.strip():
+        return None
+    if len(evidence) > _INSIGHT_MAX_EVIDENCE_CHARS:
+        evidence = evidence[:_INSIGHT_MAX_EVIDENCE_CHARS].rstrip()
+    context = raw.get("context")
+    if context is not None:
+        if not isinstance(context, str) or not context.strip():
+            context = None
+        elif len(context) > _INSIGHT_MAX_CONTEXT_CHARS:
+            context = context[:_INSIGHT_MAX_CONTEXT_CHARS].rstrip()
+    spark = raw.get("spark_series")
+    if spark is not None:
+        if not isinstance(spark, list):
+            spark = None
+        else:
+            cleaned: List[float] = []
+            for v in spark[:_INSIGHT_MAX_SPARK_POINTS]:
+                try:
+                    cleaned.append(float(v))
+                except (TypeError, ValueError):
+                    continue
+            spark = cleaned or None
+    return {
+        "topic_label": topic,
+        "icon": icon,
+        "claim": claim,
+        "evidence": evidence,
+        "context": context,
+        "spark_series": spark,
+    }
+
+
+def _normalize_insights_payload(raw: Any) -> dict:
+    """Validate the full {headline, insights} object from the LLM.
+
+    Drops insights that fail the quality bar, caps at 5, clamps headline.
+    Returns a clean dict; never raises.
+    """
+    if not isinstance(raw, dict):
+        return {"headline": "", "insights": []}
+    headline = raw.get("headline") or ""
+    if not isinstance(headline, str):
+        headline = ""
+    headline = headline.strip()
+    if len(headline) > _INSIGHT_MAX_HEADLINE_CHARS:
+        headline = headline[:_INSIGHT_MAX_HEADLINE_CHARS].rstrip()
+    insights_raw = raw.get("insights")
+    if not isinstance(insights_raw, list):
+        insights_raw = []
+    cleaned: List[dict] = []
+    for entry in insights_raw:
+        norm = _normalize_insight(entry)
+        if norm is not None:
+            cleaned.append(norm)
+        if len(cleaned) >= _INSIGHT_MAX_COUNT:
+            break
+    return {"headline": headline, "insights": cleaned}
 
 
 def _coerce_int(v: Any) -> Optional[int]:
@@ -2017,12 +2172,16 @@ def _http_post_slack_compatible(*args, **kwargs):  # pragma: no cover - tiny ind
     raise NotImplementedError
 
 
-def _call_top_insights_llm(today_data: dict, yesterday_snapshot: dict) -> str:
+def _call_top_insights_llm(today_data: dict, yesterday_snapshot: dict) -> dict:
     """Call Azure OpenAI gpt-4.1 with 60s timeout + 1 retry on URLError/5xx.
 
-    Reuses `judge_runner.get_openai_client` so the credential/endpoint logic stays in
-    one place. Returns the raw text content of the first choice. Caller wraps in
-    try/except and validates the output.
+    v2: returns a NORMALIZED dict `{"headline": str, "insights": [...]}` parsed
+    from the model's strict-JSON output. The quality filter (delta verb +
+    anchor + length caps) is applied here so the caller can trust the shape.
+
+    Raises ValueError if the model returned non-JSON or unparseable content.
+    Raises (and surfaces upstream to fmt_top_insights' try/except) on Azure /
+    network failures so the caller can degrade to the sentinel dict.
     """
     # Lazy import: keep digest importable in environments without `openai` installed.
     from judge_runner import get_openai_client  # noqa: WPS433 (lazy intentional)
@@ -2057,16 +2216,40 @@ def _call_top_insights_llm(today_data: dict, yesterday_snapshot: dict) -> str:
                 else:
                     os.environ["JUDGE_HTTP_TIMEOUT_SEC"] = prev_timeout
 
-            resp = client.chat.completions.create(
-                model=deployment,
-                messages=[
-                    {"role": "system", "content": _TOP_INSIGHTS_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_payload},
-                ],
-                temperature=0,
-                max_tokens=400,
-            )
-            return (resp.choices[0].message.content or "").strip()
+            # Prefer JSON mode when the SDK/deployment supports it. Fall back
+            # to plain-text completion + parse if response_format is rejected.
+            try:
+                resp = client.chat.completions.create(
+                    model=deployment,
+                    messages=[
+                        {"role": "system", "content": _TOP_INSIGHTS_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    temperature=0,
+                    max_tokens=800,
+                    response_format={"type": "json_object"},
+                )
+            except TypeError:
+                # Older SDK without response_format kwarg.
+                resp = client.chat.completions.create(
+                    model=deployment,
+                    messages=[
+                        {"role": "system", "content": _TOP_INSIGHTS_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    temperature=0,
+                    max_tokens=800,
+                )
+            raw_text = (resp.choices[0].message.content or "").strip()
+            if not raw_text:
+                raise ValueError("Top insights LLM returned empty content")
+            try:
+                parsed = json.loads(raw_text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Top insights LLM returned non-JSON: {exc}"
+                ) from exc
+            return _normalize_insights_payload(parsed)
         except urllib.error.URLError as exc:
             last_exc = exc
             if attempt == 0:
