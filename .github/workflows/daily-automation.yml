@@ -84,6 +84,15 @@ jobs:
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+          # F2 (PR #30): poster footer link URLs. Both are optional; when a
+          # secret is unset the empty string falls through and the footer
+          # OMITS the corresponding link rather than shipping a dead
+          # `https://langfuse` / `https://metabase/stream-logs` placeholder.
+          # LANGFUSE_URL takes precedence; LANGFUSE_PROJECT_ID is a fallback
+          # that resolves to https://cloud.langfuse.com/project/<id>.
+          LANGFUSE_URL: ${{ secrets.LANGFUSE_URL }}
+          LANGFUSE_PROJECT_ID: ${{ secrets.LANGFUSE_PROJECT_ID }}
+          STREAM_LOGS_URL: ${{ secrets.STREAM_LOGS_URL }}
           # SDK HTTP timeout (seconds). Default is 5s, which is too tight under
           # transient Langfuse Cloud slowness; bump to 20s. Applies to score
           # REST writes (OTLP export is disabled below).
@@ -237,6 +246,13 @@ jobs:
       LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+      # F2 (PR #30): poster footer link URLs. Same contract as the eval job
+      # above: unset secret -> empty string -> link omitted (no dead
+      # placeholder URLs shipped). Both surfaces share the env so the
+      # scoreboard and digest footers stay symmetric.
+      LANGFUSE_URL: ${{ secrets.LANGFUSE_URL }}
+      LANGFUSE_PROJECT_ID: ${{ secrets.LANGFUSE_PROJECT_ID }}
+      STREAM_LOGS_URL: ${{ secrets.STREAM_LOGS_URL }}
       # SDK HTTP timeout (seconds); see eval job env above for rationale.
       LANGFUSE_TIMEOUT: "120"
       # Disable OTLP trace exporter; see eval job env above for rationale.

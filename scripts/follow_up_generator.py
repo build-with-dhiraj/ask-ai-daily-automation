@@ -95,25 +95,63 @@ def expand_acronyms_first_use(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Breach @-mention prefix (per axis-to-owner mapping in PRODUCT.md)
+# Breach @-mention prefix (per axis-to-owner mapping in config/axis_owners.json)
 # ---------------------------------------------------------------------------
 
+# Slack user IDs look like Uxxxxxxxx (uppercase U followed by 8+ alnum).
+# F6: validate the mapping shape at load time so a typo (missing leading U,
+# lower-case id, non-list value) fails loud at import, not silently on the
+# first breach where the wrong @-mention would page the wrong human.
+_SLACK_USER_ID_RE = re.compile(r"^U[A-Z0-9]{8,}$")
+
+
+def _load_axis_owners(path: Optional[str] = None) -> dict[str, list[str]]:
+    """Load the axis-owner mapping from config/axis_owners.json and validate.
+
+    Validation:
+      - top-level is a JSON object.
+      - every value is a list (possibly empty).
+      - every entry in every list is a string matching ^U[A-Z0-9]{8,}$.
+
+    Any shape violation raises ValueError. Misconfiguration is a loud
+    startup failure, never a silent runtime mispage.
+    """
+    if path is None:
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "config",
+            "axis_owners.json",
+        )
+    with open(path, "r", encoding="utf-8") as fh:
+        raw = json.load(fh)
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"axis_owners.json must be a JSON object, got {type(raw).__name__}"
+        )
+    out: dict[str, list[str]] = {}
+    for axis, value in raw.items():
+        if not isinstance(value, list):
+            raise ValueError(
+                f"axis_owners.json[{axis!r}] must be a list, got {type(value).__name__}"
+            )
+        for uid in value:
+            if not isinstance(uid, str):
+                raise ValueError(
+                    f"axis_owners.json[{axis!r}] entry must be str, got {type(uid).__name__}"
+                )
+            if not _SLACK_USER_ID_RE.match(uid):
+                raise ValueError(
+                    f"axis_owners.json[{axis!r}] entry {uid!r} is not a valid "
+                    f"Slack user ID (expected ^U[A-Z0-9]{{8,}}$)"
+                )
+        out[axis] = list(value)
+    return out
+
+
 # Axis identifier -> list of Slack user IDs (resolved per PRODUCT.md).
-_AXIS_OWNERS: dict[str, list[str]] = {
-    "academic":  ["U03P01CHELQ", "U091F0LPG7Q"],   # Naresh + Deepesh (DS)
-    "experience":["U03P01CHELQ", "U091F0LPG7Q"],
-    "downvote":  ["U03P01CHELQ", "U091F0LPG7Q"],
-    "multiturn": ["U03P01CHELQ", "U091F0LPG7Q"],
-    "rephrase":  ["U03P01CHELQ", "U091F0LPG7Q"],
-    "vcp":       ["U05D4FS3HB2"],                  # Ankita (Backend)
-    "cost":      ["U05D4FS3HB2"],
-    "latency":   ["U05D4FS3HB2"],
-    "langfuse":  ["U05D4FS3HB2"],
-    "ui_bug":    ["U085FBH4Q8Y", "U03NCBHSUAZ", "U039CQ75QGY"],  # Pankaj+Tarun+Vishal
-    "app_bug":   ["U085FBH4Q8Y", "U03NCBHSUAZ", "U039CQ75QGY"],
-    "test":      ["U05G8P8CGTH"],                  # Prince (QA)
-    "wildcard":  [],  # falls through to Dhiraj (orchestrator) below
-}
+# Loaded at import time so an invalid config crashes the pipeline early,
+# before any Slack post fires with the wrong @-mention.
+_AXIS_OWNERS: dict[str, list[str]] = _load_axis_owners()
 
 
 def breach_mention_prefix(breach_signal: Optional[str]) -> str:
@@ -473,9 +511,14 @@ def _build_slim_text_companion(
         prefix = breach_mention_prefix(breach_signal).strip()
         if prefix:
             mention_line = prefix
-    link_line = (
-        f"Deep dive: {deep_dive_url}" if deep_dive_url else "Deep dive: (link pending)"
-    )
+    # F4: render the deep-dive as Slack mrkdwn link syntax so the reader
+    # sees a clickable "Deep dive" label, not a raw URL. When the URL is
+    # missing we keep a placeholder line so the slim text companion always
+    # has a stable 3-line shape (verdict, mention, link).
+    if deep_dive_url:
+        link_line = f"<{deep_dive_url}|Deep dive>"
+    else:
+        link_line = "Deep dive: (link pending)"
     return "\n".join([verdict, mention_line, link_line])
 
 
