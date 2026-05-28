@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily Digest deep dive, 2026-05-26</title>
+<style>
+  :root {
+    --bg-paper: oklch(0.97 0.005 85);
+    --ink-body: oklch(0.22 0.01 240);
+    --ink-muted: oklch(0.50 0.01 240);
+    --ink-faint: oklch(0.65 0.01 240);
+    --breach-brick: oklch(0.55 0.20 28);
+    --rule: oklch(0.88 0.006 85);
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg-paper);
+    color: var(--ink-body);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", sans-serif;
+    line-height: 1.5;
+    margin: 0;
+    padding: 24px 16px 64px;
+  }
+  main { max-width: 800px; margin: 0 auto; }
+  .eyebrow {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-muted);
+    font-size: 11px;
+    margin: 0 0 8px;
+  }
+  h1 {
+    font-size: 28px;
+    line-height: 1.2;
+    margin: 0 0 24px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    font-size: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 32px 0 12px;
+    border-top: 1px solid var(--rule);
+    padding-top: 16px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 16px;
+    font-feature-settings: "tnum", "zero";
+    font-variant-numeric: tabular-nums;
+  }
+  thead th {
+    text-align: right;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-muted);
+    padding: 8px;
+    border-bottom: 1px solid var(--rule);
+    font-weight: 500;
+  }
+  thead th:first-child { text-align: left; }
+  tbody td {
+    padding: 10px 8px;
+    border-bottom: 1px solid var(--rule);
+  }
+  td.metric { text-transform: uppercase; font-size: 13px; letter-spacing: 0.06em; }
+  td.num { text-align: right; font-family: ui-monospace, monospace; }
+  td.num.muted { color: var(--ink-muted); }
+  td.delta { text-align: right; font-family: ui-monospace, monospace; }
+  tr.breach td.delta { color: var(--breach-brick); font-weight: 600; }
+  footer {
+    margin-top: 48px;
+    border-top: 1px solid var(--rule);
+    padding-top: 16px;
+    color: var(--ink-faint);
+    font-size: 12px;
+    font-family: ui-monospace, monospace;
+  }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Ask AI digest deep dive, 2026-05-26</p>
+  <h1></h1>
+
+  <h2>Standings</h2>
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Metric</th>
+        <th scope="col">Yesterday</th>
+        <th scope="col">14d median</th>
+        <th scope="col">Delta</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td colspan='4' class='muted'>No standings data</td></tr>
+    </tbody>
+  </table>
+
+  
+
+  <footer>
+    Ask AI daily automation. Source: github.com/build-with-dhiraj/ask-ai-daily-automation
+  </footer>
+</main>
+</body>
+</html>
