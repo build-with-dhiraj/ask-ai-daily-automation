@@ -93,10 +93,11 @@ Per the impeccable absolute bans and the slop list, the surface must NOT look li
 4. **Habit formation through stable skeleton.** Same poster layout every day. Same opening sentence shape. Variation only in the content. Reader's eye learns the grid in week one.
 5. **Mobile-first, phone-on-lock-screen.** 640px native poster renders ~320pt on Slack mobile. Body type at least 14pt, headline at least 18pt. The first 60 characters of the text companion are the lock-screen preview and must carry the verdict.
 6. **Separate exploration from explanation** (per Knaflic). The poster ships the conclusion. The deep-dive archive (GitHub Pages) is for exploration. Threads happen when humans need to ask follow-up questions.
+7. **Breach state is carried by prose and a single row stripe, not a banner.** The verdict sentence at the top of the poster names the breach in plain English; the brick-red row stripe inside the standings table marks which metric is offending. There is no dedicated "KILL-SWITCH BREACHED" band; that copy was insider jargon for a channel that includes leadership readers.
 
 ## Accessibility & Inclusion
 
-- WCAG AA minimum. The kill-switch breach band must hit AA at mobile half-size (Söhne Semibold at 12px on cream background, brick-red text, contrast verified ≥4.5:1).
+- WCAG AA minimum. The brick-red breach row stripe and brick-red delta cell must hit AA at mobile half-size (Hanken Grotesk Semibold at 12px on cream background, contrast verified at or above 4.5:1).
 - Every numeric value in the poster must also be reachable via Slack image alt-text, the text companion below the image, and the deep-dive archive page on GitHub Pages.
 - Screen reader path: Slack image alt-text contains the headline plus the key numbers as a single sentence so VoiceOver / TalkBack reads a coherent summary in under 10 seconds.
 - No content that conveys information through color alone. Breach state is always carried by typography, label, AND color, not just color.

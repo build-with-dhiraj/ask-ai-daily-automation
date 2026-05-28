@@ -48,6 +48,16 @@ BANNED_JARGON_NEVER = (
     "axialfail",
 )
 
+# Commit 11: the all-caps band-style literal labels are operator-only
+# jargon. They are banned from RENDERED TEMPLATE OUTPUT and from
+# deterministic prose. The lowercase phrase "safety floor breached"
+# inside a verdict sentence is allowed and intentional (it is the
+# locked breach-day verdict shape per PRODUCT.md).
+BANNED_BAND_LITERALS = (
+    "KILL-SWITCH BREACHED",
+    "SAFETY FLOOR BREACHED",
+)
+
 
 class TestBannedJargonAbsentFromFallback(unittest.TestCase):
     """Deterministic fallback prose contains no banned internal codenames."""
@@ -125,6 +135,98 @@ class TestFallbackOutputContainsNoBareAcronymBeforeExpansion(unittest.TestCase):
             self.assertIn("TTFT (time to first token)", out)
         if re.search(r"\bCSAT\b", out):
             self.assertIn("CSAT (customer satisfaction)", out)
+
+
+class TestBannedBandLiteralsAbsentFromRenderedTemplates(unittest.TestCase):
+    """The all-caps band labels removed in Commit 11 stay removed.
+
+    Lights up if a future change re-introduces a KillSwitchBand HTML block.
+    """
+
+    def _render_both(self) -> str:
+        import importlib.util
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        env = Environment(
+            loader=FileSystemLoader(str(repo / "templates")),
+            autoescape=select_autoescape(["html", "j2"]),
+        )
+        spec = importlib.util.spec_from_file_location(
+            "scripts.poster_slack", repo / "scripts" / "poster_slack.py",
+        )
+        assert spec and spec.loader
+        ps = importlib.util.module_from_spec(spec)
+        sys.modules["scripts.poster_slack"] = ps
+        spec.loader.exec_module(ps)
+        today = {"date": "2026-05-27", "acc_fail_pct": 8.2, "exp_fail_pct": 14.1}
+        insights = {
+            "headline": "Top risk: safety floor breached.",
+            "insights": [],
+            "kill_switch_breach": True,
+        }
+        scoreboard_input = ps.build_scoreboard_poster_input({
+            "date": "2026-05-27",
+            "acc_fail_pct": 8.2,
+            "exp_fail_pct": 13.4,
+            "pass_pct": 69.0,
+            "n_judged": 989,
+        })
+        digest_input = ps.build_digest_poster_input(today, insights)
+        scoreboard_html = env.get_template("poster_scoreboard.html.j2").render(
+            **scoreboard_input
+        )
+        digest_html = env.get_template("poster_digest.html.j2").render(
+            **digest_input
+        )
+        return scoreboard_html + "\n" + digest_html
+
+    def test_no_band_literals_in_rendered_html(self) -> None:
+        html = self._render_both()
+        for band in BANNED_BAND_LITERALS:
+            self.assertNotIn(
+                band, html,
+                f"banned band literal {band!r} appeared in rendered template "
+                "output. The KillSwitchBand was removed in Commit 11; breach "
+                "is carried by the verdict prose and the brick row stripe.",
+            )
+
+
+class TestAcronymsExpandedInStandingsRowLabels(unittest.TestCase):
+    """build_*_poster_input runs row labels through expand_acronyms_first_use.
+
+    Catches regression where a future label rename re-introduces a raw
+    "VCP" or "TTFT" string into the standings table.
+    """
+
+    def setUp(self) -> None:
+        import importlib.util
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "scripts.poster_slack", repo / "scripts" / "poster_slack.py",
+        )
+        assert spec and spec.loader
+        self.ps = importlib.util.module_from_spec(spec)
+        sys.modules["scripts.poster_slack"] = self.ps
+        spec.loader.exec_module(self.ps)
+
+    def test_digest_labels_have_no_raw_acronyms(self) -> None:
+        today = {
+            "date": "2026-05-27",
+            "downvote_rate_pct": 0.57,
+            "vcp_success_pct": 96.4,
+            "error_rate_pct": 0.4,
+            "student_ttft_p90_sec": 8.0,
+            "total_cost_usd": 1046.0,
+        }
+        insights = {"insights": [], "kill_switch_breach": False}
+        out = self.ps.build_digest_poster_input(today, insights)
+        labels = " | ".join(row["label"] for row in out["standings"])
+        # No raw "VCP" without the expansion in the same string.
+        if "VCP" in labels:
+            self.assertIn("Video Co-Pilot", labels)
+        if "TTFT" in labels:
+            self.assertIn("time to first token", labels)
 
 
 if __name__ == "__main__":

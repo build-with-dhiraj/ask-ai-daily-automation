@@ -1,0 +1,44 @@
+{
+  "date_human": "Wed 27 May",
+  "date_iso": "2026-05-27",
+  "kill_switch_breach": true,
+  "verdict": "Top risk: safety floor breached; downvote rate 1.62% above the watch line, with Academic FAIL on the same day.",
+  "headline": "Top risk: safety floor breached; downvote rate 1.62% above the watch line, with Academic FAIL on the same day.",
+  "eyebrow_separator": " · ",
+  "digest_eyebrow_right": "WED 27 MAY · 4 INSIGHTS",
+  "digest_cards": [
+    {
+      "topic_label": "ACCURACY",
+      "icon": "⚠️",
+      "claim": "Academic FAIL closed at 8.2%, well above the 6% floor and the worst single-day reading since calibration.",
+      "evidence": "A5 answer-incomplete fired 137 times yesterday versus a 14-day median of 41 fires.",
+      "context": "The DS lead has been paged; expect a per-code breakdown in the deep-dive within the hour."
+    },
+    {
+      "topic_label": "FEEDBACK",
+      "icon": "💬",
+      "claim": "Downvote rate spiked to 1.62%, more than triple the 14-day median of 0.55%.",
+      "evidence": "Same-day correlation with the Academic FAIL signal is the highest on record; safety floor of 1.0% breached.",
+      "context": null
+    },
+    {
+      "topic_label": "USAGE",
+      "icon": "🔥",
+      "claim": "Video Co-Pilot success dipped to 92.1%, the lowest reading since the 24 April incident.",
+      "evidence": "Dropped 4.6 percentage points versus the 14-day median; affected sessions concentrated in the 6-8 PM IST window.",
+      "context": "Backend lead pinged on the same thread; suspect upstream model latency."
+    },
+    {
+      "topic_label": "COST",
+      "icon": "💸",
+      "claim": "Total cost yesterday was $1,184, $172 above the 14-day median.",
+      "evidence": "Retries from the VCP dip and the Academic FAIL re-judges drove the overage; not a unit-price issue.",
+      "context": null
+    }
+  ],
+  "spark_series_by_metric": {
+    "downvote_rate_pct": [0.51, 0.55, 0.54, 0.56, 0.52, 0.58, 0.55, 0.54, 0.57, 0.55, 0.58, 0.60, 0.62, 1.62]
+  },
+  "insights": [],
+  "brand_mark": "Ask AI, daily digest"
+}

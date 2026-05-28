@@ -5,41 +5,53 @@
   "kill_switch_breach": false,
   "verdict": "No urgent risks today, Academic FAIL 3.4% holding inside the 6% floor.",
   "headline": "No urgent risks today, Academic FAIL 3.4% holding inside the 6% floor.",
+  "eyebrow_separator": " · ",
   "standings": [
     {
-      "label": "Academic FAIL",
+      "label": "ACADEMIC FAIL",
       "yesterday": "3.4%",
       "median_14d": "3.5%",
-      "delta": "-0.1pp",
+      "delta": "-0.1 percentage points",
       "breach": false
     },
     {
-      "label": "Experience FAIL",
+      "label": "EXPERIENCE FAIL",
       "yesterday": "12.9%",
       "median_14d": "13.4%",
       "delta": "-0.5pp",
       "breach": false
     },
     {
-      "label": "Overall PASS",
+      "label": "OVERALL PASS",
       "yesterday": "74.1%",
       "median_14d": "73.8%",
       "delta": "+0.3pp",
       "breach": false
     },
     {
-      "label": "Run cost",
+      "label": "YESTERDAY'S RUN COST",
       "yesterday": "$8.04",
       "median_14d": "$8.05",
       "delta": "-$0.01",
       "breach": false
     },
     {
-      "label": "Judged",
+      "label": "TRACES GRADED",
       "yesterday": "979",
       "median_14d": "990",
       "delta": "-11",
       "breach": false
+    }
+  ],
+  "top_driver_codes": [],
+  "scoreboard_callouts": [
+    {
+      "label": "Top mover",
+      "body": "Experience FAIL drifted down half a point versus the 14-day median, the calmest reading in a week."
+    },
+    {
+      "label": "Worth watching",
+      "body": "Traces graded came in 11 below median; if the dip widens tomorrow the kill switch denominator gets noisier."
     }
   ],
   "spark_series_by_metric": {

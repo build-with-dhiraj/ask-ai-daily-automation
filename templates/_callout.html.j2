@@ -1,0 +1,14 @@
+{#-
+  Callout component: small mono eyebrow label + one Hanken body sentence.
+
+  Expects a single `callout` variable in scope:
+    callout: {label: str, body: str}
+
+  Stack callouts vertically by including this partial inside a for-loop in
+  the parent template (see poster_scoreboard.html.j2). No card container,
+  no rounded corners, no shadow. Hairline rule is owned by the caller.
+-#}
+<div class="callout">
+  <div class="callout-label eyebrow">{{ callout.label }}</div>
+  <div class="callout-body">{{ callout.body }}</div>
+</div>

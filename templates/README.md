@@ -18,7 +18,7 @@ Width is fixed at **640px**; height grows with content (`full_page` screenshot).
 - **Typography**: Hanken Grotesk (body, weights 400/500/600/700) + IBM Plex Mono (tabular figures), self-hosted as WOFF2 in `static/fonts/`. No Google Fonts CDN at render time. `font-feature-settings: "tnum","zero"` on numeric columns.
 - **Brand**: PhysicsWallah Ask AI. FT/Stripe craft level. Anti-slop emoji discipline: only semantic state (🟢🟡🔴 ⚠️ ▲▼ ·) and section anchors (📰 💡 ⚙️ 🛟, one per section).
 - **PII / sensitivity** (locked decision #8): NO cost figures, NO raw quoted student feedback, NO per-chapter downvote rates inside the image. Templates have no fields for those. Insights may describe trends narratively only.
-- **Kill-switch**: when `kill_switch_breach: true` the poster renders a slim red-tinted band above the headline. The Academic FAIL value and delta text turn brick-red; no side-stripe border (banned per impeccable). The Digest mirrors the band for downvote-rate / VCP breaches.
+- **Breach state** (Iteration 3, Commit 11): when `kill_switch_breach: true` the poster does NOT render a dedicated band. Breach is carried by (a) the verdict sentence at the top of the poster, and (b) the brick-red row stripe + brick-red delta cell on the breached metric inside the standings table. The dedicated `KillSwitchBand` was removed because the all-caps band label was insider jargon for a channel that includes leadership readers.
 - **Accessibility**: every numeric value has a text-equivalent inside the semantic DOM so the alt-text extractor (the Playwright step) can lift a high-fidelity description without OCR.
 
 ## JSON schemas

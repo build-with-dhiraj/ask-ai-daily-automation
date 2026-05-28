@@ -1,16 +1,18 @@
 """Unit tests for scripts.follow_up_generator.
 
 Covers the public surface defined in `__all__`:
-    - generate_follow_up
+    - generate_follow_up        (returns InsightPayload)
     - expand_acronyms_first_use
     - breach_mention_prefix
     - VERDICT_OPENING_RE
-    - FollowUp
+    - InsightPayload + Callout + InsightCard structured shapes
+    - FollowUp (backward-compat alias for InsightPayload)
 
 LLM is always mocked; this test must run offline in CI.
 """
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import sys
@@ -21,7 +23,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from scripts.follow_up_generator import (  # noqa: E402
     VERDICT_OPENING_RE,
+    Callout,
     FollowUp,
+    InsightCard,
+    InsightPayload,
     breach_mention_prefix,
     expand_acronyms_first_use,
     generate_follow_up,
@@ -122,35 +127,103 @@ class TestBreachMentionPrefix(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# generate_follow_up: happy path with mocked LLM
+# generate_follow_up: happy path with mocked LLM (JSON mode)
 # ---------------------------------------------------------------------------
 
-class TestGenerateFollowUpHappyPath(unittest.TestCase):
-    def test_llm_success_returns_non_degraded(self) -> None:
-        mocked = (
+def _mock_scoreboard_llm_payload() -> str:
+    return json.dumps({
+        "verdict": (
             "Top risk: Academic FAIL hit 23.1 percent yesterday, "
-            "well above the 6 percent floor. "
-            "Experience FAIL was 13.4 percent, holding inside the band. "
-            "Overall PASS dipped to 69 percent, 4 points below the 14 day median. "
-            "Run cost was $8.16, in line with last week. "
-            "Judged 989 traces, one fewer than yesterday."
-        )
+            "well above the 6 percent floor."
+        ),
+        "text_companion": "ignored, caller rebuilds the slim text",
+        "scoreboard_callouts": [
+            {
+                "label": "WHY IT MATTERS",
+                "body": (
+                    "Academic FAIL closed at 23.1 percent, the worst single "
+                    "day reading since calibration in March."
+                ),
+            },
+            {
+                "label": "WORTH WATCHING",
+                "body": (
+                    "A5 answer-incomplete fired 137 times yesterday, "
+                    "well above the 14-day median."
+                ),
+            },
+        ],
+        "digest_cards": [],
+    })
+
+
+def _mock_digest_llm_payload(*, n_cards: int = 4) -> str:
+    cards = [
+        {
+            "topic_label": "ACCURACY",
+            "icon": "",
+            "claim": f"Card {i+1} claim with 1.{i}% number.",
+            "evidence": f"Card {i+1} evidence sentence.",
+            "context": None,
+        }
+        for i in range(n_cards)
+    ]
+    return json.dumps({
+        "verdict": "Top risk: safety floor breached.",
+        "text_companion": "ignored",
+        "scoreboard_callouts": [],
+        "digest_cards": cards,
+    })
+
+
+class TestGenerateFollowUpHappyPath(unittest.TestCase):
+    def test_scoreboard_llm_success_returns_non_degraded(self) -> None:
         with mock.patch(
             "scripts.follow_up_generator._call_llm",
-            return_value=mocked,
+            return_value=_mock_scoreboard_llm_payload(),
         ):
             result = generate_follow_up(
                 "scoreboard", _snapshot(),
                 breach=True, breach_signal="academic",
+                deep_dive_url="https://example.com/deep",
                 retries=1, retry_gap_sec=0,
             )
-        self.assertIsInstance(result, FollowUp)
+        self.assertIsInstance(result, InsightPayload)
         self.assertFalse(result.degraded)
-        # @-mention prefix prepended for breach.
-        self.assertTrue(result.text.startswith("<@U03P01CHELQ>"))
-        # Verdict regex passes on the text after the prefix is stripped.
-        after_prefix = result.text.split("> ", 2)[-1]
-        self.assertIsNotNone(VERDICT_OPENING_RE.match(after_prefix))
+        # Verdict regex passes.
+        self.assertIsNotNone(VERDICT_OPENING_RE.match(result.verdict))
+        # Exactly 2 callouts for scoreboard, no digest cards.
+        self.assertEqual(len(result.scoreboard_callouts), 2)
+        self.assertEqual(len(result.digest_cards), 0)
+        for callout in result.scoreboard_callouts:
+            self.assertIsInstance(callout, Callout)
+            self.assertTrue(callout.label)
+            self.assertTrue(callout.body)
+        # text_companion is 3 lines: verdict, @-mention, deep-dive link.
+        lines = result.text_companion.split("\n")
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("Top risk:"))
+        self.assertIn("<@U03P01CHELQ>", lines[1])  # Naresh (academic owner)
+        self.assertTrue(lines[2].startswith("Deep dive: https://"))
+
+    def test_digest_llm_success_returns_four_cards(self) -> None:
+        with mock.patch(
+            "scripts.follow_up_generator._call_llm",
+            return_value=_mock_digest_llm_payload(n_cards=4),
+        ):
+            result = generate_follow_up(
+                "digest", _snapshot(),
+                breach=True, breach_signal="academic",
+                deep_dive_url="https://example.com/digest",
+                retries=1, retry_gap_sec=0,
+            )
+        self.assertFalse(result.degraded)
+        self.assertEqual(len(result.digest_cards), 4)
+        self.assertEqual(len(result.scoreboard_callouts), 0)
+        for card in result.digest_cards:
+            self.assertIsInstance(card, InsightCard)
+            self.assertTrue(card.topic_label)
+            self.assertTrue(card.claim)
 
 
 # ---------------------------------------------------------------------------
@@ -166,26 +239,36 @@ class TestGenerateFollowUpFallbacks(unittest.TestCase):
             result = generate_follow_up(
                 "scoreboard", _snapshot(),
                 breach=True, breach_signal="academic",
+                deep_dive_url="https://example.com/deep",
                 retries=3, retry_gap_sec=0,
             )
         self.assertTrue(result.degraded)
         self.assertIn("Azure 502", result.reason or "")
         # Deterministic fallback still passes the verdict regex.
-        text_no_prefix = result.text.split("> ", 2)[-1]
-        self.assertIsNotNone(VERDICT_OPENING_RE.match(text_no_prefix))
+        self.assertIsNotNone(VERDICT_OPENING_RE.match(result.verdict))
+        # Structured payload still populated on the fallback path.
+        self.assertEqual(len(result.scoreboard_callouts), 2)
+        # text_companion still slim 3-line shape.
+        self.assertEqual(len(result.text_companion.split("\n")), 3)
 
     def test_llm_returns_drifted_opener_falls_back(self) -> None:
+        bad_payload = json.dumps({
+            "verdict": "Yesterday was a normal day with nothing to report.",
+            "scoreboard_callouts": [],
+            "digest_cards": [],
+        })
         with mock.patch(
             "scripts.follow_up_generator._call_llm",
-            return_value="Yesterday was a normal day with nothing to report.",
+            return_value=bad_payload,
         ):
             result = generate_follow_up(
                 "digest", _snapshot(), breach=False,
+                deep_dive_url="https://example.com/deep",
                 retries=1, retry_gap_sec=0,
             )
         self.assertTrue(result.degraded)
         # Verdict regex still passes the fallback text.
-        self.assertIsNotNone(VERDICT_OPENING_RE.match(result.text))
+        self.assertIsNotNone(VERDICT_OPENING_RE.match(result.verdict))
 
     def test_llm_returns_empty_string_falls_back(self) -> None:
         with mock.patch(
@@ -194,22 +277,87 @@ class TestGenerateFollowUpFallbacks(unittest.TestCase):
         ):
             result = generate_follow_up(
                 "digest", _snapshot(), breach=False,
+                deep_dive_url="https://example.com/deep",
+                retries=1, retry_gap_sec=0,
+            )
+        self.assertTrue(result.degraded)
+
+    def test_llm_returns_invalid_json_falls_back(self) -> None:
+        with mock.patch(
+            "scripts.follow_up_generator._call_llm",
+            return_value="this is not JSON",
+        ):
+            result = generate_follow_up(
+                "scoreboard", _snapshot(), breach=False,
+                deep_dive_url="https://example.com/deep",
                 retries=1, retry_gap_sec=0,
             )
         self.assertTrue(result.degraded)
 
 
 # ---------------------------------------------------------------------------
-# FollowUp dataclass shape
+# Slim text companion shape (3 lines)
+# ---------------------------------------------------------------------------
+
+class TestSlimTextCompanionShape(unittest.TestCase):
+    def test_breach_scoreboard_text_companion_is_three_lines(self) -> None:
+        with mock.patch(
+            "scripts.follow_up_generator._call_llm",
+            side_effect=RuntimeError("offline"),
+        ):
+            result = generate_follow_up(
+                "scoreboard", _snapshot(),
+                breach=True, breach_signal="academic",
+                deep_dive_url="https://example.com/deep",
+                retries=1, retry_gap_sec=0,
+            )
+        lines = result.text_companion.split("\n")
+        self.assertEqual(len(lines), 3)
+        self.assertIsNotNone(VERDICT_OPENING_RE.match(lines[0]))
+        self.assertIn("<@", lines[1])
+        self.assertTrue(lines[2].startswith("Deep dive: "))
+
+    def test_quiet_digest_text_companion_has_blank_mention_line(self) -> None:
+        with mock.patch(
+            "scripts.follow_up_generator._call_llm",
+            side_effect=RuntimeError("offline"),
+        ):
+            result = generate_follow_up(
+                "digest", _snapshot(), breach=False,
+                deep_dive_url="https://example.com/q",
+                retries=1, retry_gap_sec=0,
+            )
+        lines = result.text_companion.split("\n")
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[1], "")  # no mention on quiet day
+
+
+# ---------------------------------------------------------------------------
+# InsightPayload backward-compat shape
 # ---------------------------------------------------------------------------
 
 class TestFollowUpShape(unittest.TestCase):
     def test_as_block_kit_section_shape(self) -> None:
-        fu = FollowUp(text="Top risk: foo.")
-        block = fu.as_block_kit_section()
+        # FollowUp is now an alias for InsightPayload. Build via the new
+        # InsightPayload(verdict=, text_companion=) signature.
+        payload = InsightPayload(
+            verdict="Top risk: foo.",
+            text_companion="Top risk: foo.",
+        )
+        block = payload.as_block_kit_section()
         self.assertEqual(block["type"], "section")
         self.assertEqual(block["text"]["type"], "mrkdwn")
         self.assertEqual(block["text"]["text"], "Top risk: foo.")
+
+    def test_text_property_aliases_text_companion(self) -> None:
+        payload = InsightPayload(
+            verdict="Top risk: foo.",
+            text_companion="Top risk: foo.\n\nDeep dive: bar",
+        )
+        self.assertEqual(payload.text, payload.text_companion)
+
+    def test_followup_alias_resolves_to_insight_payload(self) -> None:
+        self.assertIs(FollowUp, InsightPayload)
 
 
 if __name__ == "__main__":

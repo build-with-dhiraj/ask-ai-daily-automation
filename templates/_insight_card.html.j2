@@ -1,0 +1,30 @@
+{#-
+  InsightCard component for the daily digest poster.
+
+  Expects a single `card` variable in scope:
+    card: {topic_label, icon, claim, evidence, context}
+
+  topic_label : mono eyebrow (CLARITY, LATENCY, FEEDBACK, COST, ACCURACY, USAGE)
+  icon        : optional single glyph from the locked set (rendered inline
+                ahead of the claim sentence); falsy values render no glyph
+  claim       : Hanken 700, 14px, one sentence
+  evidence    : Hanken 400, 14px, one supporting metric sentence
+  context     : optional Hanken 400 14px in ink-muted, cross-signal sentence
+
+  Hairline rule between cards is owned by the caller (uses .rule). No card
+  container, no rounded corners, no drop shadow. Per impeccable, drop
+  shadows are banned and same-sized card grids are an AI-default tell.
+-#}
+<article class="insight-card">
+  <div class="insight-eyebrow eyebrow">{{ card.topic_label }}</div>
+  <p class="insight-claim">
+    {%- if card.icon %}<span class="insight-icon" aria-hidden="true">{{ card.icon }}</span> {% endif -%}
+    {{ card.claim }}
+  </p>
+  {%- if card.evidence %}
+  <p class="insight-evidence">{{ card.evidence }}</p>
+  {%- endif %}
+  {%- if card.context %}
+  <p class="insight-context">{{ card.context }}</p>
+  {%- endif %}
+</article>

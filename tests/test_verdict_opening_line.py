@@ -84,20 +84,22 @@ class TestDeterministicFallbackOpensWithVerdict(unittest.TestCase):
         }
 
     def test_breach_scoreboard_fallback_passes_regex(self) -> None:
-        text = _deterministic_scoreboard(self._make_snapshot(), breach=True)
-        self.assertIsNotNone(VERDICT_OPENING_RE.match(text))
+        # Commit 11: returns (verdict, callouts) tuple. Verdict is line 1.
+        verdict, _ = _deterministic_scoreboard(self._make_snapshot(), breach=True)
+        self.assertIsNotNone(VERDICT_OPENING_RE.match(verdict))
 
     def test_quiet_scoreboard_fallback_passes_regex(self) -> None:
-        text = _deterministic_scoreboard(self._make_snapshot(), breach=False)
-        self.assertIsNotNone(VERDICT_OPENING_RE.match(text))
+        verdict, _ = _deterministic_scoreboard(self._make_snapshot(), breach=False)
+        self.assertIsNotNone(VERDICT_OPENING_RE.match(verdict))
 
     def test_breach_digest_fallback_passes_regex(self) -> None:
-        text = _deterministic_digest(self._make_snapshot(), breach=True)
-        self.assertIsNotNone(VERDICT_OPENING_RE.match(text))
+        # Commit 11: returns (verdict, cards) tuple. Verdict is line 1.
+        verdict, _ = _deterministic_digest(self._make_snapshot(), breach=True)
+        self.assertIsNotNone(VERDICT_OPENING_RE.match(verdict))
 
     def test_quiet_digest_fallback_passes_regex(self) -> None:
-        text = _deterministic_digest(self._make_snapshot(), breach=False)
-        self.assertIsNotNone(VERDICT_OPENING_RE.match(text))
+        verdict, _ = _deterministic_digest(self._make_snapshot(), breach=False)
+        self.assertIsNotNone(VERDICT_OPENING_RE.match(verdict))
 
 
 class TestFallbackHasNoLongDashes(unittest.TestCase):

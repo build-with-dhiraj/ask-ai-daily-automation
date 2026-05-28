@@ -331,6 +331,11 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
     med_cost = eval_median("run_cost_usd")
     med_n_judged = eval_median("n_judged")
 
+    # Row labels: Commit 11 jargon sweep. RUN COST and JUDGED were insider
+    # terms; the new labels read as plain English so a leadership reader can
+    # parse the standings without a glossary. Acronyms are expanded via
+    # expand_acronyms_first_use after the standings list is built, so the
+    # poster image carries the same disambiguation as the text companion.
     standings = [
         {
             "label": "Academic FAIL",
@@ -354,20 +359,27 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
             "breach": False,
         },
         {
-            "label": "Run cost",
+            "label": "Yesterday's run cost",
             "yesterday": _fmt_usd(run_cost_f),
             "median_14d": _fmt_usd(med_cost),
             "delta": _fmt_delta_usd(run_cost_f, med_cost),
             "breach": False,
         },
         {
-            "label": "Judged",
+            "label": "Traces graded",
             "yesterday": _fmt_int(n_judged),
             "median_14d": _fmt_int(med_n_judged),
             "delta": _fmt_delta_int(n_judged, med_n_judged),
             "breach": False,
         },
     ]
+    # Apply acronym expansion to row labels so VCP / TTFT etc. are not
+    # surfaced raw inside the standings table itself. Idempotent: row
+    # labels that contain no acronym stay unchanged.
+    from scripts.follow_up_generator import expand_acronyms_first_use
+    for row in standings:
+        row["label"] = expand_acronyms_first_use(row["label"])
+    verdict = expand_acronyms_first_use(verdict)
 
     # spark_series_by_metric: wired but unused by Variant D. A future
     # variant can render any of these without a data migration.
@@ -378,13 +390,41 @@ def build_scoreboard_poster_input(snapshot: dict) -> dict:
         "run_cost_usd": eval_series("run_cost_usd"),
     }
 
+    # Top driver codes (Commit 11): top-3 axial codes by fire count. The
+    # mapping CODE_LABELS translates each raw code into a Hanken-readable
+    # label. Empty list on calm days; up to 3 entries on breach days.
+    top_driver_codes: list[dict] = []
+    if code_counts_raw:
+        try:
+            ranked = sorted(
+                ((str(k), int(v or 0)) for k, v in code_counts_raw.items()),
+                key=lambda kv: kv[1],
+                reverse=True,
+            )
+            for code, count in ranked[:3]:
+                if count <= 0:
+                    continue
+                top_driver_codes.append({
+                    "code": code,
+                    "label": _CODE_LABELS.get(code, code.lower()),
+                    "count": count,
+                })
+        except (TypeError, ValueError):
+            top_driver_codes = []
+
     return {
         "date_human": date_human,
         "date_iso": date_iso,
         "n_judged": n_judged,
         "kill_switch_breach": kill_switch_breach,
         "verdict": verdict,
+        "eyebrow_separator": " " + chr(0x00B7) + " ",
         "standings": standings,
+        "top_driver_codes": top_driver_codes,
+        # scoreboard_callouts: populated by the caller after generate_follow_up
+        # returns an InsightPayload. The builder seeds an empty list so the
+        # template renders without callouts when the LLM step is skipped.
+        "scoreboard_callouts": [],
         "spark_series_by_metric": spark_series_by_metric,
         # Legacy keys retained so alt_text + a few consumer paths keep working
         # while callers migrate. New code should use `verdict`.
@@ -533,6 +573,11 @@ def build_digest_poster_input(
     med_ttft = digest_median("student_ttft_p90_sec")
     med_cost = digest_median("total_cost_usd")
 
+    # Row labels: Commit 11 jargon sweep. "VCP" and "TTFT" become full
+    # English; the digest stops looking like a private dashboard. The
+    # standings list is retained here for the few consumers (alt_text,
+    # legacy follow-up) that still read it; the digest TEMPLATE no longer
+    # renders this list, so the data is informational not visual.
     standings = [
         {
             "label": "Downvote rate",
@@ -542,7 +587,7 @@ def build_digest_poster_input(
             "breach": breach,
         },
         {
-            "label": "VCP success",
+            "label": "Video Co-Pilot OK %",
             "yesterday": _fmt_pct(vcp_succ),
             "median_14d": _fmt_pct(med_vcp),
             "delta": _fmt_delta_pp(vcp_succ, med_vcp),
@@ -556,7 +601,7 @@ def build_digest_poster_input(
             "breach": False,
         },
         {
-            "label": "Student TTFT p90",
+            "label": "Student wait, 90th pct",
             "yesterday": _fmt_seconds(ttft_p90),
             "median_14d": _fmt_seconds(med_ttft),
             "delta": _fmt_delta_seconds(ttft_p90, med_ttft),
@@ -570,6 +615,12 @@ def build_digest_poster_input(
             "breach": False,
         },
     ]
+    # Apply acronym expansion to row labels and verdict so the poster image
+    # mirrors the slim text companion's plain-English voice.
+    from scripts.follow_up_generator import expand_acronyms_first_use
+    for row in standings:
+        row["label"] = expand_acronyms_first_use(row["label"])
+    verdict = expand_acronyms_first_use(verdict)
 
     spark_series_by_metric = {
         "downvote_rate_pct": digest_series("downvote_rate_pct"),
@@ -579,12 +630,28 @@ def build_digest_poster_input(
         "total_cost_usd": digest_series("total_cost_usd"),
     }
 
+    # Eyebrow on the right of the masthead: count of insight cards on a
+    # breach / loud day, or "QUIET DAY" on a calm day. The caller can
+    # overwrite this after the InsightPayload is generated to reflect the
+    # final card count from the LLM path.
+    if breach or insight_list:
+        eyebrow_count = max(len(insight_list), 1)
+        digest_eyebrow_right = f"{date_human.upper()} {chr(0x00B7)} {eyebrow_count} INSIGHTS"
+    else:
+        digest_eyebrow_right = f"{date_human.upper()} {chr(0x00B7)} QUIET DAY"
+
     return {
         "date_human": date_human,
         "date_iso": date_iso,
         "kill_switch_breach": breach,
         "verdict": verdict,
+        "eyebrow_separator": " " + chr(0x00B7) + " ",
         "standings": standings,
+        # digest_cards: populated by the caller after the InsightPayload is
+        # generated. Empty list on import-time render so the template falls
+        # back to the quiet-day path.
+        "digest_cards": [],
+        "digest_eyebrow_right": digest_eyebrow_right,
         "spark_series_by_metric": spark_series_by_metric,
         # Legacy retained for follow-up text generator + alt_text consumers.
         "headline": verdict,

@@ -1,23 +1,23 @@
 {#-
-  Daily Digest poster, Variant D (verdict + standings table).
+  Daily Digest poster, Variant D (verdict + 4 insight cards).
 
-  640px wide, height grows with content. Renders from a build_digest_poster_input
-  dict; see templates/README.md for the JSON schema.
+  640px wide, height grows with content. Renders from a
+  build_digest_poster_input dict; see templates/README.md for the JSON
+  schema.
 
-  Same Variant D layout as poster_scoreboard.html.j2 with different content:
-  - Eyebrow: "DAILY DIGEST, {Day} {Date}" + "TODAY'S STORY"
-  - Breach band label: "Safety floor breached" (not kill-switch)
-  - Standings rows: downvote rate, VCP success, error rate, student TTFT p90, total cost
+  Distinct from the Scoreboard surface: scoreboard keeps a 5-row
+  standings table; digest replaces the standings table with up to 4
+  narrative insight cards (claim + evidence + optional cross-signal).
 
   Locked design specs (DESIGN.md):
   - Cream paper background, off-black ink, brick-red reserved for breach.
   - Hanken Grotesk body + IBM Plex Mono numerals, self-hosted WOFF2.
   - NO side-stripe borders. NO Tailwind CDN. NO Google Fonts CDN.
-  - NO emoji in the breach band.
+  - NO separate breach band; breach is carried by the verdict sentence
+    only. The brick-red row stripe lives on the scoreboard surface.
 
   Renderer passes `fonts_base` as a file:// URI to static/fonts/.
 -#}
-{%- set ks = kill_switch_breach -%}
 <!doctype html>
 <html lang="en">
 <head>
@@ -69,16 +69,18 @@
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { background: var(--bg-paper); }
+  html { background: var(--bg-paper); }
   body {
+    background: var(--bg-paper);
     font-family: 'Hanken Grotesk', ui-sans-serif, 'Helvetica Neue', Arial, sans-serif;
     color: var(--ink-body);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     line-height: 1.4;
-    display: flex;
-    justify-content: center;
-    padding: 24px 0;
+    /* No flex / no min-height: body sizes to content so full_page
+       screenshots and element screenshots both capture only the poster
+       without trailing cream void. */
+    width: 640px;
   }
 
   .poster {
@@ -114,18 +116,6 @@
   .rule-strong { border-top: 2px solid var(--rule-strong); }
   .rule        { border-top: 1px solid var(--rule); }
 
-  .kill-switch {
-    margin: 16px 28px 0;
-    padding: 6px 12px;
-    background: var(--breach-brick-bg);
-    color: var(--breach-brick);
-    font-family: 'IBM Plex Mono', ui-monospace, monospace;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-  }
-
   .verdict {
     padding: 20px 28px 24px;
     font-size: 26px;
@@ -136,61 +126,57 @@
     text-align: left;
   }
 
-  .standings {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 0 0 8px;
+  /* Insight cards: stacked, hairline rule between each. No card container,
+     no rounded corners, no drop shadow. */
+  .insights {
+    padding: 0;
   }
-  .standings th, .standings td {
-    padding: 12px 4px;
+  .insight-card {
+    padding: 18px 28px;
     border-bottom: 1px solid var(--rule);
-    vertical-align: middle;
   }
-  .standings th:first-child, .standings td:first-child { padding-left: 28px; }
-  .standings th:last-child,  .standings td:last-child  { padding-right: 28px; }
-  .standings thead th {
-    font-family: 'IBM Plex Mono', ui-monospace, monospace;
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--ink-muted);
-    text-align: right;
-    padding-top: 4px;
-    padding-bottom: 12px;
-    border-bottom-color: var(--rule);
+  .insight-eyebrow {
+    padding: 0 0 6px;
   }
-  .standings thead th:first-child { text-align: left; }
-  .standings tbody td.metric {
+  .insight-claim {
     font-family: 'Hanken Grotesk', ui-sans-serif, sans-serif;
-    font-size: 13px;
-    font-weight: 500;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--ink-body);
-    text-align: left;
-    width: 42%;
-  }
-  .standings tbody td.num {
-    font-family: 'IBM Plex Mono', ui-monospace, monospace;
-    font-feature-settings: "tnum", "zero";
-    font-variant-numeric: tabular-nums;
     font-size: 14px;
-    font-weight: 500;
-    text-align: right;
+    font-weight: 700;
+    line-height: 1.4;
     color: var(--ink-body);
+    margin: 0 0 4px;
   }
-  .standings tbody td.num.muted { color: var(--ink-muted); font-weight: 400; }
-  .standings tbody td.delta {
-    font-family: 'IBM Plex Mono', ui-monospace, monospace;
-    font-feature-settings: "tnum", "zero";
-    font-variant-numeric: tabular-nums;
+  .insight-icon {
+    margin-right: 4px;
+  }
+  .insight-evidence {
+    font-family: 'Hanken Grotesk', ui-sans-serif, sans-serif;
     font-size: 14px;
-    font-weight: 500;
-    text-align: right;
+    font-weight: 400;
+    line-height: 1.45;
     color: var(--ink-body);
+    margin: 0 0 4px;
   }
-  .standings tbody td.delta.breach { color: var(--breach-brick); }
+  .insight-context {
+    font-family: 'Hanken Grotesk', ui-sans-serif, sans-serif;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: var(--ink-muted);
+    margin: 0;
+  }
+
+  /* Quiet-day fallback: rendered when digest_cards is empty. Plain Hanken
+     400 sentence, no italics, no decoration. */
+  .quiet-day {
+    padding: 18px 28px;
+    font-family: 'Hanken Grotesk', ui-sans-serif, sans-serif;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: var(--ink-muted);
+    border-bottom: 1px solid var(--rule);
+  }
 
   .footer {
     padding: 14px 28px 28px;
@@ -219,45 +205,31 @@
 
   {# Eyebrow row #}
   <div class="masthead">
-    <div class="eyebrow">Daily Digest, {{ date_human }}</div>
-    <div class="eyebrow right">Today's story</div>
+    {# eyebrow_separator is " · " (mid-dot with surrounding spaces) by default.
+       Keep the template seam tight so a missing separator does not produce
+       a double-space artifact in the rendered HTML. #}
+    <div class="eyebrow">Daily Digest{{ eyebrow_separator | default(' · ') }}{{ date_human }}</div>
+    <div class="eyebrow right">{{ digest_eyebrow_right | default("Today's story") }}</div>
   </div>
 
   <div class="px"><div class="rule-strong"></div></div>
 
-  {# Kill-switch / safety-floor band (only on breach) #}
-  {% if ks %}
-  <div class="kill-switch" role="alert">Safety floor breached</div>
-  {% endif %}
-
-  {# Verdict sentence #}
+  {# Verdict sentence: carries breach state via wording, no separate band. #}
   <h1 class="verdict">{{ verdict }}</h1>
 
   <div class="px"><div class="rule"></div></div>
 
-  {# Standings: 5 rows of digest metrics #}
-  <table class="standings" aria-label="Daily digest standings">
-    <thead>
-      <tr>
-        <th scope="col">Metric</th>
-        <th scope="col">Yesterday</th>
-        <th scope="col">14d median</th>
-        <th scope="col">Delta</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for row in standings %}
-      <tr>
-        <td class="metric">{{ row.label }}</td>
-        <td class="num">{{ row.yesterday }}</td>
-        <td class="num muted">{{ row.median_14d }}</td>
-        <td class="delta{% if row.breach %} breach{% endif %}">{{ row.delta }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-
-  <div class="px"><div class="rule"></div></div>
+  {# Insight cards: 0..4 narrative cards. Quiet-day path renders a single
+     plain sentence so the surface still has body content. #}
+  <div class="insights" aria-label="Insight cards">
+    {%- if digest_cards %}
+      {%- for card in digest_cards %}
+      {% include '_insight_card.html.j2' %}
+      {%- endfor %}
+    {%- else %}
+      <div class="quiet-day">No insights worth surfacing today.</div>
+    {%- endif %}
+  </div>
 
   {# Footer #}
   <footer class="footer">

@@ -39,6 +39,11 @@ SCOPED_FILES: tuple[str, ...] = (
     "templates/poster_scoreboard.html.j2",
     "templates/poster_digest.html.j2",
     "templates/_sparkline.html.j2",
+    # Commit 11: new component partials and the breach-day digest fixture.
+    "templates/_top_drivers.html.j2",
+    "templates/_insight_card.html.j2",
+    "templates/_callout.html.j2",
+    "templates/sample_inputs/digest_breach_day.json",
     "templates/README.md",
     "tests/test_follow_up_generator.py",
     "tests/test_verdict_opening_line.py",

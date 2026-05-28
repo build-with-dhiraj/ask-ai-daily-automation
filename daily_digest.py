@@ -3814,6 +3814,57 @@ def main() -> int:
                         top_insights_text if isinstance(top_insights_text, dict) else {},
                     )
                     date_str = today_summary.get("date") or today_str
+                    # Commit 11: generate the InsightPayload BEFORE rendering
+                    # so the LLM-produced narrative cards are baked into the
+                    # PNG. Deterministic fallback still emits up to 4 cards
+                    # on a breach day; the quiet-day path emits 0 (the
+                    # template renders a single calm sentence).
+                    follow_up = None
+                    try:
+                        from scripts.follow_up_generator import generate_follow_up
+                        breach = bool(poster_input.get("kill_switch_breach"))
+                        breach_signal = "downvote" if breach else None
+                        follow_up = generate_follow_up(
+                            "digest",
+                            poster_input,
+                            breach=breach,
+                            breach_signal=breach_signal,
+                            deep_dive_url=poster_slack._deep_dive_url(
+                                "digest", date_str,
+                            ),
+                            retry_gap_sec=int(os.environ.get(
+                                "FOLLOW_UP_RETRY_GAP_SEC", "30",
+                            )),
+                        )
+                        poster_input["digest_cards"] = [
+                            {
+                                "topic_label": c.topic_label,
+                                "icon": c.icon,
+                                "claim": c.claim,
+                                "evidence": c.evidence,
+                                "context": c.context,
+                            }
+                            for c in follow_up.digest_cards
+                        ]
+                        # Refresh the right-eyebrow chip to match the actual
+                        # card count after the LLM step (the builder seeded
+                        # this from the legacy insights list).
+                        n_cards = len(follow_up.digest_cards)
+                        if n_cards or breach:
+                            poster_input["digest_eyebrow_right"] = (
+                                f"{poster_input.get('date_human', '').upper()} "
+                                + chr(0x00B7) + f" {max(n_cards, 1)} INSIGHTS"
+                            )
+                        else:
+                            poster_input["digest_eyebrow_right"] = (
+                                f"{poster_input.get('date_human', '').upper()} "
+                                + chr(0x00B7) + " QUIET DAY"
+                            )
+                    except Exception as _fu_exc:
+                        print(
+                            f"[poster] [warn] follow_up_generator unavailable: {_fu_exc!r}",
+                            file=sys.stderr,
+                        )
                     try:
                         image_url = poster_slack.render_and_publish(
                             "digest", poster_input, date_str
@@ -3839,29 +3890,9 @@ def main() -> int:
                         today_summary, stream_logs_rows
                     )
                     footer = poster_slack.digest_footer_links(date_str)
-                    # Phase 4: generate the LLM follow-up text companion.
-                    try:
-                        from scripts.follow_up_generator import generate_follow_up
-                        breach = bool(poster_input.get("kill_switch_breach"))
-                        # The digest breach signal usually maps to "downvote"
-                        # (per the safety floor watch line). Refine by axis
-                        # later if richer signals become available.
-                        breach_signal = "downvote" if breach else None
-                        follow_up = generate_follow_up(
-                            "digest",
-                            poster_input,
-                            breach=breach,
-                            breach_signal=breach_signal,
-                            retry_gap_sec=int(os.environ.get(
-                                "FOLLOW_UP_RETRY_GAP_SEC", "30",
-                            )),
-                        )
-                    except Exception as _fu_exc:
-                        print(
-                            f"[poster] [warn] follow_up_generator unavailable: {_fu_exc!r}",
-                            file=sys.stderr,
-                        )
-                        follow_up = None
+                    # follow_up was generated above before the render so the
+                    # InsightPayload's narrative cards could be baked into
+                    # the PNG; here we just consume its slim text companion.
                     main_blocks = build_main_blocks(
                         image_url=image_url,
                         poster_input=poster_input,

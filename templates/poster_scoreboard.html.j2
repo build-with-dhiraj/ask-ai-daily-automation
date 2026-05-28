@@ -9,11 +9,12 @@
   - Hanken Grotesk body + IBM Plex Mono numerals, self-hosted WOFF2.
   - Standings table: metric | yesterday | 14d median | delta.
   - NO side-stripe borders. NO Tailwind CDN. NO Google Fonts CDN.
-  - NO emoji in the breach band.
+  - NO separate breach band; breach is carried by the verdict sentence,
+    the brick-red row stripe on the breached metric, and the brick-red
+    delta cell.
 
   Renderer passes `fonts_base` as a file:// URI to static/fonts/.
 -#}
-{%- set ks = kill_switch_breach -%}
 <!doctype html>
 <html lang="en">
 <head>
@@ -65,16 +66,18 @@
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { background: var(--bg-paper); }
+  html { background: var(--bg-paper); }
   body {
+    background: var(--bg-paper);
     font-family: 'Hanken Grotesk', ui-sans-serif, 'Helvetica Neue', Arial, sans-serif;
     color: var(--ink-body);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     line-height: 1.4;
-    display: flex;
-    justify-content: center;
-    padding: 24px 0;
+    /* No flex / no min-height: body sizes to content so full_page
+       screenshots and element screenshots both capture only the poster
+       without trailing cream void. */
+    width: 640px;
   }
 
   .poster {
@@ -110,19 +113,6 @@
 
   .rule-strong { border-top: 2px solid var(--rule-strong); }
   .rule        { border-top: 1px solid var(--rule); }
-
-  /* Kill-switch band: brick-red text on faint pink, no border, tight padding. */
-  .kill-switch {
-    margin: 16px 28px 0;
-    padding: 6px 12px;
-    background: var(--breach-brick-bg);
-    color: var(--breach-brick);
-    font-family: 'IBM Plex Mono', ui-monospace, monospace;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-  }
 
   /* Verdict sentence: display headline. */
   .verdict {
@@ -196,7 +186,81 @@
     color: var(--ink-body);
   }
   .standings tbody td.delta.breach { color: var(--breach-brick); }
+  .standings tbody tr.breach td { background: var(--breach-brick-bg); }
   .standings tbody tr:last-child td { border-bottom: 1px solid var(--rule); }
+
+  /* TopDriverList: 3 rows of code, label, hairline bar, count. */
+  .drivers {
+    padding: 0 0 12px;
+  }
+  .drivers-eyebrow {
+    padding: 20px 28px 8px;
+  }
+  .driver-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .driver-row {
+    display: grid;
+    grid-template-columns: 36px 1fr 220px 56px;
+    align-items: center;
+    column-gap: 12px;
+    padding: 10px 28px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .driver-code {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ink-body);
+    text-transform: uppercase;
+  }
+  .driver-label {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--ink-body);
+    letter-spacing: 0.02em;
+  }
+  .driver-bar {
+    position: relative;
+    height: 1px;
+    background: var(--rule);
+    display: block;
+  }
+  .driver-bar-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 1px;
+    background: var(--ink-body);
+    display: block;
+  }
+  .driver-count {
+    font-size: 13px;
+    font-weight: 500;
+    text-align: right;
+    color: var(--ink-body);
+  }
+
+  /* Callouts: small mono eyebrow + Hanken body sentence. */
+  .callouts {
+    padding: 4px 0 12px;
+  }
+  .callout {
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .callout-label {
+    padding: 0 0 4px;
+    color: var(--ink-muted);
+  }
+  .callout-body {
+    font-family: 'Hanken Grotesk', ui-sans-serif, sans-serif;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: var(--ink-body);
+  }
 
   /* Footer */
   .footer {
@@ -226,18 +290,16 @@
 
   {# Eyebrow row #}
   <div class="masthead">
-    <div class="eyebrow">Rubric Scoreboard, {{ date_human }}</div>
+    {# eyebrow_separator is " · " (mid-dot with surrounding spaces) by default.
+       Keep the template seam tight so a missing separator does not produce
+       a double-space artifact in the rendered HTML. #}
+    <div class="eyebrow">Rubric Scoreboard{{ eyebrow_separator | default(' · ') }}{{ date_human }}</div>
     <div class="eyebrow right">Sample n={{ n_judged }}</div>
   </div>
 
   <div class="px"><div class="rule-strong"></div></div>
 
-  {# Kill-switch band (only on breach) #}
-  {% if ks %}
-  <div class="kill-switch" role="alert">Kill-switch breached</div>
-  {% endif %}
-
-  {# Verdict sentence #}
+  {# Verdict sentence: carries breach state via wording, no separate band. #}
   <h1 class="verdict">{{ verdict }}</h1>
 
   <div class="px"><div class="rule"></div></div>
@@ -257,7 +319,7 @@
     </thead>
     <tbody>
       {% for row in standings %}
-      <tr>
+      <tr{% if row.breach %} class="breach"{% endif %}>
         <td class="metric">{{ row.label }}</td>
         <td class="num">{{ row.yesterday }}</td>
         <td class="num muted">{{ row.median_14d }}</td>
@@ -267,7 +329,17 @@
     </tbody>
   </table>
 
-  <div class="px"><div class="rule"></div></div>
+  {# Top driver codes: 3 rows under the standings table. #}
+  {% include '_top_drivers.html.j2' %}
+
+  {# Two short callouts. #}
+  {%- if scoreboard_callouts %}
+  <div class="callouts" aria-label="Callouts">
+    {%- for callout in scoreboard_callouts %}
+    {% include '_callout.html.j2' %}
+    {%- endfor %}
+  </div>
+  {%- endif %}
 
   {# Footer #}
   <footer class="footer">

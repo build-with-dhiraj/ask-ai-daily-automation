@@ -1,0 +1,31 @@
+{#-
+  TopDriverList component. Renders 3 driver-code rows: mono code prefix,
+  human label, hairline bar (width proportional to count vs top row), count.
+
+  Expects:
+    top_driver_codes: list of dicts, each {code, label, count}.
+    Renderable with 0..3 entries; empty list renders nothing.
+
+  Bar width = round(100 * count / top_count). The top row is always 100%.
+  A single 1px hairline rule sits under the row; the bar is a 1px black
+  filled track ON TOP of the same hairline. No color bars, no emoji.
+-#}
+{%- if top_driver_codes %}
+{%- set top_count = top_driver_codes[0].count if top_driver_codes else 1 %}
+<div class="drivers" aria-label="Top driver codes">
+  <div class="drivers-eyebrow eyebrow">Top driver codes</div>
+  <ul class="driver-list">
+    {%- for row in top_driver_codes %}
+    {%- set pct = (100 * row.count / top_count) | round(0, 'common') | int if top_count else 0 %}
+    <li class="driver-row">
+      <span class="driver-code mono">{{ row.code }}</span>
+      <span class="driver-label">{{ row.label }}</span>
+      <span class="driver-bar" aria-hidden="true">
+        <span class="driver-bar-fill" style="width: {{ pct }}%;"></span>
+      </span>
+      <span class="driver-count mono">{{ row.count }}x</span>
+    </li>
+    {%- endfor %}
+  </ul>
+</div>
+{%- endif %}

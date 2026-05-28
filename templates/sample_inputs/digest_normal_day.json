@@ -2,43 +2,38 @@
   "date_human": "Thu 28 May",
   "date_iso": "2026-05-28",
   "kill_switch_breach": false,
-  "verdict": "Top risk: gpt-5.2 student latency drifted up 7% to 8 seconds at the 90th percentile, no breach yet but the slope is steep.",
-  "headline": "Top risk: gpt-5.2 student latency drifted up 7% to 8 seconds at the 90th percentile, no breach yet but the slope is steep.",
-  "standings": [
+  "verdict": "Top risk: student wait drifted up 7% to 8 seconds at the 90th percentile, no breach yet but the slope is steep.",
+  "headline": "Top risk: student wait drifted up 7% to 8 seconds at the 90th percentile, no breach yet but the slope is steep.",
+  "eyebrow_separator": " · ",
+  "digest_eyebrow_right": "THU 28 MAY · 4 INSIGHTS",
+  "digest_cards": [
     {
-      "label": "Downvote rate",
-      "yesterday": "0.57%",
-      "median_14d": "0.55%",
-      "delta": "+0.02pp",
-      "breach": false
+      "topic_label": "LATENCY",
+      "icon": "📈",
+      "claim": "Student wait at the 90th percentile rose to 8.0 seconds yesterday, up 0.5s versus the 14-day median.",
+      "evidence": "Three of the last four days have been at or above 8 seconds; the 14-day median sat at 7.5s through mid-May.",
+      "context": "VCP success dipped 0.3 percentage points the same day, hinting the slowdown bit into the long tail of video sessions."
     },
     {
-      "label": "VCP success",
-      "yesterday": "96.4%",
-      "median_14d": "96.7%",
-      "delta": "-0.3pp",
-      "breach": false
+      "topic_label": "FEEDBACK",
+      "icon": "💬",
+      "claim": "Downvote rate ticked up to 0.57%, two basis points above the 14-day median.",
+      "evidence": "Inside the watch band of 1.0% but the first up-tick after a week of slow drift down.",
+      "context": null
     },
     {
-      "label": "Error rate",
-      "yesterday": "0.4%",
-      "median_14d": "0.5%",
-      "delta": "-0.1pp",
-      "breach": false
+      "topic_label": "COST",
+      "icon": "💸",
+      "claim": "Total cost yesterday was $1,046, $34 above the 14-day median.",
+      "evidence": "Cost moved in line with the latency drift; longer answers and retries fan out into more billed tokens.",
+      "context": "Run cost per trace held steady at $0.0008, so the headline cost is volume, not unit price."
     },
     {
-      "label": "Student TTFT p90",
-      "yesterday": "8.0s",
-      "median_14d": "7.5s",
-      "delta": "+0.5s",
-      "breach": false
-    },
-    {
-      "label": "Total cost",
-      "yesterday": "$1,046",
-      "median_14d": "$1,012",
-      "delta": "+$34",
-      "breach": false
+      "topic_label": "ACCURACY",
+      "icon": "🎯",
+      "claim": "Academic FAIL closed at 3.4%, half a point below the median and well inside the 6% floor.",
+      "evidence": "No A5 answer-incomplete spike; the dominant code yesterday was A2 with 41 fires.",
+      "context": null
     }
   ],
   "spark_series_by_metric": {

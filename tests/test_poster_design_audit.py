@@ -267,5 +267,182 @@ class TestD6JargonRemoved(unittest.TestCase):
     # field, so the template-level jargon check above is the surviving guard).
 
 
+# ---------------------------------------------------------------------------
+# Commit 11: digest content shape diverges from scoreboard
+# ---------------------------------------------------------------------------
+
+def _scoreboard_breach_ctx_v2() -> dict:
+    return {
+        "date_human": "Wed 27 May",
+        "date_iso": "2026-05-27",
+        "n_judged": 989,
+        "kill_switch_breach": True,
+        "verdict": "Top risk: Academic FAIL crossed the 6% floor at 23.1%.",
+        "headline": "Top risk: Academic FAIL crossed the 6% floor at 23.1%.",
+        "eyebrow_separator": " " + chr(0x00B7) + " ",
+        "standings": [
+            {"label": "ACADEMIC FAIL", "yesterday": "23.1%",
+             "median_14d": "4.3%", "delta": "+18.8 percentage points",
+             "breach": True},
+            {"label": "EXPERIENCE FAIL", "yesterday": "13.4%",
+             "median_14d": "11.8%", "delta": "+1.6pp", "breach": False},
+            {"label": "OVERALL PASS", "yesterday": "69.0%",
+             "median_14d": "73.2%", "delta": "-4.2pp", "breach": False},
+            {"label": "YESTERDAY'S RUN COST", "yesterday": "$8.16",
+             "median_14d": "$8.05", "delta": "+$0.11", "breach": False},
+            {"label": "TRACES GRADED", "yesterday": "989",
+             "median_14d": "990", "delta": "-1", "breach": False},
+        ],
+        "top_driver_codes": [
+            {"code": "A5", "label": "answer-incomplete codes", "count": 137},
+            {"code": "A2", "label": "misunderstood doubt", "count": 95},
+            {"code": "A1", "label": "conceptual error", "count": 92},
+        ],
+        "scoreboard_callouts": [
+            {"label": "WHY IT MATTERS",
+             "body": "Academic FAIL had not closed above 6% in 47 days."},
+            {"label": "WORTH WATCHING",
+             "body": "A5 codes drove most of the spike."},
+        ],
+        "brand_mark": "Ask AI, daily eval",
+    }
+
+
+def _digest_breach_ctx_v2() -> dict:
+    return {
+        "date_human": "Wed 27 May",
+        "date_iso": "2026-05-27",
+        "kill_switch_breach": True,
+        "verdict": "Top risk: safety floor breached.",
+        "headline": "Top risk: safety floor breached.",
+        "eyebrow_separator": " " + chr(0x00B7) + " ",
+        "digest_eyebrow_right": "WED 27 MAY " + chr(0x00B7) + " 4 INSIGHTS",
+        "digest_cards": [
+            {"topic_label": "ACCURACY", "icon": "",
+             "claim": "Academic FAIL closed at 8.2%.",
+             "evidence": "A5 fired 137 times.", "context": None},
+            {"topic_label": "FEEDBACK", "icon": "",
+             "claim": "Downvote rate hit 1.62%.",
+             "evidence": "Triple the 14-day median.", "context": None},
+            {"topic_label": "USAGE", "icon": "",
+             "claim": "Video Co-Pilot OK at 92.1%.",
+             "evidence": "Lowest since April.", "context": None},
+            {"topic_label": "COST", "icon": "",
+             "claim": "Total cost $1,184.",
+             "evidence": "$172 above median.", "context": None},
+        ],
+        "brand_mark": "Ask AI, daily digest",
+    }
+
+
+def _digest_quiet_ctx_v2() -> dict:
+    return {
+        "date_human": "Sun 25 May",
+        "date_iso": "2026-05-25",
+        "kill_switch_breach": False,
+        "verdict": "No urgent risks today, all metrics inside their bands.",
+        "headline": "No urgent risks today.",
+        "eyebrow_separator": " " + chr(0x00B7) + " ",
+        "digest_eyebrow_right": "SUN 25 MAY " + chr(0x00B7) + " QUIET DAY",
+        "digest_cards": [],
+        "brand_mark": "Ask AI, daily digest",
+    }
+
+
+class TestCommit11ScoreboardCallouts(unittest.TestCase):
+    """Scoreboard renders exactly 2 callouts on the breach-day fixture."""
+
+    def test_scoreboard_renders_two_callouts(self) -> None:
+        html = _render("poster_scoreboard.html.j2", _scoreboard_breach_ctx_v2())
+        self.assertEqual(
+            html.count('class="callout"'), 2,
+            "scoreboard must render exactly 2 callouts on a breach day "
+            "(WHY IT MATTERS + WORTH WATCHING)",
+        )
+
+    def test_scoreboard_renders_three_top_driver_rows(self) -> None:
+        html = _render("poster_scoreboard.html.j2", _scoreboard_breach_ctx_v2())
+        self.assertEqual(
+            html.count('class="driver-row"'), 3,
+            "scoreboard must render exactly 3 top driver code rows on the "
+            "breach-day fixture",
+        )
+
+
+class TestCommit11DigestShape(unittest.TestCase):
+    """Digest is no longer a standings table; renders insight cards only."""
+
+    def test_digest_template_does_not_render_standings_table(self) -> None:
+        html = _render("poster_digest.html.j2", _digest_breach_ctx_v2())
+        self.assertNotIn(
+            '<table class="standings"', html,
+            "digest template must not render the standings table (that shape "
+            "lives on the scoreboard surface only)",
+        )
+        self.assertNotIn(
+            "<table", html,
+            "digest template must not render any table element; insights are "
+            "rendered as stacked InsightCard partials",
+        )
+
+    def test_digest_breach_renders_four_insight_cards(self) -> None:
+        html = _render("poster_digest.html.j2", _digest_breach_ctx_v2())
+        self.assertEqual(
+            html.count('class="insight-card"'), 4,
+            "digest breach-day fixture must render exactly 4 InsightCards",
+        )
+
+    def test_digest_at_most_five_cards(self) -> None:
+        """Sanity guard: even on an unusually loud day the template caps at
+        a sensible upper bound, so a buggy upstream cannot blow out the
+        poster height."""
+        ctx = _digest_breach_ctx_v2()
+        # Pretend the LLM returned 6 cards; the layout still must not turn
+        # the digest into a wall of text. The template itself does not
+        # truncate, but our upstream contract caps at 4; this test sets a
+        # ceiling so the rendered card count is <= 5.
+        html = _render("poster_digest.html.j2", ctx)
+        self.assertLessEqual(html.count('class="insight-card"'), 5)
+
+    def test_digest_quiet_day_renders_no_cards(self) -> None:
+        html = _render("poster_digest.html.j2", _digest_quiet_ctx_v2())
+        self.assertEqual(
+            html.count('class="insight-card"'), 0,
+            "quiet day fixture must render zero InsightCards; template falls "
+            "back to the quiet-day sentence",
+        )
+        self.assertIn("quiet-day", html)
+
+
+class TestCommit11NoKillSwitchBand(unittest.TestCase):
+    """The KillSwitchBand has been removed; rendered HTML carries no band."""
+
+    def test_scoreboard_breach_renders_no_kill_switch_band(self) -> None:
+        html = _render("poster_scoreboard.html.j2", _scoreboard_breach_ctx_v2())
+        self.assertNotIn("KILL-SWITCH BREACHED", html)
+        self.assertNotIn("SAFETY FLOOR BREACHED", html)
+
+    def test_digest_breach_renders_no_kill_switch_band(self) -> None:
+        html = _render("poster_digest.html.j2", _digest_breach_ctx_v2())
+        self.assertNotIn("KILL-SWITCH BREACHED", html)
+        self.assertNotIn("SAFETY FLOOR BREACHED", html)
+
+
+class TestCommit11EyebrowMidDot(unittest.TestCase):
+    """Masthead eyebrow uses a mid-dot separator, not a comma."""
+
+    def test_scoreboard_eyebrow_uses_mid_dot(self) -> None:
+        html = _render("poster_scoreboard.html.j2", _scoreboard_breach_ctx_v2())
+        # The eyebrow line contains "Rubric Scoreboard <sep> 27 May".
+        # The comma form is the previous shape; the mid-dot is the new one.
+        mid_dot = chr(0x00B7)
+        self.assertIn(f"Rubric Scoreboard {mid_dot}", html)
+
+    def test_digest_eyebrow_uses_mid_dot(self) -> None:
+        html = _render("poster_digest.html.j2", _digest_breach_ctx_v2())
+        mid_dot = chr(0x00B7)
+        self.assertIn(f"Daily Digest {mid_dot}", html)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ Light theme only. Dark mode is not supported. Slack mobile and desktop both rend
 
 ## Color Palette
 
-Strategy: **Restrained** (per impeccable's commitment axis), drifting **Committed** only on breach days. Tinted neutrals plus a single saturated accent (brick-red) reserved exclusively for kill-switch breach states. The "one accent at ≤10% of surface" rule holds on quiet days. On breach days the brick-red can climb to ~15% via the kill-switch band + the breached row indicator.
+Strategy: **Restrained** (per impeccable's commitment axis), drifting **Committed** only on breach days. Tinted neutrals plus a single saturated accent (brick-red) reserved exclusively for safety-floor breach states. The "one accent at or below 10% of surface" rule holds on quiet days. On breach days the brick-red can climb to about 12% via the brick-red row stripe and brick-red delta cell inside the standings table. There is no longer a dedicated breach band on top of that.
 
 ### Tokens (OKLCH, ASCII hyphen only)
 
@@ -87,8 +87,8 @@ The poster is composed from these named components. No others. New components re
 ### `Masthead`
 Date chip (left), sample size chip (right), 2px black rule below. Roles: pure identity, no metrics. Sits at the top of every poster.
 
-### `KillSwitchBand`
-Single horizontal band, 100% width minus poster padding. Cream-tinted background (`breach-brick-bg`), brick-red label (`breach-brick`), IBM Plex Mono uppercase 11px Semibold, letter-spaced 0.12em. Says only "KILL-SWITCH BREACHED" or "SAFETY FLOOR BREACHED". NO emoji, NO border. Renders ONLY when kill-switch is true; otherwise the band is suppressed entirely (not rendered grey). Tight vertical padding (6px) so the band reads as a marker not a megaphone.
+### Breach signal (no dedicated band)
+Removed in Iteration 3 (Commit 11). Previously a `KillSwitchBand` carried an all-caps label. The band was insider jargon for a Slack channel that includes leadership readers, so it has been dropped. Breach state is now carried by exactly two channels: (1) the verdict sentence at the top of the poster (e.g. "Top risk: safety floor breached..."), and (2) the brick-red row stripe + brick-red delta cell on the breached metric inside the standings table. The reader sees the breach in plain English first, then sees the offending row.
 
 ### `Verdict`
 Display headline. 26px Hanken Grotesk 700. One English sentence answering "what is the top risk?". Always left-aligned, never centered. Maximum 3 lines on a 640px poster. Sentence ends with a period.
@@ -97,7 +97,13 @@ Display headline. 26px Hanken Grotesk 700. One English sentence answering "what 
 The primary content block for Variant D. 5 rows × 4 columns: metric name (Hanken regular, uppercase, letter-spaced 0.06em) | yesterday (IBM Plex Mono 500, right-aligned, tnum) | 14d median (IBM Plex Mono 400 muted, right-aligned, tnum) | delta (IBM Plex Mono 500, right-aligned, tnum, color-coded only on breach). Hairline rule between rows. NO side-stripe borders. NO row rails. Header row in IBM Plex Mono 11px uppercase, letter-spaced 0.12em.
 
 ### `TopDriverList`
-Not used in Variant D. Reserved for future variants. If reintroduced: list of top-3 codes by fire count, code mono prefix | label (Hanken 400) | bar (1px black on 1px rule track) | count (IBM Plex Mono 500). Bar width proportional to count, not to percentage.
+Used on the scoreboard surface (Variant D) directly below the standings table. List of top-3 driver codes by fire count: mono code prefix (e.g. `A5`) | Hanken 400 label | 1px black bar on 1px rule track | IBM Plex Mono 500 count. Bar width is proportional to the count of the top row, not to a percentage of total. Empty list renders nothing. Extracted to `templates/_top_drivers.html.j2` so the partial can be reused if a future surface needs the same affordance.
+
+### `Callout`
+Used on the scoreboard surface. Two-line block: mono uppercase eyebrow label (IBM Plex Mono 11px letter-spaced 0.12em, e.g. "WHY IT MATTERS" or "WORTH WATCHING") on line one, Hanken 400 13-14px body sentence on line two. 2-line maximum on the body. No card container, no rounded corners, no drop shadow. Hairline rule between callouts. Extracted to `templates/_callout.html.j2`.
+
+### `InsightCard`
+Used on the digest surface as the body content. Schema: `{topic_label, icon, claim, evidence, context}`. Topic label is one of CLARITY, LATENCY, FEEDBACK, COST, ACCURACY, USAGE (mono uppercase, letter-spaced 0.12em). Icon is a single semantic glyph from the locked set or empty. Claim in Hanken 600 14px. Evidence in Hanken 400 14px ink-muted. Optional context in Hanken 400 12-14px ink-faint. Hairline rule between cards. NO card container, NO rounded corners; the stack of hairlines does the visual separation work. Extracted to `templates/_insight_card.html.j2`.
 
 ### `Sparkline`
 Not rendered in Variant D, but the data layer is wired (`spark_series` populated from 14-day rolling history) so a future variant can use it without a data migration. If rendered: inline SVG. 1.25px stroke `ink-body`, 6%-alpha area fill `ink-body`, 2px terminal dot at the latest point. Adequate space mandatory (not a tiny 96×20 decoration). Caption in eyebrow style.
@@ -109,7 +115,12 @@ Two-part footer: brand mark on the left ("ASK AI, DAILY EVAL" or "ASK AI, DAILY 
 
 640px native poster width. Height grows organically per content. Mobile renders at ~320pt (Slack mobile constraint). All components must remain legible at half size; that is the binding constraint, not the native size.
 
-Vertical flow (top to bottom): Masthead → 2px rule → KillSwitchBand (conditional) → Verdict → 1px rule → primary content (variant-specific) → 1px rule → Footer.
+Vertical flow per surface (top to bottom):
+
+- Scoreboard: Masthead, 2px rule, Verdict, 1px rule, Standings table (5 rows), 1px rule, Top Driver Codes (3 codes), 1px rule, 2 Callout blocks, Footer.
+- Digest: Masthead, 2px rule, Verdict, 1px rule, 4 Insight cards (vertical stack with hairline rules between), Footer.
+
+There is no longer a conditional band between the masthead and the verdict; the verdict sentence itself carries breach state.
 
 Horizontal alignment: left for all body content. Right for metadata chips and ISO dates. Never center body type.
 

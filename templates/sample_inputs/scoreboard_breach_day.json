@@ -5,41 +5,57 @@
   "kill_switch_breach": true,
   "verdict": "Top risk: Academic FAIL crossed the 6% floor at 23.1% today, driven by answer-incomplete codes.",
   "headline": "Top risk: Academic FAIL crossed the 6% floor at 23.1% today, driven by answer-incomplete codes.",
+  "eyebrow_separator": " · ",
   "standings": [
     {
-      "label": "Academic FAIL",
+      "label": "ACADEMIC FAIL",
       "yesterday": "23.1%",
       "median_14d": "4.3%",
-      "delta": "+18.8pp",
+      "delta": "+18.8 percentage points",
       "breach": true
     },
     {
-      "label": "Experience FAIL",
+      "label": "EXPERIENCE FAIL",
       "yesterday": "13.4%",
       "median_14d": "11.8%",
       "delta": "+1.6pp",
       "breach": false
     },
     {
-      "label": "Overall PASS",
+      "label": "OVERALL PASS",
       "yesterday": "69.0%",
       "median_14d": "73.2%",
       "delta": "-4.2pp",
       "breach": false
     },
     {
-      "label": "Run cost",
+      "label": "YESTERDAY'S RUN COST",
       "yesterday": "$8.16",
       "median_14d": "$8.05",
       "delta": "+$0.11",
       "breach": false
     },
     {
-      "label": "Judged",
+      "label": "TRACES GRADED",
       "yesterday": "989",
       "median_14d": "990",
       "delta": "-1",
       "breach": false
+    }
+  ],
+  "top_driver_codes": [
+    {"code": "A5", "label": "answer-incomplete codes", "count": 137},
+    {"code": "A2", "label": "misunderstood doubt", "count": 95},
+    {"code": "A1", "label": "conceptual error", "count": 92}
+  ],
+  "scoreboard_callouts": [
+    {
+      "label": "Why it matters",
+      "body": "Academic FAIL has not closed above 6% in 47 days; today's 23.1% is the worst single-day reading since calibration in March."
+    },
+    {
+      "label": "What to watch",
+      "body": "A5 answer-incomplete codes drove most of the spike; if the same pattern repeats tomorrow, the kill switch stays armed for a second day."
     }
   ],
   "spark_series_by_metric": {
