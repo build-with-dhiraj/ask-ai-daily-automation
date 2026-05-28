@@ -1,4 +1,4 @@
-# Poster templates — Rubric Scoreboard & Daily Digest
+# Poster templates: Rubric Scoreboard & Daily Digest
 
 Jinja2 + Tailwind (CDN) HTML templates that the Playwright renderer screenshots to PNG for posting in `#ask-ai-evals`. Companion to plan §"The Poster Design" in `/Users/pw/.claude/plans/here-is-the-sixth-buzzing-sundae.md`.
 
@@ -10,15 +10,15 @@ Width is fixed at **640px**; height grows with content (`full_page` screenshot).
 |---|---|
 | `poster_scoreboard.html.j2` | Rubric Scoreboard poster (daily eval, ~12:00 IST) |
 | `poster_digest.html.j2` | Daily Digest poster (~12:08 IST) |
-| `_sparkline.html.j2` | Shared Jinja macro — inline SVG sparkline (~120×24px), accepts `spark_series: list[float]` of length ≤14 |
+| `_sparkline.html.j2` | Shared Jinja macro for inline SVG sparkline (~120×24px), accepts `spark_series: list[float]` of length ≤14. Not rendered by Variant D, reserved for future variants. |
 | `sample_inputs/*.json` | Fixture data for local render review |
 
 ## Design constraints (locked)
 
-- **Typography**: Inter (body, weights 400/500/600/700) + IBM Plex Mono (tabular figures) via Google Fonts. `font-feature-settings: "tnum","cv11"` on numeric columns.
-- **Brand**: PhysicsWallah Ask AI. FT/Stripe craft level. Anti-slop emoji discipline — only semantic state (🟢🟡🔴 ⚠️ ▲▼ —) and section anchors (📰 💡 ⚙️ 🛟, one per section).
+- **Typography**: Hanken Grotesk (body, weights 400/500/600/700) + IBM Plex Mono (tabular figures), self-hosted as WOFF2 in `static/fonts/`. No Google Fonts CDN at render time. `font-feature-settings: "tnum","zero"` on numeric columns.
+- **Brand**: PhysicsWallah Ask AI. FT/Stripe craft level. Anti-slop emoji discipline: only semantic state (🟢🟡🔴 ⚠️ ▲▼ ·) and section anchors (📰 💡 ⚙️ 🛟, one per section).
 - **PII / sensitivity** (locked decision #8): NO cost figures, NO raw quoted student feedback, NO per-chapter downvote rates inside the image. Templates have no fields for those. Insights may describe trends narratively only.
-- **Kill-switch**: when `kill_switch_breach: true` the Scoreboard renders a red banner above the headline and a red-tinted left rail on the Academic FAIL row. The Digest mirrors the band for downvote-rate / VCP breaches.
+- **Breach state** (Iteration 3, Commit 11): when `kill_switch_breach: true` the poster does NOT render a dedicated band. Breach is carried by (a) the verdict sentence at the top of the poster, and (b) the brick-red row stripe + brick-red delta cell on the breached metric inside the standings table. The dedicated `KillSwitchBand` was removed because the all-caps band label was insider jargon for a channel that includes leadership readers.
 - **Accessibility**: every numeric value has a text-equivalent inside the semantic DOM so the alt-text extractor (the Playwright step) can lift a high-fidelity description without OCR.
 
 ## JSON schemas
@@ -36,7 +36,7 @@ Width is fixed at **640px**; height grows with content (`full_page` screenshot).
     {
       "label": "Academic FAIL",
       "value_text": "8.2%",              // pre-formatted (renderer is dumb on units)
-      "delta_text": "+2.1pp vs WoW",     // free, may be "—"
+      "delta_text": "+2.1pp vs WoW",     // free, may be "n/a"
       "delta_dir": "up" | "down" | "flat",
       "state": "red" | "yellow" | "green" | "neutral",
       "note": "above 6% floor"           // ≤32 chars contextual hint
@@ -76,7 +76,7 @@ Width is fixed at **640px**; height grows with content (`full_page` screenshot).
 }
 ```
 
-## Local render — review command
+## Local render: review command
 
 These are plain Jinja templates with CDN Tailwind, so the easiest preview path is a one-shot Python render → HTML file → open in a browser.
 

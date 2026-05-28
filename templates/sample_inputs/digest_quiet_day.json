@@ -1,9 +1,13 @@
 {
-  "date_human": "Sun · 25 May",
+  "date_human": "Sun 25 May",
   "date_iso": "2026-05-25",
   "kill_switch_breach": false,
-  "headline": "No anomalies today. Everything held.",
-  "subhead": null,
+  "verdict": "No urgent risks today, all four watch metrics holding inside their bands.",
+  "headline": "No urgent risks today, all four watch metrics holding inside their bands.",
+  "eyebrow_separator": " · ",
+  "digest_eyebrow_right": "SUN 25 MAY · QUIET",
+  "digest_cards": [],
+  "spark_series_by_metric": {},
   "insights": [],
-  "brand_mark": "Ask AI · daily digest"
+  "brand_mark": "Ask AI, daily digest"
 }

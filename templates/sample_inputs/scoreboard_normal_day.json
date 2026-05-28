@@ -1,43 +1,61 @@
 {
-  "date_human": "Mon · 26 May",
+  "date_human": "Mon 26 May",
   "date_iso": "2026-05-26",
   "n_judged": 979,
   "kill_switch_breach": false,
-  "headline": "Academic and Experience FAIL both flat, well inside the 6% floor.",
-  "scoreboard": [
+  "verdict": "No urgent risks today, Academic FAIL 3.4% holding inside the 6% floor.",
+  "headline": "No urgent risks today, Academic FAIL 3.4% holding inside the 6% floor.",
+  "eyebrow_separator": " · ",
+  "standings": [
     {
-      "label": "Academic FAIL",
-      "value_text": "3.4%",
-      "delta_text": "-0.2pp vs WoW",
-      "delta_dir": "down",
-      "state": "green",
-      "note": "floor 6.0%"
+      "label": "ACADEMIC FAIL",
+      "yesterday": "3.4%",
+      "median_14d": "3.5%",
+      "delta": "-0.1 percentage points",
+      "breach": false
     },
     {
-      "label": "Experience FAIL",
-      "value_text": "12.9%",
-      "delta_text": "-0.5pp",
-      "delta_dir": "down",
-      "state": "green",
-      "note": "holding"
+      "label": "EXPERIENCE FAIL",
+      "yesterday": "12.9%",
+      "median_14d": "13.4%",
+      "delta": "-0.5pp",
+      "breach": false
     },
     {
-      "label": "Overall PASS",
-      "value_text": "74.1%",
-      "delta_text": "+0.3pp",
-      "delta_dir": "up",
-      "state": "neutral",
-      "note": "n=979"
+      "label": "OVERALL PASS",
+      "yesterday": "74.1%",
+      "median_14d": "73.8%",
+      "delta": "+0.3pp",
+      "breach": false
+    },
+    {
+      "label": "YESTERDAY'S RUN COST",
+      "yesterday": "$8.04",
+      "median_14d": "$8.05",
+      "delta": "-$0.01",
+      "breach": false
+    },
+    {
+      "label": "TRACES GRADED",
+      "yesterday": "979",
+      "median_14d": "990",
+      "delta": "-11",
+      "breach": false
     }
   ],
-  "top_drivers": [
-    { "code": "A5", "label": "answer incomplete", "count": 41, "bar_pct": 100 },
-    { "code": "A1", "label": "conceptual error", "count": 28, "bar_pct": 68 },
-    { "code": "A2", "label": "misunderstood doubt", "count": 22, "bar_pct": 54 }
+  "top_driver_codes": [],
+  "scoreboard_callouts": [
+    {
+      "label": "Top mover",
+      "body": "Experience FAIL drifted down half a point versus the 14-day median, the calmest reading in a week."
+    },
+    {
+      "label": "Worth watching",
+      "body": "Traces graded came in 11 below median; if the dip widens tomorrow the kill switch denominator gets noisier."
+    }
   ],
-  "trend": {
-    "label": "14-day Academic FAIL trend",
-    "spark_series": [3.6, 3.4, 3.8, 3.5, 3.3, 3.2, 3.5, 3.7, 3.4, 3.3, 3.5, 3.4, 3.5, 3.4]
+  "spark_series_by_metric": {
+    "acc_fail_pct": [3.6, 3.4, 3.8, 3.5, 3.3, 3.2, 3.5, 3.7, 3.4, 3.3, 3.5, 3.4, 3.5, 3.4]
   },
-  "brand_mark": "Ask AI · daily eval"
+  "brand_mark": "Ask AI, daily eval"
 }

@@ -1733,6 +1733,17 @@ def _write_digest_snapshot(today_data: dict, path: str = DIGEST_SNAPSHOT_PATH) -
     except Exception as exc:  # pragma: no cover - filesystem rare-path
         print(f"[warn] failed to write digest snapshot: {exc!r}", file=sys.stderr)
 
+    # Append to the 14-day rolling history file (JSONL) so the poster
+    # standings table can render the median column. Best-effort.
+    try:
+        from scripts.snapshot_history import append_digest_snapshot
+        append_digest_snapshot(payload)
+    except Exception as exc:  # pragma: no cover - filesystem rare-path
+        print(
+            f"[warn] failed to append digest rolling history: {exc!r}",
+            file=sys.stderr,
+        )
+
 
 def _load_yesterday_snapshot(
     path: str = DIGEST_SNAPSHOT_PATH,
@@ -3321,26 +3332,50 @@ def _build_digest_safety_stripe_text(
 def build_main_blocks(
     *, image_url: str, poster_input: dict,
     ops_text: str, safety_text: str, footer_text: str,
+    follow_up_block: Optional[dict] = None,
+    degraded: bool = False,
 ) -> list:
-    """Compose the digest main message: poster image + Ops + Safety + thread
-    anchor + footer. The thread reply is posted separately ~2s later."""
-    alt = (poster_input.get("headline") or "").strip()
-    insights = poster_input.get("insights") or []
-    if insights:
-        alt += " | " + " · ".join(
-            (ins.get("claim") or "").strip() for ins in insights if ins.get("claim")
+    """Compose the digest main message: poster image + Ops + Safety +
+    conversational follow-up + footer. Phase 4 single-message-per-surface:
+    NO thread reply, NO "Full breakdown in thread" anchor. Threads happen
+    when humans reply.
+
+    `follow_up_block` is the LLM-generated conversational text companion
+    rendered as a Block Kit section by FollowUp.as_block_kit_section().
+    `degraded` prepends a marker section when the LLM fell back to the
+    deterministic template, so the operator sees the degradation in the
+    message body, not just in CI logs.
+    """
+    alt = (
+        poster_input.get("verdict")
+        or poster_input.get("headline")
+        or ""
+    ).strip()
+    standings = poster_input.get("standings") or []
+    if standings:
+        alt += " | " + ", ".join(
+            f"{row.get('label', '')} {row.get('yesterday', '')}".strip()
+            for row in standings
+            if row.get("label") and row.get("yesterday")
         )
-    return [
+    blocks: list = [
         {"type": "image", "image_url": image_url, "alt_text": alt[:1900]},
-        {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn",
-            "text": f"⚙️ *Ops* (yesterday)\n{ops_text}"}},
-        {"type": "section", "text": {"type": "mrkdwn",
-            "text": f"🛟 *Safety floor*\n{safety_text}"}},
-        {"type": "section", "text": {"type": "mrkdwn",
-            "text": "🧵 Full breakdown in thread"}},
-        {"type": "context", "elements": [{"type": "mrkdwn", "text": footer_text}]},
     ]
+    if degraded:
+        from scripts.slack_publisher import make_degradation_section
+        blocks.append(make_degradation_section())
+    blocks.extend([
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": f"*Ops, yesterday:* {ops_text}"}},
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": f"*Safety floor:* {safety_text}"}},
+    ])
+    if follow_up_block is not None:
+        blocks.append(follow_up_block)
+    blocks.append(
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": footer_text}]}
+    )
+    return blocks
 
 
 def build_thread_blocks(
@@ -3779,6 +3814,57 @@ def main() -> int:
                         top_insights_text if isinstance(top_insights_text, dict) else {},
                     )
                     date_str = today_summary.get("date") or today_str
+                    # Commit 11: generate the InsightPayload BEFORE rendering
+                    # so the LLM-produced narrative cards are baked into the
+                    # PNG. Deterministic fallback still emits up to 4 cards
+                    # on a breach day; the quiet-day path emits 0 (the
+                    # template renders a single calm sentence).
+                    follow_up = None
+                    try:
+                        from scripts.follow_up_generator import generate_follow_up
+                        breach = bool(poster_input.get("kill_switch_breach"))
+                        breach_signal = "downvote" if breach else None
+                        follow_up = generate_follow_up(
+                            "digest",
+                            poster_input,
+                            breach=breach,
+                            breach_signal=breach_signal,
+                            deep_dive_url=poster_slack._deep_dive_url(
+                                "digest", date_str,
+                            ),
+                            retry_gap_sec=int(os.environ.get(
+                                "FOLLOW_UP_RETRY_GAP_SEC", "30",
+                            )),
+                        )
+                        poster_input["digest_cards"] = [
+                            {
+                                "topic_label": c.topic_label,
+                                "icon": c.icon,
+                                "claim": c.claim,
+                                "evidence": c.evidence,
+                                "context": c.context,
+                            }
+                            for c in follow_up.digest_cards
+                        ]
+                        # Refresh the right-eyebrow chip to match the actual
+                        # card count after the LLM step (the builder seeded
+                        # this from the legacy insights list).
+                        n_cards = len(follow_up.digest_cards)
+                        if n_cards or breach:
+                            poster_input["digest_eyebrow_right"] = (
+                                f"{poster_input.get('date_human', '').upper()} "
+                                + chr(0x00B7) + f" {max(n_cards, 1)} INSIGHTS"
+                            )
+                        else:
+                            poster_input["digest_eyebrow_right"] = (
+                                f"{poster_input.get('date_human', '').upper()} "
+                                + chr(0x00B7) + " QUIET DAY"
+                            )
+                    except Exception as _fu_exc:
+                        print(
+                            f"[poster] [warn] follow_up_generator unavailable: {_fu_exc!r}",
+                            file=sys.stderr,
+                        )
                     try:
                         image_url = poster_slack.render_and_publish(
                             "digest", poster_input, date_str
@@ -3803,13 +3889,22 @@ def main() -> int:
                     safety_text = _build_digest_safety_stripe_text(
                         today_summary, stream_logs_rows
                     )
-                    footer = poster_slack.digest_footer_links()
+                    footer = poster_slack.digest_footer_links(date_str)
+                    # follow_up was generated above before the render so the
+                    # InsightPayload's narrative cards could be baked into
+                    # the PNG; here we just consume its slim text companion.
                     main_blocks = build_main_blocks(
                         image_url=image_url,
                         poster_input=poster_input,
                         ops_text=ops_text,
                         safety_text=safety_text,
                         footer_text=footer,
+                        follow_up_block=(
+                            follow_up.as_block_kit_section()
+                            if follow_up is not None and follow_up.text
+                            else None
+                        ),
+                        degraded=bool(follow_up is not None and follow_up.degraded),
                     )
                     try:
                         posted = poster_slack.post_blocks_to_slack(
@@ -3818,38 +3913,7 @@ def main() -> int:
                     except _POSTER_RECOVERABLE as exc:
                         posted = False
                         poster_error = f"cause=publish reason={exc!r}"
-                    if posted:
-                        time.sleep(2)
-                        # Code Reviewer F4: the prior call passed
-                        # _coerce_insights_to_text(top_insights_text) under
-                        # the "Cost & Latency" heading, painting the Top 3
-                        # Insights body into the wrong section. Use the real
-                        # cost/latency renderer (fmt_cost_and_latency, same
-                        # one the legacy block uses) so the heading and body
-                        # match.
-                        try:
-                            thread_cost_latency_text = fmt_cost_and_latency(
-                                cost_latency_data
-                                or {"ok": False, "answer_by_model": {}, "classifier": None}
-                            )
-                        except Exception as exc:  # defensive, mirrors legacy
-                            print(
-                                f"[warn] fmt_cost_and_latency raised for thread: {exc!r}",
-                                file=sys.stderr,
-                            )
-                            thread_cost_latency_text = (
-                                "_(cost/latency unavailable, Metabase fetch failed)_"
-                            )
-                        thread = build_thread_blocks(
-                            cost_latency_text=thread_cost_latency_text,
-                        )
-                        try:
-                            poster_slack.post_blocks_to_slack(
-                                SLACK_WEBHOOK, thread, "thread"
-                            )
-                        except _POSTER_RECOVERABLE as exc:
-                            print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
-                    elif poster_error is None:
+                    if not posted and poster_error is None:
                         poster_error = "cause=post reason=post_blocks_to_slack returned False"
                 elif poster_error is None:
                     poster_error = "cause=render reason=render_and_publish returned None"

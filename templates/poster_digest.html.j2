@@ -1,146 +1,240 @@
 {#-
-  Daily Digest poster · 640px wide, height grows with content.
+  Daily Digest poster, Variant D (verdict + 4 insight cards).
 
-  Renders 0..5 insight cards. Quiet-day path: empty insights → calm
-  "no anomalies" panel. Breach path: kill_switch_breach=true draws
-  the red band; the LLM headline is unchanged but framed in red.
+  640px wide, height grows with content. Renders from a
+  build_digest_poster_input dict; see templates/README.md for the JSON
+  schema.
 
-  No cost figures, no raw student quotes, no per-chapter downvote
-  rates inside the image (locked plan decision #8).
+  Distinct from the Scoreboard surface: scoreboard keeps a 5-row
+  standings table; digest replaces the standings table with up to 4
+  narrative insight cards (claim + evidence + optional cross-signal).
+
+  Locked design specs (DESIGN.md):
+  - Cream paper background, off-black ink, brick-red reserved for breach.
+  - Hanken Grotesk body + IBM Plex Mono numerals, self-hosted WOFF2.
+  - NO side-stripe borders. NO Tailwind CDN. NO Google Fonts CDN.
+  - NO separate breach band; breach is carried by the verdict sentence
+    only. The brick-red row stripe lives on the scoreboard surface.
+
+  Renderer passes `fonts_base` as a file:// URI to static/fonts/.
 -#}
-{% from "_sparkline.html.j2" import sparkline -%}
-{%- set ks = kill_switch_breach -%}
-{%- set topic_palette = {
-  "CLARITY":  {"text": "#1d4ed8", "bg": "#eff6ff", "rail": "#3b82f6"},
-  "LATENCY":  {"text": "#a16207", "bg": "#fefce8", "rail": "#ca8a04"},
-  "FEEDBACK": {"text": "#7c3aed", "bg": "#f5f3ff", "rail": "#8b5cf6"},
-  "COST":     {"text": "#0e7490", "bg": "#ecfeff", "rail": "#06b6d4"},
-  "ACCURACY": {"text": "#15803d", "bg": "#f0fdf4", "rail": "#16a34a"},
-  "USAGE":    {"text": "#be123c", "bg": "#fff1f2", "rail": "#e11d48"}
-} -%}
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Daily Digest · {{ date_iso }}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script>
+<title>Daily Digest, {{ date_iso }}</title>
 <style>
-  html, body { background: #f1f5f9; }
-  body { font-family: 'Inter', system-ui, sans-serif; font-feature-settings: "ss01","cv11"; -webkit-font-smoothing: antialiased; color: #0f172a; }
-  .mono { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-feature-settings: "tnum","zero"; font-variant-numeric: tabular-nums; }
-  .display { font-family: 'Inter', system-ui, sans-serif; font-weight: 700; letter-spacing: -0.02em; line-height: 1.18; }
-  .eyebrow { font-family: 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: 0.12em; text-transform: uppercase; font-size: 11px; color: #64748b; }
-  .rule { border-top: 1px solid #e2e8f0; }
-  .rule-thick { border-top: 2px solid #0f172a; }
-  .poster { width: 640px; }
-  .card-rail { width: 3px; }
+  /* Self-hosted font faces, loaded via file:// at render time. */
+  @font-face {
+    font-family: 'Hanken Grotesk';
+    src: url('{{ fonts_base }}/hanken-grotesk-variable.woff2') format('woff2-variations'),
+         url('{{ fonts_base }}/hanken-grotesk-variable.woff2') format('woff2');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: block;
+  }
+  @font-face {
+    font-family: 'IBM Plex Mono';
+    src: url('{{ fonts_base }}/plex-mono-400.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+  }
+  @font-face {
+    font-family: 'IBM Plex Mono';
+    src: url('{{ fonts_base }}/plex-mono-500.woff2') format('woff2');
+    font-weight: 500;
+    font-style: normal;
+    font-display: block;
+  }
+  @font-face {
+    font-family: 'IBM Plex Mono';
+    src: url('{{ fonts_base }}/plex-mono-600.woff2') format('woff2');
+    font-weight: 600;
+    font-style: normal;
+    font-display: block;
+  }
+
+  /* OKLCH tokens straight from DESIGN.md. */
+  :root {
+    --bg-paper:        oklch(0.97 0.005 85);
+    --bg-paper-deep:   oklch(0.94 0.008 85);
+    --ink-body:        oklch(0.22 0.01 240);
+    --ink-muted:       oklch(0.50 0.01 240);
+    --ink-faint:       oklch(0.65 0.01 240);
+    --breach-brick:    oklch(0.55 0.20 28);
+    --breach-brick-bg: oklch(0.95 0.05 28);
+    --rule:            oklch(0.88 0.006 85);
+    --rule-strong:     oklch(0.22 0.01 240);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--bg-paper); }
+  body {
+    background: var(--bg-paper);
+    font-family: 'Hanken Grotesk', ui-sans-serif, 'Helvetica Neue', Arial, sans-serif;
+    color: var(--ink-body);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    line-height: 1.4;
+    /* No flex / no min-height: body sizes to content so full_page
+       screenshots and element screenshots both capture only the poster
+       without trailing cream void. */
+    width: 640px;
+  }
+
+  .poster {
+    width: 640px;
+    background: var(--bg-paper);
+  }
+
+  .mono {
+    font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    font-feature-settings: "tnum", "zero";
+    font-variant-numeric: tabular-nums;
+  }
+
+  .eyebrow {
+    font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+  }
+
+  .px { padding-left: 28px; padding-right: 28px; }
+
+  .masthead {
+    padding: 28px 28px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .masthead .right { color: var(--ink-body); }
+
+  .rule-strong { border-top: 2px solid var(--rule-strong); }
+  .rule        { border-top: 1px solid var(--rule); }
+
+  .verdict {
+    padding: 20px 28px 24px;
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.22;
+    letter-spacing: -0.01em;
+    color: var(--ink-body);
+    text-align: left;
+  }
+
+  /* Insight cards: stacked, hairline rule between each. No card container,
+     no rounded corners, no drop shadow. */
+  .insights {
+    padding: 0;
+  }
+  .insight-card {
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .insight-eyebrow {
+    padding: 0 0 6px;
+  }
+  .insight-claim {
+    font-family: 'Hanken Grotesk', ui-sans-serif, sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+    color: var(--ink-body);
+    margin: 0 0 4px;
+  }
+  .insight-icon {
+    margin-right: 4px;
+  }
+  .insight-evidence {
+    font-family: 'Hanken Grotesk', ui-sans-serif, sans-serif;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: var(--ink-body);
+    margin: 0 0 4px;
+  }
+  .insight-context {
+    font-family: 'Hanken Grotesk', ui-sans-serif, sans-serif;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: var(--ink-muted);
+    margin: 0;
+  }
+
+  /* Quiet-day fallback: rendered when digest_cards is empty. Plain Hanken
+     400 sentence, no italics, no decoration. */
+  .quiet-day {
+    padding: 18px 28px;
+    font-family: 'Hanken Grotesk', ui-sans-serif, sans-serif;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.45;
+    color: var(--ink-muted);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .footer {
+    padding: 14px 28px 28px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .footer .brand {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+  }
+  .footer .date {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 10px;
+    color: var(--ink-faint);
+    font-feature-settings: "tnum", "zero";
+  }
 </style>
 </head>
-<body class="flex justify-center py-6">
-<article class="poster bg-white shadow-sm" role="article" aria-label="Daily Digest for {{ date_iso }}. {{ headline }}">
+<body>
+<article class="poster" role="article" aria-label="Daily Digest for {{ date_iso }}. {{ verdict }}">
 
-  {# ── Masthead ─────────────────────────────────────────────────── #}
-  <header class="px-7 pt-6 pb-4">
-    <div class="flex items-baseline justify-between">
-      <div>
-        <div class="eyebrow">Daily Digest</div>
-        <div class="mt-1 mono text-[15px] text-slate-600">{{ date_human }}</div>
-      </div>
-      <div class="text-right">
-        <div class="eyebrow">Section</div>
-        <div class="mono text-[15px] text-slate-900">📰 Today’s story</div>
-      </div>
-    </div>
-  </header>
-
-  <div class="px-7"><div class="rule-thick"></div></div>
-
-  {# ── Kill-switch / calm band ──────────────────────────────────── #}
-  {# D3: thinned - drop emoji, drop border, halve vertical padding so the
-       band reads as a marker not a megaphone. #}
-  {% if ks %}
-  <div class="mx-7 mt-4 mb-3 flex items-center gap-3 bg-red-50 px-4 py-1.5" role="alert" aria-label="Safety floor breached">
-    <span class="mono text-[12px] tracking-widest uppercase text-red-700 font-semibold">Safety floor breached</span>
+  {# Eyebrow row #}
+  <div class="masthead">
+    {# eyebrow_separator is " · " (mid-dot with surrounding spaces) by default.
+       Keep the template seam tight so a missing separator does not produce
+       a double-space artifact in the rendered HTML. #}
+    <div class="eyebrow">Daily Digest{{ eyebrow_separator | default(' · ') }}{{ date_human }}</div>
+    <div class="eyebrow right">{{ digest_eyebrow_right | default("Today's story") }}</div>
   </div>
-  {% else %}
-  <div class="mx-7 mt-4 mb-3 flex items-center gap-3 bg-slate-50 border border-slate-200 px-4 py-2.5">
-    <span aria-hidden="true" class="text-[13px]">·</span>
-    <span class="mono text-[11px] tracking-widest uppercase text-slate-500">Safety floor holding</span>
+
+  <div class="px"><div class="rule-strong"></div></div>
+
+  {# Verdict sentence: carries breach state via wording, no separate band. #}
+  <h1 class="verdict">{{ verdict }}</h1>
+
+  <div class="px"><div class="rule"></div></div>
+
+  {# Insight cards: 0..4 narrative cards. Quiet-day path renders a single
+     plain sentence so the surface still has body content. #}
+  <div class="insights" aria-label="Insight cards">
+    {%- if digest_cards %}
+      {%- for card in digest_cards %}
+      {% include '_insight_card.html.j2' %}
+      {%- endfor %}
+    {%- else %}
+      <div class="quiet-day">No insights worth surfacing today.</div>
+    {%- endif %}
   </div>
-  {% endif %}
 
-  {# ── Headline + subhead ───────────────────────────────────────── #}
-  <h1 class="display px-7 pt-2 text-[26px] {{ 'text-red-900' if ks else 'text-slate-900' }}">{{ headline }}</h1>
-  {% if subhead %}
-  <p class="px-7 pt-3 pb-5 text-[15px] leading-relaxed text-slate-600">{{ subhead }}</p>
-  {% else %}
-  <div class="pb-5"></div>
-  {% endif %}
-
-  <div class="px-7"><div class="rule"></div></div>
-
-  {# ── Insights section ─────────────────────────────────────────── #}
-  {% if insights and insights|length > 0 %}
-  <section class="px-7 pt-5 pb-2" aria-label="Insights, {{ insights|length }} items">
-    <div class="flex items-center justify-between mb-4">
-      <span class="eyebrow">💡 Insights ({{ insights|length }})</span>
-      <span class="mono text-[11px] text-slate-500">ranked by signal</span>
-    </div>
-
-    <ul class="space-y-3" role="list">
-      {% for ins in insights %}
-      {%- set pal = topic_palette.get(ins.topic_label, topic_palette["USAGE"]) -%}
-      <li class="border border-slate-200 bg-white" aria-label="Insight {{ loop.index }}: {{ ins.topic_label }}. {{ ins.claim }}">
-        <div class="flex">
-          <div class="card-rail" style="background: {{ pal.rail }};" aria-hidden="true"></div>
-          <div class="flex-1 px-4 py-3.5">
-            <div class="flex items-center justify-between mb-2">
-              <div class="flex items-center gap-2">
-                <span class="mono text-[10px] font-semibold tracking-widest uppercase" style="color: {{ pal.text }};">
-                  <span class="mono text-slate-400 mr-1">{{ "%02d"|format(loop.index) }}</span>{{ ins.topic_label }}
-                </span>
-                <span aria-hidden="true" class="text-[13px]">{{ ins.icon }}</span>
-              </div>
-              {% if ins.spark_series %}
-              <span aria-hidden="true">
-                {{ sparkline(spark_series=ins.spark_series, width=96, height=20, stroke=pal.text, fill=none, last_dot=true, label=ins.topic_label ~ " 14-day trend") }}
-              </span>
-              {% endif %}
-            </div>
-            <p class="text-[15px] leading-snug text-slate-900 font-medium">{{ ins.claim }}</p>
-            <p class="text-[13px] leading-snug text-slate-600 mt-1.5">{{ ins.evidence }}</p>
-            {% if ins.context %}
-            <p class="text-[12px] leading-snug text-slate-500 mt-1.5 italic">{{ ins.context }}</p>
-            {% endif %}
-          </div>
-        </div>
-      </li>
-      {% endfor %}
-    </ul>
-  </section>
-  {% else %}
-  {# ── Quiet-day fallback ─────────────────────────────────────── #}
-  <section class="px-7 pt-6 pb-8" aria-label="No anomalies today">
-    <div class="flex items-center justify-between mb-4">
-      <span class="eyebrow">💡 Insights (0)</span>
-      <span class="mono text-[11px] text-slate-500">quiet day</span>
-    </div>
-    <div class="border border-slate-200 bg-slate-50 px-5 py-6 text-center">
-      <div class="display text-[18px] text-slate-900 mb-1">No anomalies today</div>
-      <div class="text-[13px] text-slate-600">Everything held. See thread for the full table.</div>
-    </div>
-  </section>
-  {% endif %}
-
-  <div class="px-7"><div class="rule"></div></div>
-
-  {# ── Brand mark ──────────────────────────────────────────────── #}
-  <footer class="px-7 py-4 flex items-center justify-between">
-    <div class="eyebrow text-slate-500">{{ brand_mark }}</div>
-    <div class="mono text-[10px] text-slate-400">{{ date_iso }}</div>
+  {# Footer #}
+  <footer class="footer">
+    <div class="brand">Ask AI, daily digest</div>
+    <div class="date">{{ date_iso }}</div>
   </footer>
 
 </article>
