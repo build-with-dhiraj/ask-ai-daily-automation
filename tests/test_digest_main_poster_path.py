@@ -225,8 +225,9 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
         exit_code, m_render, m_post_blocks, m_post_text, _ = self._run_main({})
         self.assertEqual(exit_code, 0)
         self.assertEqual(m_render.call_count, 1)
-        # Main + thread reply = at least 2 block posts.
-        self.assertGreaterEqual(m_post_blocks.call_count, 2)
+        # Single-message-per-surface (Commit 21ccf6f): exactly one block post,
+        # no programmatic thread reply.
+        self.assertEqual(m_post_blocks.call_count, 1)
         m_post_text.assert_not_called()
 
     def test_main_falls_back_when_POSTER_DISABLE_set(self) -> None:
@@ -259,33 +260,9 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
         self.assertTrue(sent_text.startswith("⚠️ Poster degraded"))
         self.assertIn("cause=render", stderr)
 
-    def test_thread_cost_latency_text_is_not_insights(self) -> None:
-        """Code Reviewer F4: the thread's Cost & Latency section must carry
-        real cost/latency data (from fmt_cost_and_latency), NOT the Top 3
-        Insights body. Regression test for the prior wiring that pasted the
-        insights headline under the cost/latency heading."""
-        captured: dict = {}
-
-        def capture_build_thread_blocks(**kwargs):
-            captured.update(kwargs)
-            return [{"type": "section",
-                     "text": {"type": "mrkdwn", "text": "thread"}}]
-
-        with mock.patch.object(
-            self.digest, "build_thread_blocks",
-            side_effect=capture_build_thread_blocks,
-        ), mock.patch.object(
-            self.digest, "fmt_cost_and_latency",
-            return_value="*Cost & latency body (gpt-4o-mini, p50=420ms, $0.012)*",
-        ):
-            exit_code, _, _, _, _ = self._run_main({})
-        self.assertEqual(exit_code, 0)
-        self.assertIn("cost_latency_text", captured)
-        body = captured["cost_latency_text"]
-        # Must contain the real cost/latency body we mocked.
-        self.assertIn("p50=420ms", body)
-        # Must NOT contain the insights headline (mocked above as "Test headline.").
-        self.assertNotIn("Test headline.", body)
+    # Removed in Variant D: thread_reply path eliminated per Commit 21ccf6f
+    # (single-message-per-surface; build_thread_blocks is no longer called from
+    # the main poster path, so the F4 wiring regression cannot recur).
 
     def test_main_falls_back_when_snapshot_empty(self) -> None:
         """SRE item 9: an empty today_summary means the poster would render

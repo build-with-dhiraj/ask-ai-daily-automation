@@ -66,48 +66,40 @@ class TestPosterInputBuilders(unittest.TestCase):
         self.ps = _import("scripts.poster_slack", "scripts/poster_slack.py")
 
     def test_scoreboard_input_above_floor_marks_breach(self) -> None:
+        # Updated for Variant D (Commit b265419): scoreboard input now emits a
+        # `standings` list of 5 rows, not the old `scoreboard` list. The first
+        # standings row is Academic FAIL.
         snap = {
             "date": "2026-05-27", "n_judged": 989,
             "acc_fail_pct": 8.2, "exp_fail_pct": 14.1, "pass_pct": 71.3,
             "axial_fail_pct": {"academic": 13.8, "tone": 9.6, "intent": 9.3},
-            # Design audit D5: bar entries now come from open_codes_fired_count
-            # (top 3 individual codes), not axial_fail_pct.
             "open_codes_fired_count": {"A5": 152, "A1": 107, "A2": 96},
         }
         out = self.ps.build_scoreboard_poster_input(snap)
         self.assertTrue(out["kill_switch_breach"])
         self.assertEqual(out["n_judged"], 989)
-        self.assertIn("Academic FAIL", out["scoreboard"][0]["label"])
-        self.assertEqual(len(out["top_drivers"]), 3)
+        self.assertIn("Academic FAIL", out["standings"][0]["label"])
+        self.assertEqual(len(out["standings"]), 5)
 
-    def test_top_drivers_have_no_duplicate_axis_labels(self) -> None:
-        """Dogfood QA #2 + design audit D5: bar entries are now per-code
-        (code != label by construction, e.g. code='A5' / label='answer
-        incomplete'). This regression test stays as a bumper against any
-        future builder that resets to axis labels."""
-        snap = {
-            "date": "2026-05-27", "n_judged": 1000,
-            "acc_fail_pct": 5.0, "exp_fail_pct": 10.0, "pass_pct": 85.0,
-            "open_codes_fired_count": {"A5": 30, "E2": 18, "C1": 9},
-        }
-        out = self.ps.build_scoreboard_poster_input(snap)
-        for d in out["top_drivers"]:
-            self.assertTrue(
-                d["code"] == "" or d["code"] != d["label"],
-                f"duplicate code/label in driver entry: {d!r}",
-            )
+    # Removed in Variant D: top_drivers field eliminated per Commit b265419/e81acbc
+    # (scoreboard now emits a standings table, not a top-drivers bar chart).
 
     def test_digest_input_propagates_insights_and_kill_switch(self) -> None:
-        today = {"date": "2026-05-26"}
+        # Updated for Variant D (Commit b265419): the digest builder now uses a
+        # deterministic verdict sentence as the headline, not the LLM-supplied
+        # `headline` field. The insights list still propagates for the
+        # follow-up text generator.
+        today = {"date": "2026-05-26", "downvote_rate_pct": 1.6}
         insights = {
-            "headline": "Downvotes cost 1.6× more than upvotes.",
-            "insights": [{"topic_label": "CLARITY", "icon": "📈",
+            "headline": "Downvotes cost 1.6x more than upvotes.",
+            "insights": [{"topic_label": "CLARITY", "icon": "UP",
                           "claim": "Retries spiking.", "evidence": "",
                           "context": None, "spark_series": None}],
             "kill_switch_breach": True,
         }
         out = self.ps.build_digest_poster_input(today, insights)
-        self.assertEqual(out["headline"], insights["headline"])
+        # Headline is now the deterministic verdict, matching VERDICT_OPENING_RE.
+        self.assertTrue(out["headline"].startswith("Top risk: "))
         self.assertTrue(out["kill_switch_breach"])
         self.assertEqual(len(out["insights"]), 1)
 
@@ -252,26 +244,29 @@ class TestAltTextAndFooters(unittest.TestCase):
         self.assertIn("Retries spiking", alt)
         self.assertIn("TTFT degraded", alt)
 
-    def test_scoreboard_footer_has_two_links(self) -> None:
+    def test_scoreboard_footer_has_three_links(self) -> None:
+        # Updated for Commit 2184f19: footer now has 3 links (Deep dive on GH
+        # Pages + Langfuse + Stream logs), replacing the prior Eval one-pager
+        # + Metabase pair.
         text = self.ps.scoreboard_footer_links()
-        # Two distinct <url|label> tokens
-        self.assertEqual(text.count("<"), 2)
-        self.assertEqual(text.count("|"), 2)
-        self.assertIn("Eval one-pager", text)
-        self.assertIn("Metabase Q33193", text)
-
-    def test_digest_footer_has_three_links(self) -> None:
-        text = self.ps.digest_footer_links()
         self.assertEqual(text.count("<"), 3)
         self.assertEqual(text.count("|"), 3)
-        self.assertIn("Confluence archive", text)
+        self.assertIn("Deep dive", text)
         self.assertIn("Langfuse", text)
         self.assertIn("Stream logs", text)
 
-    def test_digest_footer_confluence_url_env_override(self) -> None:
-        with _EnvScope(CONFLUENCE_ARCHIVE_URL="https://real.confluence/space"):
-            text = self.ps.digest_footer_links()
-        self.assertIn("https://real.confluence/space", text)
+    def test_digest_footer_has_three_links(self) -> None:
+        # Updated for Commit 2184f19: Confluence archive dropped; footer now
+        # has Deep dive (GH Pages) + Langfuse + Stream logs.
+        text = self.ps.digest_footer_links()
+        self.assertEqual(text.count("<"), 3)
+        self.assertEqual(text.count("|"), 3)
+        self.assertIn("Deep dive", text)
+        self.assertIn("Langfuse", text)
+        self.assertIn("Stream logs", text)
+
+    # Removed in Variant D: Confluence archive link dropped per Commit 2184f19
+    # (footer now points to GH Pages deep-dive; CONFLUENCE_ARCHIVE_URL is unused).
 
 
 class TestPostBlocksToSlack(unittest.TestCase):
@@ -330,23 +325,30 @@ class TestDigestMainBlocksAssembler(unittest.TestCase):
         self.digest = _import("daily_digest", "daily_digest.py")
 
     def test_build_main_blocks_shape(self) -> None:
+        # Updated for Variant D (Commit b265419 + 21ccf6f): alt_text now derives
+        # from verdict + standings rows, not insight claims. Single-message
+        # path, no thread anchor.
         pi = {
-            "headline": "Today's story.",
-            "insights": [{"claim": "Claim one."}, {"claim": "Claim two."}],
+            "verdict": "Top risk: today's story.",
+            "headline": "Top risk: today's story.",
+            "standings": [
+                {"label": "Downvote rate", "yesterday": "0.50%"},
+                {"label": "VCP success", "yesterday": "98.6%"},
+            ],
         }
         blocks = self.digest.build_main_blocks(
             image_url="https://x.png",
             poster_input=pi,
             ops_text="cost $100",
             safety_text="downvote 0.5%",
-            footer_text="📄 footer",
+            footer_text="footer",
         )
         # First block is the image
         self.assertEqual(blocks[0]["type"], "image")
         self.assertEqual(blocks[0]["image_url"], "https://x.png")
-        self.assertIn("Today's story.", blocks[0]["alt_text"])
-        self.assertIn("Claim one.", blocks[0]["alt_text"])
-        # Ops + Safety + Thread anchor + Footer
+        self.assertIn("Top risk: today's story.", blocks[0]["alt_text"])
+        self.assertIn("Downvote rate", blocks[0]["alt_text"])
+        # Ops + Safety + Footer
         types = [b.get("type") for b in blocks]
         self.assertIn("section", types)
         self.assertIn("context", types)

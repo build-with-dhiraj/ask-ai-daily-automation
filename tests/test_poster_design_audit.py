@@ -216,88 +216,12 @@ class TestD3KillSwitchBandThinned(unittest.TestCase):
             self.assertNotIn("🔴", band_emoji)
 
 
-# ---------------------------------------------------------------------------
-# D4 — row labels mono (unified register with eyebrows)
-# ---------------------------------------------------------------------------
+# Removed in Variant D: D4 mono-row-label check obsolete per Commit e81acbc
+# (Variant D template uses sans-serif metric labels by locked design choice).
 
-class TestD4ScoreboardRowLabelsMono(unittest.TestCase):
-    def test_row_label_uses_mono_class(self) -> None:
-        html = _render("poster_scoreboard.html.j2", _scoreboard_ctx_breach())
-        # The scoreboard row label that previously used `font-semibold
-        # tracking-wide uppercase` (Inter) must now use the `mono` class
-        # so its register matches the eyebrows.
-        m = re.search(
-            r'<div[^>]*class="[^"]*mono[^"]*tracking-wide[^"]*uppercase[^"]*"[^>]*>'
-            r'\s*Academic FAIL\s*</div>',
-            html,
-        )
-        if m is None:
-            # alternative class ordering
-            m = re.search(
-                r'<div[^>]*class="[^"]*uppercase[^"]*mono[^"]*"[^>]*>'
-                r'\s*Academic FAIL\s*</div>',
-                html,
-            )
-        self.assertIsNotNone(
-            m,
-            "scoreboard row label should use the 'mono' class so its register "
-            "matches the eyebrows above it",
-        )
-
-
-# ---------------------------------------------------------------------------
-# D5 — bar chart shows CODES (novel info), not axes (restated headline)
-# ---------------------------------------------------------------------------
-
-class TestD5TopDriversAreCodesNotAxes(unittest.TestCase):
-    def setUp(self) -> None:
-        self.ps = _import("scripts.poster_slack", "scripts/poster_slack.py")
-
-    def test_top_drivers_are_codes_not_axes(self) -> None:
-        """The bar chart now sources from open_codes_fired_count and emits
-        entries whose `code` field matches /^[A-E][0-9]$/. Previously the
-        builder shipped axis names like 'academic' / 'tone' in `label` and
-        empty codes."""
-        snap = {
-            "date": "2026-05-27", "n_judged": 989,
-            "acc_fail_pct": 8.2, "exp_fail_pct": 14.1, "pass_pct": 71.3,
-            "axial_fail_pct": {"academic": 13.8, "tone": 9.6, "intent": 3.1},
-            "open_codes_fired_count": {
-                "A5": 152, "A1": 107, "A2": 96, "E2": 41, "C1": 12,
-            },
-        }
-        out = self.ps.build_scoreboard_poster_input(snap)
-        drivers = out["top_drivers"]
-        self.assertEqual(
-            len(drivers), 3,
-            "expected exactly 3 top driver codes",
-        )
-        for d in drivers:
-            self.assertRegex(
-                d["code"], r"^[A-E][0-9]$",
-                f"driver entry code should be a single open-code id "
-                f"(A1..E3), got {d['code']!r} in {d!r}",
-            )
-        # Top driver count should be the max (152), and bar_pct=100.
-        self.assertEqual(drivers[0]["code"], "A5")
-        self.assertEqual(drivers[0]["count"], 152)
-        self.assertEqual(drivers[0]["bar_pct"], 100)
-
-    def test_scoreboard_renders_code_bars_with_per_code_heading(self) -> None:
-        snap = {
-            "date": "2026-05-27", "n_judged": 989,
-            "acc_fail_pct": 8.2, "exp_fail_pct": 14.1, "pass_pct": 71.3,
-            "axial_fail_pct": {"academic": 13.8},
-            "open_codes_fired_count": {"A5": 152, "A1": 107, "A2": 96},
-        }
-        out = self.ps.build_scoreboard_poster_input(snap)
-        html = _render("poster_scoreboard.html.j2", out)
-        # Heading now reflects codes, not axes.
-        self.assertNotIn("Top axis by fail rate", html,
-            "heading should no longer say 'Top axis by fail rate'")
-        # A5 / A1 / A2 codes appear in the rendered bars.
-        self.assertIn("A5", html)
-        self.assertIn("A1", html)
+# Removed in Variant D: D5 top_drivers-as-codes checks obsolete per Commit
+# b265419/e81acbc (scoreboard input no longer emits a top_drivers bar chart;
+# replaced by a 5-row standings table).
 
 
 # ---------------------------------------------------------------------------
@@ -338,19 +262,9 @@ class TestD6JargonRemoved(unittest.TestCase):
             "user-facing template strings",
         )
 
-    def test_scoreboard_note_text_does_not_emit_axial(self) -> None:
-        """Builder defaults must not put 'axial' or 'within band' into row
-        notes (e.g. via 'per-axial detail in thread' on the Experience row)."""
-        snap = {
-            "date": "2026-05-27", "n_judged": 989,
-            "acc_fail_pct": 5.0, "exp_fail_pct": 14.0, "pass_pct": 81.0,
-            "axial_fail_pct": {},
-        }
-        out = self.ps.build_scoreboard_poster_input(snap)
-        for row in out["scoreboard"]:
-            note = (row.get("note") or "").lower()
-            self.assertNotIn("axial", note)
-            self.assertNotIn("within band", note)
+    # Removed in Variant D: row-note jargon check obsolete per Commit b265419
+    # (scoreboard input emits a standings table; rows no longer have a `note`
+    # field, so the template-level jargon check above is the surviving guard).
 
 
 if __name__ == "__main__":

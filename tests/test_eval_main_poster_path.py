@@ -198,8 +198,9 @@ class TestEvalMainPosterPathByDefault(_BasePosterMainTest):
         exit_code, m_render, m_post_blocks, m_post_text, _ = self._run_main({})
         self.assertEqual(exit_code, 0)
         self.assertEqual(m_render.call_count, 1)
-        # Main + thread reply = at least 2 block posts.
-        self.assertGreaterEqual(m_post_blocks.call_count, 2)
+        # Single-message-per-surface (Commit 21ccf6f): exactly one block post,
+        # no programmatic thread reply.
+        self.assertEqual(m_post_blocks.call_count, 1)
         m_post_text.assert_not_called()
 
     def test_main_falls_back_when_POSTER_DISABLE_set(self) -> None:
