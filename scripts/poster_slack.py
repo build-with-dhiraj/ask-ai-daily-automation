@@ -599,20 +599,43 @@ def build_digest_poster_input(
 # ---------------------------------------------------------------------------
 
 def _alt_text_for(poster_input: dict, surface: str) -> str:
-    """Compose alt_text combining headline + key numbers (search-friendly)."""
-    headline = (poster_input.get("headline") or "").strip()
+    """Compose alt_text combining verdict + key numbers (search-friendly).
+
+    Slack VoiceOver / TalkBack reads this in under 10 seconds. The verdict
+    sentence is the first thing read; the standings numbers follow as
+    comma-separated values. Surface-specific: scoreboard reads the 5
+    standings rows; digest reads the same 5 (the standings cells contain
+    everything important in the image).
+    """
+    verdict = (
+        poster_input.get("verdict")
+        or poster_input.get("headline")
+        or ""
+    ).strip()
+    standings = poster_input.get("standings") or []
+    if standings:
+        nums = ", ".join(
+            f"{row.get('label', '')} {row.get('yesterday', '')}".strip()
+            for row in standings
+            if row.get("label") and row.get("yesterday")
+        )
+        return f"{verdict} | {nums}".strip(" |")
+    # Legacy paths (old tests, old fixture files): fall through to the old
+    # scoreboard / insights fields if present so we don't strand callers
+    # that still pass legacy schemas.
     if surface == "scoreboard":
         scoreboard = poster_input.get("scoreboard") or []
-        nums = " · ".join(
+        nums = ", ".join(
             f"{row.get('label', '')} {row.get('value_text', '')}".strip()
             for row in scoreboard
         )
-        return f"{headline} | {nums}".strip(" |")
+        return f"{verdict} | {nums}".strip(" |")
     insights = poster_input.get("insights") or []
-    nums = " · ".join(
-        (ins.get("claim") or "").strip() for ins in insights if ins.get("claim")
+    nums = ", ".join(
+        (ins.get("claim") or "").strip()
+        for ins in insights if ins.get("claim")
     )
-    return f"{headline} | {nums}".strip(" |")
+    return f"{verdict} | {nums}".strip(" |")
 
 
 def make_image_block(image_url: str, alt_text: str) -> dict:
@@ -726,26 +749,48 @@ def render_and_publish(
 # Footer link helpers (constants documented in plan §"Footer links")
 # ---------------------------------------------------------------------------
 
-def scoreboard_footer_links() -> str:
-    one_pager = os.environ.get(
-        "EVAL_ONE_PAGER_URL",
-        "https://github.com/build-with-dhiraj/ask-ai-daily-automation/blob/main/ONE_PAGER.md",
+def _deep_dive_url(surface: str, date_iso: str) -> str:
+    """Compose the GitHub Pages deep-dive URL for a given surface + date.
+
+    Mirrors the path layout in scripts/poster_publisher.py. Overridable
+    via POSTER_PAGES_BASE_URL for staging or alternate-org forks.
+    """
+    base = os.environ.get(
+        "POSTER_PAGES_BASE_URL",
+        "https://build-with-dhiraj.github.io/ask-ai-daily-automation",
     )
-    metabase_q = os.environ.get(
-        "EVAL_METABASE_URL",
-        "https://metabase/question/33193",
-    )
-    return f"📄 <{one_pager}|Eval one-pager>  ·  <{metabase_q}|Metabase Q33193>"
+    base = base.rstrip("/")
+    return f"{base}/posters/{surface}/{date_iso}/"
 
 
-def digest_footer_links() -> str:
-    confluence = os.environ.get(
-        "CONFLUENCE_ARCHIVE_URL",
-        "https://placeholder.confluence/ask-ai-evals-archive",
-    )
+def scoreboard_footer_links(date_iso: Optional[str] = None) -> str:
+    """3 links on one line: deep-dive (GH Pages) + Langfuse + Stream logs.
+
+    The deep-dive page on GitHub Pages replaces the previous one-pager +
+    Metabase question link pair; per the locked decision the per-day
+    deep-dive page carries the per-stratum table + axial breakdown.
+    """
+    iso = date_iso or date.today().isoformat()
+    deep_dive = _deep_dive_url("scoreboard", iso)
     langfuse = os.environ.get("LANGFUSE_URL", "https://langfuse")
     stream = os.environ.get("STREAM_LOGS_URL", "https://metabase/stream-logs")
     return (
-        f"📄 <{confluence}|Confluence archive>  ·  "
+        f"<{deep_dive}|Deep dive>  ·  "
+        f"<{langfuse}|Langfuse>  ·  <{stream}|Stream logs>"
+    )
+
+
+def digest_footer_links(date_iso: Optional[str] = None) -> str:
+    """3 links on one line: deep-dive (GH Pages) + Langfuse + Stream logs.
+
+    Confluence dropped per the locked decision; freed for future
+    human-authored narrative pages.
+    """
+    iso = date_iso or date.today().isoformat()
+    deep_dive = _deep_dive_url("digest", iso)
+    langfuse = os.environ.get("LANGFUSE_URL", "https://langfuse")
+    stream = os.environ.get("STREAM_LOGS_URL", "https://metabase/stream-logs")
+    return (
+        f"<{deep_dive}|Deep dive>  ·  "
         f"<{langfuse}|Langfuse>  ·  <{stream}|Stream logs>"
     )
