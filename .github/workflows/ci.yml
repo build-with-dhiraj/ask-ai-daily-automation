@@ -7,10 +7,14 @@
 #   CI / lints   - 4 targeted lint suites with -v so reviewers can see
 #                  which lint failed at a glance
 #
-# Playwright is intentionally NOT installed: tests/conftest.py exposes
-# _chromium_installed() and renderer tests skip cleanly when Chromium is
-# absent. Skipping the ~170 MB Chromium download keeps PR feedback under
-# 3 minutes wall-clock.
+# Playwright Chromium IS installed for the pytest job because
+# tests/test_poster_renderer.py launches a real headless browser when its
+# conftest gate (_chromium_installed) is satisfied. On a bare ubuntu runner
+# the `playwright` Python package is present via requirements.txt but the
+# browser binary is missing, so without an explicit `playwright install`
+# the 4 renderer tests fail rather than skip. Cached on
+# ~/.cache/ms-playwright keyed on requirements.txt to keep subsequent PRs
+# fast. The lints job does not need Chromium.
 
 name: CI
 
@@ -35,14 +39,28 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        # Mirror daily-digest.yml's install pattern (openai + langfuse + requirements.txt)
-        # minus the playwright browser download. pytest is added explicitly because
+        # Mirror daily-digest.yml's install pattern (openai + langfuse +
+        # requirements.txt). pytest is added explicitly because
         # requirements.txt only pins runtime deps.
         run: |
           pip3 install --upgrade pip
           pip3 install openai langfuse
           pip3 install -r requirements.txt
           pip3 install pytest
+
+      - name: Cache Playwright browsers
+        # Mirrors the cache pattern in daily-digest.yml, but on the Linux
+        # path (~/.cache/ms-playwright) instead of macOS.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        # `--with-deps` is safe on Linux (apt-get pulls libnss3 etc.) and
+        # required because tests/test_poster_renderer.py launches a real
+        # headless browser when the conftest gate detects Chromium present.
+        run: python3 -m playwright install --with-deps chromium
 
       - name: Run full test suite
         run: python3 -m pytest tests/ -q --tb=short
