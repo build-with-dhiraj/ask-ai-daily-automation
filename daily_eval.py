@@ -1264,19 +1264,57 @@ def main() -> int:
                     alt_text = poster_slack._alt_text_for(poster_input, "scoreboard")
                     ops_stripe = _build_scoreboard_ops_stripe_text(today_snap)
                     safety_stripe = _build_scoreboard_safety_stripe_text(today_snap)
+                    # Phase 4: generate the LLM follow-up text companion.
+                    # On LLM failure the deterministic fallback fires and
+                    # the `degraded` flag drives a prepended marker block.
+                    try:
+                        from scripts.follow_up_generator import generate_follow_up
+                        breach_signal = "academic" if poster_input.get("kill_switch_breach") else None
+                        follow_up = generate_follow_up(
+                            "scoreboard",
+                            poster_input,
+                            breach=poster_input.get("kill_switch_breach", False),
+                            breach_signal=breach_signal,
+                            retry_gap_sec=int(os.environ.get(
+                                "FOLLOW_UP_RETRY_GAP_SEC", "30",
+                            )),
+                        )
+                    except Exception as _fu_exc:
+                        # Defensive: if importing the module itself fails,
+                        # fall through to a no-op follow-up rather than
+                        # crashing the daily.
+                        print(
+                            f"[poster] [warn] follow_up_generator unavailable: {_fu_exc!r}",
+                            file=sys.stderr,
+                        )
+                        follow_up = None
+                    # Phase 4: single-message Block Kit. No thread reply.
                     blocks: list = [
                         poster_slack.make_image_block(image_url, alt_text),
-                        poster_slack.make_divider(),
-                        poster_slack.make_section(
-                            f"⚙️ *Ops* (yesterday)\n{ops_stripe}"
-                        ),
-                        poster_slack.make_section(
-                            f"🛟 *Safety floor*\n{safety_stripe}"
-                        ),
-                        poster_slack.make_section("🧵 Full breakdown in thread"),
-                        poster_slack.make_context(poster_slack.scoreboard_footer_links()),
                     ]
-                    fallback_text = poster_input["headline"]
+                    if follow_up is not None and follow_up.degraded:
+                        from scripts.slack_publisher import make_degradation_section
+                        blocks.append(make_degradation_section())
+                    blocks.extend([
+                        poster_slack.make_section(
+                            f"*Ops, yesterday:* {ops_stripe}"
+                        ),
+                        poster_slack.make_section(
+                            f"*Safety floor:* {safety_stripe}"
+                        ),
+                    ])
+                    if follow_up is not None and follow_up.text:
+                        blocks.append(follow_up.as_block_kit_section())
+                    blocks.append(
+                        poster_slack.make_context(
+                            poster_slack.scoreboard_footer_links(date_str)
+                        )
+                    )
+                    fallback_text = (
+                        poster_input.get("verdict")
+                        or poster_input.get("headline")
+                        or "Ask AI daily eval"
+                    )
                     try:
                         posted = poster_slack.post_blocks_to_slack(
                             webhook, blocks, fallback_text
@@ -1284,21 +1322,7 @@ def main() -> int:
                     except _POSTER_RECOVERABLE as exc:
                         posted = False
                         poster_error = poster_error or f"cause=publish reason={exc!r}"
-                    if posted:
-                        # Thread-reply (~2s later) with the full text breakdown.
-                        time.sleep(2)
-                        thread_blocks = [
-                            poster_slack.make_section(
-                                f"🧵 *Deep dive · {date_str}*\n```{block}```"
-                            )
-                        ]
-                        try:
-                            poster_slack.post_blocks_to_slack(
-                                webhook, thread_blocks, "thread"
-                            )
-                        except _POSTER_RECOVERABLE as exc:
-                            print(f"[warn] thread reply failed: {exc!r}", file=sys.stderr)
-                    elif poster_error is None:
+                    if not posted and poster_error is None:
                         poster_error = "cause=post reason=post_blocks_to_slack returned False"
             except _POSTER_RECOVERABLE as exc:
                 poster_error = poster_error or f"cause=render reason={exc!r}"
