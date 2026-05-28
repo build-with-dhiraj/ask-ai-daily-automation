@@ -1,0 +1,77 @@
+# PR gating CI. Runs on every pull_request (any base/head branch) and on
+# push to main. Lives on GitHub-hosted ubuntu runners; the self-hosted Mac
+# is reserved for production poster jobs (see daily-eval.yml, daily-digest.yml).
+#
+# Two jobs so the PR Checks UI shows pass/fail granularity:
+#   CI / pytest  - full suite (281 tests, ~90s locally)
+#   CI / lints   - 4 targeted lint suites with -v so reviewers can see
+#                  which lint failed at a glance
+#
+# Playwright is intentionally NOT installed: tests/conftest.py exposes
+# _chromium_installed() and renderer tests skip cleanly when Chromium is
+# absent. Skipping the ~170 MB Chromium download keeps PR feedback under
+# 3 minutes wall-clock.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        # Mirror daily-digest.yml's install pattern (openai + langfuse + requirements.txt)
+        # minus the playwright browser download. pytest is added explicitly because
+        # requirements.txt only pins runtime deps.
+        run: |
+          pip3 install --upgrade pip
+          pip3 install openai langfuse
+          pip3 install -r requirements.txt
+          pip3 install pytest
+
+      - name: Run full test suite
+        run: python3 -m pytest tests/ -q --tb=short
+
+  lints:
+    name: lints
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip3 install --upgrade pip
+          pip3 install openai langfuse
+          pip3 install -r requirements.txt
+          pip3 install pytest
+
+      - name: Run lint suites (em-dash, jargon, anti-patterns, verdict)
+        run: |
+          python3 -m pytest \
+            tests/test_no_em_dashes_anywhere.py \
+            tests/test_no_jargon.py \
+            tests/test_no_anti_patterns.py \
+            tests/test_verdict_opening_line.py \
+            -v
