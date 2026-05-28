@@ -1,43 +1,50 @@
 {
-  "date_human": "Tue · 27 May",
+  "date_human": "Wed 27 May",
   "date_iso": "2026-05-27",
   "n_judged": 989,
   "kill_switch_breach": true,
-  "headline": "Academic FAIL has crossed the 6% floor for the first time in 9 days.",
-  "scoreboard": [
+  "verdict": "Top risk: Academic FAIL crossed the 6% floor at 23.1% today, driven by answer-incomplete codes.",
+  "headline": "Top risk: Academic FAIL crossed the 6% floor at 23.1% today, driven by answer-incomplete codes.",
+  "standings": [
     {
       "label": "Academic FAIL",
-      "value_text": "8.2%",
-      "delta_text": "+2.1pp vs WoW",
-      "delta_dir": "up",
-      "state": "red",
-      "note": "above 6% floor"
+      "yesterday": "23.1%",
+      "median_14d": "4.3%",
+      "delta": "+18.8pp",
+      "breach": true
     },
     {
       "label": "Experience FAIL",
-      "value_text": "14.1%",
-      "delta_text": "-0.8pp",
-      "delta_dir": "down",
-      "state": "green",
-      "note": "holding"
+      "yesterday": "13.4%",
+      "median_14d": "11.8%",
+      "delta": "+1.6pp",
+      "breach": false
     },
     {
       "label": "Overall PASS",
-      "value_text": "71.3%",
-      "delta_text": "·",
-      "delta_dir": "flat",
-      "state": "neutral",
-      "note": "n=989"
+      "yesterday": "69.0%",
+      "median_14d": "73.2%",
+      "delta": "-4.2pp",
+      "breach": false
+    },
+    {
+      "label": "Run cost",
+      "yesterday": "$8.16",
+      "median_14d": "$8.05",
+      "delta": "+$0.11",
+      "breach": false
+    },
+    {
+      "label": "Judged",
+      "yesterday": "989",
+      "median_14d": "990",
+      "delta": "-1",
+      "breach": false
     }
   ],
-  "top_drivers": [
-    { "code": "A5", "label": "answer incomplete", "count": 137, "bar_pct": 100 },
-    { "code": "A2", "label": "misunderstood doubt", "count": 95, "bar_pct": 69 },
-    { "code": "A1", "label": "conceptual error", "count": 92, "bar_pct": 67 }
-  ],
-  "trend": {
-    "label": "14-day Academic FAIL trend (today highlighted)",
-    "spark_series": [3.1, 2.9, 3.4, 3.0, 3.2, 3.1, 2.8, 3.3, 3.0, 3.5, 3.7, 4.1, 5.6, 8.2]
+  "spark_series_by_metric": {
+    "acc_fail_pct": [3.1, 2.9, 3.4, 3.0, 3.2, 3.1, 2.8, 3.3, 3.0, 3.5, 3.7, 4.1, 5.6, 23.1],
+    "exp_fail_pct": [11.6, 11.7, 11.5, 11.8, 11.9, 11.8, 11.7, 11.9, 11.8, 12.0, 12.1, 12.4, 12.7, 13.4]
   },
-  "brand_mark": "Ask AI · daily eval"
+  "brand_mark": "Ask AI, daily eval"
 }

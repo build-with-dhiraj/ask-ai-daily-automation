@@ -1,9 +1,47 @@
 {
-  "date_human": "Sun · 25 May",
+  "date_human": "Sun 25 May",
   "date_iso": "2026-05-25",
   "kill_switch_breach": false,
-  "headline": "No anomalies today. Everything held.",
-  "subhead": null,
+  "verdict": "No urgent risks today, all four watch metrics holding inside their bands.",
+  "headline": "No urgent risks today, all four watch metrics holding inside their bands.",
+  "standings": [
+    {
+      "label": "Downvote rate",
+      "yesterday": "0.51%",
+      "median_14d": "0.55%",
+      "delta": "-0.04pp",
+      "breach": false
+    },
+    {
+      "label": "VCP success",
+      "yesterday": "97.1%",
+      "median_14d": "96.7%",
+      "delta": "+0.4pp",
+      "breach": false
+    },
+    {
+      "label": "Error rate",
+      "yesterday": "0.3%",
+      "median_14d": "0.5%",
+      "delta": "-0.2pp",
+      "breach": false
+    },
+    {
+      "label": "Student TTFT p90",
+      "yesterday": "7.4s",
+      "median_14d": "7.5s",
+      "delta": "-0.1s",
+      "breach": false
+    },
+    {
+      "label": "Total cost",
+      "yesterday": "$994",
+      "median_14d": "$1,012",
+      "delta": "-$18",
+      "breach": false
+    }
+  ],
+  "spark_series_by_metric": {},
   "insights": [],
-  "brand_mark": "Ask AI · daily digest"
+  "brand_mark": "Ask AI, daily digest"
 }

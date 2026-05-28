@@ -1733,6 +1733,17 @@ def _write_digest_snapshot(today_data: dict, path: str = DIGEST_SNAPSHOT_PATH) -
     except Exception as exc:  # pragma: no cover - filesystem rare-path
         print(f"[warn] failed to write digest snapshot: {exc!r}", file=sys.stderr)
 
+    # Append to the 14-day rolling history file (JSONL) so the poster
+    # standings table can render the median column. Best-effort.
+    try:
+        from scripts.snapshot_history import append_digest_snapshot
+        append_digest_snapshot(payload)
+    except Exception as exc:  # pragma: no cover - filesystem rare-path
+        print(
+            f"[warn] failed to append digest rolling history: {exc!r}",
+            file=sys.stderr,
+        )
+
 
 def _load_yesterday_snapshot(
     path: str = DIGEST_SNAPSHOT_PATH,

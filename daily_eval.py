@@ -893,6 +893,16 @@ def finalize_eval_run(
         with open(prev_snapshot_path, "w") as _sf:
             json.dump(summary_snapshot, _sf, indent=2)
         print(f"📸 Saved today's snapshot to {prev_snapshot_path} (for tomorrow's WoW deltas)")
+        # Append to the 14-day rolling history JSONL so the poster standings
+        # table can render the median column. Best-effort.
+        try:
+            from scripts.snapshot_history import append_eval_snapshot
+            append_eval_snapshot(summary_snapshot)
+        except Exception as _he:
+            print(
+                f"[warn] failed to append eval rolling history: {_he!r}",
+                file=sys.stderr,
+            )
     except Exception as _e:
         print(f"⚠️  Could not save today's snapshot ({_e}). WoW deltas may be missing tomorrow.")
 
