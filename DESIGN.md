@@ -30,7 +30,7 @@ rule-strong:     oklch(0.22 0.01 240)    /* the 2px black rule under masthead */
 
 Category-reflex check passes: cream paper plus brick breach does NOT look like Datadog (dark electric blue), does NOT look like an AI tool (cream + Inter + purple), does NOT look like a generic SaaS dashboard (white + blue gradient).
 
-Never use `#000` or `#fff`. Never use generic Tailwind palette names like `bg-slate-50` or `text-red-500` in templates — go through the OKLCH tokens.
+Never use `#000` or `#fff`. Never use generic Tailwind palette names like `bg-slate-50` or `text-red-500` in templates. Go through the OKLCH tokens.
 
 ## Typography
 
@@ -119,7 +119,7 @@ Cards: avoided unless genuinely the best affordance. Nested cards are always ban
 
 The poster is a static PNG. No motion at render time. No CSS transitions. No animation properties. The Playwright screenshot is taken at `wait_until="networkidle"` to ensure all fonts are loaded and laid out before capture.
 
-If a future surface needs motion (e.g. an HTML deep-dive archive page on GitHub Pages), use exponential easing only (ease-out-quart / quint / expo). No bounce. No elastic. No animating layout properties — transform and opacity only.
+If a future surface needs motion (e.g. an HTML deep-dive archive page on GitHub Pages), use exponential easing only (ease-out-quart / quint / expo). No bounce. No elastic. No animating layout properties; transform and opacity only.
 
 ## Forbidden patterns (cite impeccable/slop)
 
@@ -130,7 +130,7 @@ Codified as CI lints in `tests/test_no_anti_patterns.py`:
 - More than 3 cards with same shape in a single section → identical card grid ban
 - `font-family:` containing only "Inter" or only "Geist" → primary-face ban
 - `box-shadow: 0 1px` or `box-shadow: 0 2px` on a rounded rectangle → generic drop shadow ban
-- Any em-dash (`—`) or en-dash (`–`) character in templates or message text → universal rule
+- Any em-dash (U+2014) or en-dash (U+2013) character in templates or message text. Universal rule.
 
 ## File integration
 

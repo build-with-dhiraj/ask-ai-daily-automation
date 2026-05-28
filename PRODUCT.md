@@ -26,7 +26,7 @@ Plus the orchestrator (Dhiraj) as the human-in-loop owner / fallback recipient f
 
 When a stakeholder opens the daily message on mobile in the morning, they need one thing: **what is the top risk on the eval pipeline right now?**
 
-Not "what changed?", not "what's the score?" — the top risk to act on. Even on quiet days, the message answers "no urgent risks today, here is what we are watching." The poster and the first sentence of the text companion both serve this question.
+Not "what changed?", not "what's the score?", but the top risk to act on. Even on quiet days, the message answers "no urgent risks today, here is what we are watching." The poster and the first sentence of the text companion both serve this question.
 
 ### Axis-to-owner mapping (for breach @-mentions)
 
