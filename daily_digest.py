@@ -2035,185 +2035,26 @@ def _summarise_today_for_snapshot(
     }
 
 
+
 # ---------------------------------------------------------------------------
-# Top 3 Insights, Azure OpenAI gpt-4.1 day-on-day delta bullets
-# Reader-facing label is "Top 3 Insights" (NO "LLM" wording, no model surfaced).
+# Kill-switch breach detection + small helpers.
+#
+# F11 (PR #30): the upstream "Top 3 Insights" Azure OpenAI call (system
+# prompt + post-LLM quality filter + normalizers + fmt_top_insights) was
+# dropped. The digest now makes a SINGLE LLM call via
+# scripts.follow_up_generator on the poster path, which carries the same
+# insight cards in its InsightPayload (roughly halves digest LLM spend).
+#
+# What survives here:
+#   * _KILL_SWITCH_* thresholds (mirrored by
+#     scripts.poster_slack.build_digest_poster_input for F7).
+#   * _detect_kill_switch_breach: deterministic snapshot-only breach signal,
+#     still referenced by tests and by other call sites.
+#   * _coerce_int: used by the 21d downvote-reasons renderer below.
 # ---------------------------------------------------------------------------
 
-_TOP_INSIGHTS_SYSTEM_PROMPT = (
-    "WRITING RULES (NON-NEGOTIABLE): Never use em-dash (the long dash) or en-dash. "
-    "Use commas, periods, parentheses, or colons. Write like a real person, not a "
-    "marketing bot.\n"
-    "\n"
-    "You are the analyst behind a daily product-quality digest. Your job is to surface "
-    "the most signal-rich day-on-day movements as structured JSON. A renderer downstream "
-    "turns your JSON into a poster; you do NOT format prose.\n"
-    "\n"
-    "Inputs (in the user message as JSON):\n"
-    "  - TODAY: today's digest data.\n"
-    "  - YESTERDAY: yesterday's snapshot, or null on first run.\n"
-    "\n"
-    "Output: a single JSON object, no markdown, no preamble. Schema:\n"
-    "{\n"
-    "  \"headline\": string <=180 chars, ends with a period, one narrative claim about the day,\n"
-    "  \"insights\": [  // 0 to 5 entries, variable, quality-gated\n"
-    "    {\n"
-    "      \"topic_label\": one of CLARITY|LATENCY|FEEDBACK|COST|ACCURACY|USAGE,\n"
-    "      \"icon\": one of 📈|⚠️|💬|💸|🎯|🔥,\n"
-    "      \"claim\": string <=90 chars, MUST contain a delta verb AND a comparison anchor,\n"
-    "      \"evidence\": string <=90 chars, one supporting metric OR one quoted artifact,\n"
-    "      \"context\": string <=90 chars OR null (optional cross-signal join),\n"
-    "      \"spark_series\": array of <=14 floats OR null\n"
-    "    }\n"
-    "  ]\n"
-    "}\n"
-    "\n"
-    "Hard rules:\n"
-    "  1. Fixed delta vocabulary: the claim MUST contain one of (spiking, degraded, "
-    "up, down, flat-but-anomalous, new).\n"
-    "  2. Comparison anchor: the claim MUST contain one of (\"was \", \"vs \", \"WoW\", "
-    "\"DoD\", or a paired numeric like \"3.1% to 4.8%\").\n"
-    "  3. Cite ONLY values that appear in the input JSON. Never invent metrics, percentages, "
-    "or chapter names.\n"
-    "  4. Cross-signal joins are PREFERRED. An insight that ties two underlying datasets "
-    "together (e.g. multi-turn chapter + downvote chapter) ranks above a single-source "
-    "insight. Use the optional `context` field to surface the join.\n"
-    "  5. Quality bar: if an insight does not clear (delta verb + anchor + relevance), "
-    "do NOT include it. Return an empty `insights` array rather than padding. Zero insights "
-    "is a valid, expected output on quiet days.\n"
-    "  6. Do not exceed 5 insights even if more clear the bar; pick the 5 most consequential.\n"
-    "  7. The renderer prepends its own breach banner on kill-switch days. Your `headline` "
-    "should still be a narrative claim; the renderer may override it.\n"
-    "  8. Output JSON only. No code fences, no leading text, no trailing text.\n"
-)
-
-
-# Fixed vocabulary used by the post-LLM quality filter. Kept module-level so
-# tests can introspect / extend if needed.
-_INSIGHT_DELTA_VERBS = (
-    "spiking",
-    "degraded",
-    "up",
-    "down",
-    "flat-but-anomalous",
-    "new",
-)
-_INSIGHT_ANCHOR_TOKENS = ("was ", "vs ", "wow", "dod", "→")
-_INSIGHT_TOPIC_LABELS = {
-    "CLARITY",
-    "LATENCY",
-    "FEEDBACK",
-    "COST",
-    "ACCURACY",
-    "USAGE",
-}
-_INSIGHT_MAX_CLAIM_CHARS = 90
-_INSIGHT_MAX_EVIDENCE_CHARS = 90
-_INSIGHT_MAX_CONTEXT_CHARS = 90
-_INSIGHT_MAX_HEADLINE_CHARS = 180
-_INSIGHT_MAX_COUNT = 5
-_INSIGHT_MAX_SPARK_POINTS = 14
-
-# Kill-switch thresholds, match the locked plan (academic FAIL > 6%,
-# downvote rate > 1.0%). Kept as module constants so the renderer can read
-# the same numbers.
 _KILL_SWITCH_ACADEMIC_FAIL_PCT = 6.0
 _KILL_SWITCH_DOWNVOTE_RATE_PCT = 1.0
-
-
-def _claim_clears_quality_bar(claim: str) -> bool:
-    """True iff `claim` has a delta verb AND a comparison anchor AND ≤90 chars."""
-    if not isinstance(claim, str):
-        return False
-    if len(claim) > _INSIGHT_MAX_CLAIM_CHARS or not claim.strip():
-        return False
-    lc = claim.lower()
-    # Delta verb match must be word-ish to avoid e.g. "up" matching "support".
-    # Cheap heuristic: surround with spaces or use punctuation boundaries.
-    padded = f" {lc} "
-    has_delta = any(
-        f" {verb} " in padded
-        or f" {verb}." in padded
-        or f" {verb}," in padded
-        for verb in _INSIGHT_DELTA_VERBS
-    )
-    if not has_delta:
-        return False
-    has_anchor = any(tok in lc for tok in _INSIGHT_ANCHOR_TOKENS)
-    return has_anchor
-
-
-def _normalize_insight(raw: Any) -> Optional[dict]:
-    """Validate one LLM-emitted insight. Returns clean dict or None to drop."""
-    if not isinstance(raw, dict):
-        return None
-    topic = str(raw.get("topic_label") or "").strip().upper()
-    if topic not in _INSIGHT_TOPIC_LABELS:
-        return None
-    icon = raw.get("icon") or ""
-    if not isinstance(icon, str) or not icon.strip():
-        return None
-    claim = raw.get("claim") or ""
-    if not _claim_clears_quality_bar(claim):
-        return None
-    evidence = raw.get("evidence") or ""
-    if not isinstance(evidence, str) or not evidence.strip():
-        return None
-    if len(evidence) > _INSIGHT_MAX_EVIDENCE_CHARS:
-        evidence = evidence[:_INSIGHT_MAX_EVIDENCE_CHARS].rstrip()
-    context = raw.get("context")
-    if context is not None:
-        if not isinstance(context, str) or not context.strip():
-            context = None
-        elif len(context) > _INSIGHT_MAX_CONTEXT_CHARS:
-            context = context[:_INSIGHT_MAX_CONTEXT_CHARS].rstrip()
-    spark = raw.get("spark_series")
-    if spark is not None:
-        if not isinstance(spark, list):
-            spark = None
-        else:
-            cleaned: List[float] = []
-            for v in spark[:_INSIGHT_MAX_SPARK_POINTS]:
-                try:
-                    cleaned.append(float(v))
-                except (TypeError, ValueError):
-                    continue
-            spark = cleaned or None
-    return {
-        "topic_label": topic,
-        "icon": icon,
-        "claim": claim,
-        "evidence": evidence,
-        "context": context,
-        "spark_series": spark,
-    }
-
-
-def _normalize_insights_payload(raw: Any) -> dict:
-    """Validate the full {headline, insights} object from the LLM.
-
-    Drops insights that fail the quality bar, caps at 5, clamps headline.
-    Returns a clean dict; never raises.
-    """
-    if not isinstance(raw, dict):
-        return {"headline": "", "insights": []}
-    headline = raw.get("headline") or ""
-    if not isinstance(headline, str):
-        headline = ""
-    headline = headline.strip()
-    if len(headline) > _INSIGHT_MAX_HEADLINE_CHARS:
-        headline = headline[:_INSIGHT_MAX_HEADLINE_CHARS].rstrip()
-    insights_raw = raw.get("insights")
-    if not isinstance(insights_raw, list):
-        insights_raw = []
-    cleaned: List[dict] = []
-    for entry in insights_raw:
-        norm = _normalize_insight(entry)
-        if norm is not None:
-            cleaned.append(norm)
-        if len(cleaned) >= _INSIGHT_MAX_COUNT:
-            break
-    return {"headline": headline, "insights": cleaned}
 
 
 def _coerce_int(v: Any) -> Optional[int]:
@@ -2229,120 +2070,14 @@ def _coerce_int(v: Any) -> Optional[int]:
         return None
 
 
-def _http_post_slack_compatible(*args, **kwargs):  # pragma: no cover - tiny indirection
-    """Marker indirection; not used directly. Reserved for future Slack abstraction."""
-    raise NotImplementedError
-
-
-def _call_top_insights_llm(today_data: dict, yesterday_snapshot: dict) -> dict:
-    """Call Azure OpenAI gpt-4.1 with 60s timeout + 1 retry on URLError/5xx.
-
-    v2: returns a NORMALIZED dict `{"headline": str, "insights": [...]}` parsed
-    from the model's strict-JSON output. The quality filter (delta verb +
-    anchor + length caps) is applied here so the caller can trust the shape.
-
-    Raises ValueError if the model returned non-JSON or unparseable content.
-    Raises (and surfaces upstream to fmt_top_insights' try/except) on Azure /
-    network failures so the caller can degrade to the sentinel dict.
-    """
-    # Lazy import: keep digest importable in environments without `openai` installed.
-    from judge_runner import get_openai_client  # noqa: WPS433 (lazy intentional)
-
-    deployment = (
-        os.environ.get("DEPLOYMENT_NAME")
-        or os.environ.get("AZURE_DEPLOYMENT_NAME")
-        or ""
-    ).strip()
-    if not deployment:
-        raise RuntimeError("DEPLOYMENT_NAME not set")
-
-    user_payload = json.dumps(
-        {"TODAY": today_data, "YESTERDAY": yesterday_snapshot},
-        ensure_ascii=False,
-        default=str,
-    )
-
-    last_exc: Optional[BaseException] = None
-    for attempt in range(2):  # initial + 1 retry
-        try:
-            # Per-instance timeout: 60s. The OpenAI/Azure SDK respects `timeout=`
-            # at construction; pass it explicitly via the env var the client
-            # factory consults so we don't need a new constructor signature.
-            prev_timeout = os.environ.get("JUDGE_HTTP_TIMEOUT_SEC")
-            os.environ["JUDGE_HTTP_TIMEOUT_SEC"] = "60"
-            try:
-                client = get_openai_client()
-            finally:
-                if prev_timeout is None:
-                    os.environ.pop("JUDGE_HTTP_TIMEOUT_SEC", None)
-                else:
-                    os.environ["JUDGE_HTTP_TIMEOUT_SEC"] = prev_timeout
-
-            # Prefer JSON mode when the SDK/deployment supports it. Fall back
-            # to plain-text completion + parse if response_format is rejected.
-            try:
-                resp = client.chat.completions.create(
-                    model=deployment,
-                    messages=[
-                        {"role": "system", "content": _TOP_INSIGHTS_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_payload},
-                    ],
-                    temperature=0,
-                    max_tokens=800,
-                    response_format={"type": "json_object"},
-                )
-            except TypeError:
-                # Older SDK without response_format kwarg.
-                resp = client.chat.completions.create(
-                    model=deployment,
-                    messages=[
-                        {"role": "system", "content": _TOP_INSIGHTS_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_payload},
-                    ],
-                    temperature=0,
-                    max_tokens=800,
-                )
-            raw_text = (resp.choices[0].message.content or "").strip()
-            if not raw_text:
-                raise ValueError("Top insights LLM returned empty content")
-            try:
-                parsed = json.loads(raw_text)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Top insights LLM returned non-JSON: {exc}"
-                ) from exc
-            return _normalize_insights_payload(parsed)
-        except urllib.error.URLError as exc:
-            last_exc = exc
-            if attempt == 0:
-                time.sleep(5)
-                continue
-            raise
-        except Exception as exc:
-            # SDK wraps HTTP errors in its own classes; we treat anything with a
-            # 5xx-shaped status_code as retryable on first failure.
-            status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-            last_exc = exc
-            if attempt == 0 and isinstance(status, int) and 500 <= status < 600:
-                time.sleep(5)
-                continue
-            raise
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("Top insights LLM call exhausted retries")  # pragma: no cover
-
-
 def _detect_kill_switch_breach(today_data: dict) -> bool:
     """Pre-LLM deterministic breach check.
 
     Breach when EITHER:
-      • today_data["academic_fail_pct"] > 6.0  (Academic FAIL floor)
-      • today_data["downvote_rate_pct"]  > 1.0 (Downvote rate SLO)
+      * today_data["academic_fail_pct"] > 6.0  (Academic FAIL floor)
+      * today_data["downvote_rate_pct"]  > 1.0 (Downvote rate SLO)
 
-    Both fields are caller-supplied. Missing / None / non-numeric → False.
-    We do NOT derive these from raw snapshot internals here, the caller
-    (digest) owns the upstream computation and passes the canonical numbers
-    in. This keeps the kill-switch readable and testable in isolation.
+    Both fields are caller-supplied. Missing / None / non-numeric -> False.
     """
     if not isinstance(today_data, dict):
         return False
@@ -2360,123 +2095,6 @@ def _detect_kill_switch_breach(today_data: dict) -> bool:
             continue
     return False
 
-
-def _empty_insights_payload(
-    *,
-    headline: str = "",
-    kill_switch_breach: bool = False,
-    llm_unavailable: bool = False,
-) -> dict:
-    return {
-        "headline": headline,
-        "insights": [],
-        "kill_switch_breach": kill_switch_breach,
-        "_llm_unavailable": llm_unavailable,
-    }
-
-
-def fmt_top_insights(
-    today_data: dict, yesterday_snapshot: Optional[dict]
-) -> dict:
-    """Build the Top Insights structured payload for the downstream renderer.
-
-    v2 returns a STRUCTURED DICT, not a string. The Slack/poster renderer
-    (C1.3) is responsible for prose formatting; this function's job is to
-    produce a clean, validated data structure.
-
-    Schema:
-      {
-        "headline":           str,   # narrative one-liner, may be empty
-        "insights":           list,  # 0..5 normalized insight dicts
-        "kill_switch_breach": bool,  # deterministic, computed pre-LLM
-        "_llm_unavailable":   bool,  # True on missing creds / call failure
-      }
-
-    Failure modes (all degrade gracefully, NEVER raise):
-      • Azure creds missing/empty   → sentinel payload (_llm_unavailable=True).
-                                      kill_switch_breach is still computed
-                                      so the renderer can banner the breach.
-      • yesterday_snapshot is None  → first-run payload (no Azure call).
-                                      Empty insights, but kill-switch still
-                                      flagged from today_data.
-      • Azure call raises (network, ValueError on JSON parse, anything)
-                                    → sentinel payload (_llm_unavailable=True),
-                                      kill-switch preserved.
-    """
-    # Deterministic kill-switch check runs FIRST and is preserved across every
-    # downstream branch, the renderer's breach banner must fire even when the
-    # LLM is unavailable.
-    breach = _detect_kill_switch_breach(today_data)
-
-    # SRE review fix (carried over from v1): judge_runner.get_openai_client()
-    # calls sys.exit(...) on missing Azure env vars. SystemExit is
-    # BaseException, NOT Exception, so the except wrapper below would NOT
-    # catch it and the digest job would hard-crash. Pre-check here so a
-    # credential rotation to empty values degrades to the sentinel.
-    api_key_present = bool(
-        (os.environ.get("AZURE_API_KEY") or os.environ.get("AZURE_OPENAI_API_KEY") or "").strip()
-    )
-    endpoint_present = bool(
-        (os.environ.get("AZURE_ENDPOINT") or os.environ.get("AZURE_OPENAI_ENDPOINT") or "").strip()
-    )
-    deployment_present = bool(
-        (os.environ.get("DEPLOYMENT_NAME") or os.environ.get("AZURE_DEPLOYMENT_NAME") or "").strip()
-    )
-    missing = [
-        name
-        for name, present in (
-            ("AZURE_API_KEY", api_key_present),
-            ("AZURE_ENDPOINT", endpoint_present),
-            ("DEPLOYMENT_NAME", deployment_present),
-        )
-        if not present
-    ]
-    if missing:
-        print(
-            f"[warn] Top Insights v2 skipped, Azure env vars missing or empty: "
-            f"{', '.join(missing)}",
-            file=sys.stderr,
-        )
-        return _empty_insights_payload(
-            kill_switch_breach=breach, llm_unavailable=True
-        )
-
-    if yesterday_snapshot is None:
-        # First-run: no baseline to compare against. Renderer shows the
-        # appropriate empty state. Kill-switch still flagged from today.
-        return _empty_insights_payload(kill_switch_breach=breach)
-
-    try:
-        parsed = _call_top_insights_llm(today_data, yesterday_snapshot)
-    except Exception as exc:
-        print(
-            f"[warn] Top Insights v2 LLM call failed; degrading to sentinel: {exc!r}",
-            file=sys.stderr,
-        )
-        return _empty_insights_payload(
-            kill_switch_breach=breach, llm_unavailable=True
-        )
-
-    if not isinstance(parsed, dict):
-        print(
-            "[warn] Top Insights v2 parsed payload not a dict; sentinel",
-            file=sys.stderr,
-        )
-        return _empty_insights_payload(
-            kill_switch_breach=breach, llm_unavailable=True
-        )
-
-    # Re-normalize defensively. _call_top_insights_llm already applies the
-    # quality filter in production, but a test (or future caller) may swap
-    # in a mock that returns raw model output. Running the filter here makes
-    # fmt_top_insights' contract self-enforcing regardless of caller path.
-    normalized = _normalize_insights_payload(parsed)
-    return {
-        "headline": normalized["headline"],
-        "insights": normalized["insights"],
-        "kill_switch_breach": breach,
-        "_llm_unavailable": False,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -2946,16 +2564,13 @@ _PLACEHOLDER_UNAVAILABLE = "_(insights unavailable today)_"
 
 
 def _coerce_insights_to_text(value) -> str:
-    """Render fmt_top_insights output for Block Kit text section.
+    """Render an insights payload to a Block Kit-safe text string.
 
-    Accepts:
-      • None / "" → first-run placeholder
-      • str       → returned as-is (v1 contract, used by legacy callers / tests)
-      • dict      → v2 structured payload; rendered to a numbered prose list.
-
-    The renderer (poster PNG) consumes the dict directly. This function only
-    exists for the text-companion / fallback path which must remain readable
-    Block Kit on poster render failure.
+    F11 (PR #30) note: fmt_top_insights is gone, and its call site no
+    longer feeds this helper, but the function is retained for callers
+    that pass a v1 string contract (a few legacy tests) and as a
+    defence-in-depth shim if a future call site needs to render an
+    InsightPayload's dict shape to text.
     """
     if value is None or value == "":
         return _PLACEHOLDER_INSIGHTS
@@ -3066,13 +2681,11 @@ def build_blocks(
         header_block(f"\U0001f4ca Ask AI Daily Digest, {today_str}"),
     ]
 
-    # 2. Top 3 Insights, NEW. Reader sees no "LLM" wording.
-    # Accept either v1 string contract or v2 structured dict from fmt_top_insights.
-    insights_text = _coerce_insights_to_text(top_insights_text)
-    blocks.extend([
-        divider,
-        section(f":dart: *Top 3 Insights*\n{insights_text}"),
-    ])
+    # F8: the legacy "Top 3 Insights" Slack section is gone. Variant D bakes
+    # the insight cards into the rendered poster image; surfacing them again
+    # as a Block Kit section duplicated content on the happy path AND, on
+    # the degraded text-only path, left the LLM blob front-and-center where
+    # it caused the most reader confusion. The image is the single source.
 
     # 3. Today's broken chapter, moved up + renamed + plain English.
     broken_block_body = (coverage_note + broken_chapter_body).strip()
@@ -3221,124 +2834,22 @@ def build_blocks(
 # C1.3: Poster pipeline main + thread block builders
 # ---------------------------------------------------------------------------
 
-def _build_digest_ops_stripe_text(
-    today_summary: dict,
-    yesterday_snapshot: Optional[dict],
-    stream_logs_rows: Optional[List],
-) -> str:
-    """Build the Ops stripe one-line body for the digest main message.
-
-    Returns plain mrkdwn (no header). Shape:
-      `$X.XX spent · student TTFT p90 X.Xs · errors X.X% [▲/▼]`
-
-    Defensive: any missing input degrades to `n/a` for that field.
-    """
-    # Cost: sum of answer-model + classifier cost from today's summary.
-    cost_total = 0.0
-    answer_models = (today_summary or {}).get("cost_latency_answer_by_model") or {}
-    for _model, m in answer_models.items():
-        try:
-            cost_total += float((m or {}).get("cost_usd") or 0.0)
-        except (TypeError, ValueError):
-            continue
-    classifier_snap = (today_summary or {}).get("cost_latency_classifier") or None
-    if isinstance(classifier_snap, dict):
-        try:
-            cost_total += float(classifier_snap.get("cost_usd") or 0.0)
-        except (TypeError, ValueError):
-            pass
-    cost_str = f"${cost_total:.2f} spent"
-
-    # Student TTFT p90: pick the dominant-traffic answer model and report its
-    # student p90 in seconds. Falls back to n/a when no answer-model rows.
-    ttft_str = "student TTFT p90 n/a"
-    if answer_models:
-        dominant = max(
-            answer_models.items(),
-            key=lambda kv: (kv[1] or {}).get("request_count") or 0,
-        )
-        d_model, d_m = dominant
-        student = (d_m or {}).get("student_ttft_ms") or {}
-        p90_ms = student.get("p90")
-        ttft_str = f"student TTFT p90 {_fmt_ms_as_seconds(p90_ms)} ({d_model})"
-
-    # Error rate: langfuse_errors_total / total_observations_24h. The numerator
-    # is a count of error *observation spans* (one trace fans out into many
-    # observations), so the denominator must be observations too. Using traces
-    # here yields >100% on any normal day. If observations isn't in the
-    # snapshot (older snapshot or fetch failed), fall back to a raw count
-    # display rather than a misleading percentage.
-    errs_today = float((today_summary or {}).get("langfuse_errors_total") or 0.0)
-    obs_today = float((today_summary or {}).get("total_observations_24h") or 0.0)
-    err_rate_today: Optional[float] = (
-        (errs_today / obs_today * 100.0) if obs_today > 0 else None
-    )
-    err_rate_yest: Optional[float] = None
-    if isinstance(yesterday_snapshot, dict):
-        ey = float(yesterday_snapshot.get("langfuse_errors_total") or 0.0)
-        oy = float(yesterday_snapshot.get("total_observations_24h") or 0.0)
-        if oy > 0:
-            err_rate_yest = ey / oy * 100.0
-    arrow = ""
-    if err_rate_today is not None and err_rate_yest is not None:
-        diff = err_rate_today - err_rate_yest
-        if abs(diff) >= 0.05:
-            arrow = " ▲" if diff > 0 else " ▼"
-    if err_rate_today is None:
-        # No observations denominator available, fall back to raw count so the
-        # reader still sees something useful instead of "n/a".
-        if errs_today > 0:
-            err_str = f"errors {int(errs_today):,} (24h)"
-        else:
-            err_str = "errors n/a"
-    else:
-        err_str = f"errors {err_rate_today:.1f}%{arrow}"
-
-    return f"   {cost_str} · {ttft_str} · {err_str}"
-
-
-def _build_digest_safety_stripe_text(
-    today_summary: dict,
-    stream_logs_rows: Optional[List],
-) -> str:
-    """Build the Safety floor stripe body for the digest main message.
-
-    Shape: `Downvote rate X.XX% · VCP success XX.X%`
-    """
-    dv_rate = (today_summary or {}).get("downvote_rate_pct")
-    if dv_rate is None:
-        dv_str = "Downvote rate n/a"
-    else:
-        try:
-            dv_str = f"Downvote rate {float(dv_rate):.2f}%"
-        except (TypeError, ValueError):
-            dv_str = "Downvote rate n/a"
-
-    vcp_str = "VCP success n/a"
-    if stream_logs_rows:
-        r = stream_logs_rows[0]
-        n_req = _stream_logs_get(r, "n_requests", 0) or 0
-        n_ok = _stream_logs_get(r, "n_success", 0) or 0
-        try:
-            if int(n_req) > 0:
-                pct = 100.0 * float(n_ok) / float(n_req)
-                vcp_str = f"VCP success {pct:.1f}%"
-        except (TypeError, ValueError):
-            pass
-
-    return f"   {dv_str} · {vcp_str}"
-
-
 def build_main_blocks(
     *, image_url: str, poster_input: dict,
-    ops_text: str, safety_text: str, footer_text: str,
+    footer_text: str,
     follow_up_block: Optional[dict] = None,
     degraded: bool = False,
 ) -> list:
-    """Compose the digest main message: poster image + Ops + Safety +
-    conversational follow-up + footer. Phase 4 single-message-per-surface:
-    NO thread reply, NO "Full breakdown in thread" anchor. Threads happen
-    when humans reply.
+    """Compose the digest main message: poster image + conversational
+    follow-up + footer. Phase 4 single-message-per-surface: NO thread
+    reply, NO "Full breakdown in thread" anchor. Threads happen when
+    humans reply.
+
+    F1: the `Ops, yesterday:` and `Safety floor:` mrkdwn preamble sections
+    are gone. Those numbers already live inside the rendered poster image,
+    so duplicating them as Slack text below the image was redundant noise.
+    The slim text companion (via `follow_up_block`) is the only text below
+    the image now (plus the footer context line).
 
     `follow_up_block` is the LLM-generated conversational text companion
     rendered as a Block Kit section by FollowUp.as_block_kit_section().
@@ -3364,12 +2875,6 @@ def build_main_blocks(
     if degraded:
         from scripts.slack_publisher import make_degradation_section
         blocks.append(make_degradation_section())
-    blocks.extend([
-        {"type": "section", "text": {"type": "mrkdwn",
-            "text": f"*Ops, yesterday:* {ops_text}"}},
-        {"type": "section", "text": {"type": "mrkdwn",
-            "text": f"*Safety floor:* {safety_text}"}},
-    ])
     if follow_up_block is not None:
         blocks.append(follow_up_block)
     blocks.append(
@@ -3663,16 +3168,13 @@ def main() -> int:
     )
 
     yesterday_snapshot = _load_yesterday_snapshot()
-    try:
-        top_insights_text = fmt_top_insights(today_summary, yesterday_snapshot)
-    except Exception as exc:
-        # fmt_top_insights is documented to never raise, but defence-in-depth:
-        # any unexpected raise here MUST NOT block the rest of the digest.
-        print(
-            f"[warn] fmt_top_insights raised unexpectedly; using fallback: {exc!r}",
-            file=sys.stderr,
-        )
-        top_insights_text = "_(insights unavailable today)_"
+    # F11: the digest used to fire TWO LLM calls per run (this
+    # fmt_top_insights call + the downstream follow_up_generator call). The
+    # InsightPayload from follow_up_generator now carries the cards we used
+    # to surface as "Top 3 Insights", so the upstream call is redundant.
+    # Dropping it roughly halves the digest LLM spend. Callers downstream
+    # accept {} as the insights payload (see build_digest_poster_input).
+    top_insights_text = {}
 
     # Phase 1 + architect-review fix: write today's snapshot UNCONDITIONALLY,
     # before any early return (DRY_RUN, idempotency-marker skip), the snapshot
@@ -3883,21 +3385,13 @@ def main() -> int:
                         image_url = None
                         poster_error = f"cause=render reason={exc!r}"
                 if image_url:
-                    ops_text = _build_digest_ops_stripe_text(
-                        today_summary, yesterday_snapshot, stream_logs_rows
-                    )
-                    safety_text = _build_digest_safety_stripe_text(
-                        today_summary, stream_logs_rows
-                    )
                     footer = poster_slack.digest_footer_links(date_str)
-                    # follow_up was generated above before the render so the
-                    # InsightPayload's narrative cards could be baked into
-                    # the PNG; here we just consume its slim text companion.
+                    # F1: Ops/Safety preambles are gone; the numbers live in
+                    # the rendered poster image and the slim text companion
+                    # carries the verdict + breach mention + deep-dive link.
                     main_blocks = build_main_blocks(
                         image_url=image_url,
                         poster_input=poster_input,
-                        ops_text=ops_text,
-                        safety_text=safety_text,
                         footer_text=footer,
                         follow_up_block=(
                             follow_up.as_block_kit_section()
@@ -3915,6 +3409,16 @@ def main() -> int:
                         poster_error = f"cause=publish reason={exc!r}"
                     if not posted and poster_error is None:
                         poster_error = "cause=post reason=post_blocks_to_slack returned False"
+                    # F10: positive observability on happy path so the
+                    # operator has a single grep target proving the digest
+                    # actually posted via the poster pipeline (not via the
+                    # legacy text fallback).
+                    if posted:
+                        print(
+                            f"[poster] [info] digest published surface=digest "
+                            f"date={date_str} image_url={image_url}",
+                            flush=True,
+                        )
                 elif poster_error is None:
                     poster_error = "cause=render reason=render_and_publish returned None"
             except _POSTER_RECOVERABLE as exc:

@@ -189,8 +189,9 @@ class _BaseDigestMainTest(unittest.TestCase):
                               return_value=today_summary_value),
             mock.patch.object(self.digest, "_load_yesterday_snapshot",
                               return_value=None),
-            mock.patch.object(self.digest, "fmt_top_insights",
-                              return_value=_minimal_insights()),
+            # F11 (PR #30): fmt_top_insights is deleted; the digest no
+            # longer makes an upstream Top-Insights LLM call. No mock
+            # needed here.
             mock.patch.object(self.digest, "_write_digest_snapshot"),
             mock.patch.object(self.digest, "_already_posted_today",
                               return_value=False),
@@ -229,6 +230,28 @@ class TestDigestMainPosterPathByDefault(_BaseDigestMainTest):
         # no programmatic thread reply.
         self.assertEqual(m_post_blocks.call_count, 1)
         m_post_text.assert_not_called()
+
+    def test_main_makes_at_most_one_llm_call_per_digest_run(self) -> None:
+        """F11 (PR #30): the upstream fmt_top_insights call was dropped.
+        Only follow_up_generator.generate_follow_up may fire on the digest
+        path; nothing else should call into the Azure OpenAI client.
+
+        Assert by patching generate_follow_up at the import site daily_digest
+        uses (lazy import inside main) and checking call_count <= 1.
+        """
+        with mock.patch(
+            "scripts.follow_up_generator.generate_follow_up"
+        ) as m_gen:
+            # Return a structurally-valid InsightPayload-shaped object.
+            from scripts.follow_up_generator import InsightPayload
+            m_gen.return_value = InsightPayload(
+                verdict="Top risk: test.",
+                text_companion="Top risk: test.",
+                degraded=False,
+            )
+            exit_code, _, _, _, _ = self._run_main({})
+        self.assertEqual(exit_code, 0)
+        self.assertLessEqual(m_gen.call_count, 1)
 
     def test_main_falls_back_when_POSTER_DISABLE_set(self) -> None:
         exit_code, m_render, m_post_blocks, m_post_text, stderr = self._run_main(

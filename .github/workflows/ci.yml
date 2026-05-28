@@ -1,0 +1,95 @@
+# PR gating CI. Runs on every pull_request (any base/head branch) and on
+# push to main. Lives on GitHub-hosted ubuntu runners; the self-hosted Mac
+# is reserved for production poster jobs (see daily-eval.yml, daily-digest.yml).
+#
+# Two jobs so the PR Checks UI shows pass/fail granularity:
+#   CI / pytest  - full suite (281 tests, ~90s locally)
+#   CI / lints   - 4 targeted lint suites with -v so reviewers can see
+#                  which lint failed at a glance
+#
+# Playwright Chromium IS installed for the pytest job because
+# tests/test_poster_renderer.py launches a real headless browser when its
+# conftest gate (_chromium_installed) is satisfied. On a bare ubuntu runner
+# the `playwright` Python package is present via requirements.txt but the
+# browser binary is missing, so without an explicit `playwright install`
+# the 4 renderer tests fail rather than skip. Cached on
+# ~/.cache/ms-playwright keyed on requirements.txt to keep subsequent PRs
+# fast. The lints job does not need Chromium.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        # Mirror daily-digest.yml's install pattern (openai + langfuse +
+        # requirements.txt). pytest is added explicitly because
+        # requirements.txt only pins runtime deps.
+        run: |
+          pip3 install --upgrade pip
+          pip3 install openai langfuse
+          pip3 install -r requirements.txt
+          pip3 install pytest
+
+      - name: Cache Playwright browsers
+        # Mirrors the cache pattern in daily-digest.yml, but on the Linux
+        # path (~/.cache/ms-playwright) instead of macOS.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright Chromium
+        # `--with-deps` is safe on Linux (apt-get pulls libnss3 etc.) and
+        # required because tests/test_poster_renderer.py launches a real
+        # headless browser when the conftest gate detects Chromium present.
+        run: python3 -m playwright install --with-deps chromium
+
+      - name: Run full test suite
+        run: python3 -m pytest tests/ -q --tb=short
+
+  lints:
+    name: lints
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip3 install --upgrade pip
+          pip3 install openai langfuse
+          pip3 install -r requirements.txt
+          pip3 install pytest
+
+      - name: Run lint suites (em-dash, jargon, anti-patterns, verdict)
+        run: |
+          python3 -m pytest \
+            tests/test_no_em_dashes_anywhere.py \
+            tests/test_no_jargon.py \
+            tests/test_no_anti_patterns.py \
+            tests/test_verdict_opening_line.py \
+            -v

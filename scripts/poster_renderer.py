@@ -93,6 +93,20 @@ def render_poster(
             reason=f"unknown surface (expected scoreboard|digest, got {surface!r})",
         )
 
+    # F9: digest_eyebrow_right is the count chip in the masthead. The builder
+    # no longer seeds it; the caller MUST set it after generating the
+    # InsightPayload so the rendered chip matches the actual card count.
+    # A missing eyebrow at render time is a wiring bug, not a data shape we
+    # want to silently paper over with a default.
+    if surface == "digest" and not snapshot.get("digest_eyebrow_right"):
+        raise PosterRenderError(
+            template=TEMPLATE_FOR_SURFACE[surface],
+            reason=(
+                "digest_eyebrow_right unset at render time; caller must set "
+                "it post-LLM (F9 contract)"
+            ),
+        )
+
     template_name = TEMPLATE_FOR_SURFACE[surface]
 
     # Render Jinja to HTML; cheap, fail-fast before launching Chromium.

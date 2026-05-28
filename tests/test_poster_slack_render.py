@@ -17,6 +17,7 @@ cover the wiring contract:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -244,29 +245,68 @@ class TestAltTextAndFooters(unittest.TestCase):
         self.assertIn("Retries spiking", alt)
         self.assertIn("TTFT degraded", alt)
 
-    def test_scoreboard_footer_has_three_links(self) -> None:
-        # Updated for Commit 2184f19: footer now has 3 links (Deep dive on GH
-        # Pages + Langfuse + Stream logs), replacing the prior Eval one-pager
-        # + Metabase pair.
-        text = self.ps.scoreboard_footer_links()
-        self.assertEqual(text.count("<"), 3)
-        self.assertEqual(text.count("|"), 3)
-        self.assertIn("Deep dive", text)
-        self.assertIn("Langfuse", text)
-        self.assertIn("Stream logs", text)
+    def test_scoreboard_footer_omits_links_when_env_unset(self) -> None:
+        # F2 (PR #30): the footer now omits Langfuse / Stream-logs links
+        # entirely when their env URLs are unset, rather than shipping the
+        # old `https://langfuse` / `https://metabase/stream-logs` placeholder
+        # defaults. Deep dive moved into the slim text companion (F4).
+        with _EnvScope(
+            LANGFUSE_URL=None, LANGFUSE_PROJECT_ID=None,
+            STREAM_LOGS_URL=None, METABASE_URL=None,
+            METABASE_STREAM_LOGS_CARD_ID=None, METABASE_QUESTION_ID=None,
+        ):
+            text = self.ps.scoreboard_footer_links()
+        self.assertNotIn("Langfuse", text)
+        self.assertNotIn("Stream logs", text)
+        self.assertNotIn("https://langfuse", text)
+        self.assertNotIn("https://metabase", text)
 
-    def test_digest_footer_has_three_links(self) -> None:
-        # Updated for Commit 2184f19: Confluence archive dropped; footer now
-        # has Deep dive (GH Pages) + Langfuse + Stream logs.
-        text = self.ps.digest_footer_links()
-        self.assertEqual(text.count("<"), 3)
-        self.assertEqual(text.count("|"), 3)
-        self.assertIn("Deep dive", text)
-        self.assertIn("Langfuse", text)
-        self.assertIn("Stream logs", text)
+    def test_scoreboard_footer_includes_links_when_env_set(self) -> None:
+        with _EnvScope(
+            LANGFUSE_URL="https://cloud.langfuse.com/project/abc",
+            STREAM_LOGS_URL="https://mb.example.com/question/42",
+            LANGFUSE_PROJECT_ID=None,
+            METABASE_URL=None, METABASE_STREAM_LOGS_CARD_ID=None,
+            METABASE_QUESTION_ID=None,
+        ):
+            text = self.ps.scoreboard_footer_links()
+        self.assertIn("<https://cloud.langfuse.com/project/abc|Langfuse>", text)
+        self.assertIn("<https://mb.example.com/question/42|Stream logs>", text)
 
-    # Removed in Variant D: Confluence archive link dropped per Commit 2184f19
-    # (footer now points to GH Pages deep-dive; CONFLUENCE_ARCHIVE_URL is unused).
+    def test_digest_footer_omits_links_when_env_unset(self) -> None:
+        with _EnvScope(
+            LANGFUSE_URL=None, LANGFUSE_PROJECT_ID=None,
+            STREAM_LOGS_URL=None, METABASE_URL=None,
+            METABASE_STREAM_LOGS_CARD_ID=None, METABASE_QUESTION_ID=None,
+        ):
+            text = self.ps.digest_footer_links()
+        self.assertNotIn("Langfuse", text)
+        self.assertNotIn("Stream logs", text)
+
+    def test_digest_footer_includes_links_when_env_set(self) -> None:
+        with _EnvScope(
+            LANGFUSE_URL="https://cloud.langfuse.com/project/xyz",
+            STREAM_LOGS_URL="https://mb.example.com/question/99",
+            LANGFUSE_PROJECT_ID=None,
+            METABASE_URL=None, METABASE_STREAM_LOGS_CARD_ID=None,
+            METABASE_QUESTION_ID=None,
+        ):
+            text = self.ps.digest_footer_links()
+        self.assertIn("<https://cloud.langfuse.com/project/xyz|Langfuse>", text)
+        self.assertIn("<https://mb.example.com/question/99|Stream logs>", text)
+
+    def test_langfuse_project_id_fallback(self) -> None:
+        # F2: LANGFUSE_PROJECT_ID alone resolves to the hosted project URL.
+        with _EnvScope(
+            LANGFUSE_URL=None,
+            LANGFUSE_PROJECT_ID="proj-fallback-id",
+            STREAM_LOGS_URL=None,
+        ):
+            text = self.ps.digest_footer_links()
+        self.assertIn(
+            "<https://cloud.langfuse.com/project/proj-fallback-id|Langfuse>",
+            text,
+        )
 
 
 class TestPostBlocksToSlack(unittest.TestCase):
@@ -339,8 +379,6 @@ class TestDigestMainBlocksAssembler(unittest.TestCase):
         blocks = self.digest.build_main_blocks(
             image_url="https://x.png",
             poster_input=pi,
-            ops_text="cost $100",
-            safety_text="downvote 0.5%",
             footer_text="footer",
         )
         # First block is the image
@@ -348,10 +386,16 @@ class TestDigestMainBlocksAssembler(unittest.TestCase):
         self.assertEqual(blocks[0]["image_url"], "https://x.png")
         self.assertIn("Top risk: today's story.", blocks[0]["alt_text"])
         self.assertIn("Downvote rate", blocks[0]["alt_text"])
-        # Ops + Safety + Footer
+        # F1 (PR #30): the Ops + Safety mrkdwn sections are gone; the only
+        # text below the image now is the context footer (when no follow-up
+        # block is supplied).
         types = [b.get("type") for b in blocks]
-        self.assertIn("section", types)
         self.assertIn("context", types)
+        # No "Ops, yesterday:" or "Safety floor:" preamble should remain
+        # anywhere in the rendered blocks.
+        flat = json.dumps(blocks)
+        self.assertNotIn("Ops, yesterday", flat)
+        self.assertNotIn("Safety floor", flat)
 
     def test_build_thread_blocks_skips_empty_sections(self) -> None:
         thread = self.digest.build_thread_blocks(
@@ -403,81 +447,61 @@ class TestEvalPosterPipeline(unittest.TestCase):
         slept.assert_called()
 
 
-class TestOpsAndSafetyStripes(unittest.TestCase):
-    """C1.3b: real Ops + Safety floor stripe content (no placeholders)."""
+class TestDigestBreachFromSnapshot(unittest.TestCase):
+    """F7 (PR #30): digest breach derives from the snapshot, NOT from the
+    LLM-returned insights payload. An empty insights payload must still
+    surface a breach when the snapshot crosses the academic / downvote floor."""
 
     def setUp(self) -> None:
-        self.digest = _import("daily_digest", "daily_digest.py")
-        self.eval_mod = _import("daily_eval", "daily_eval.py")
+        self.ps = _import("scripts.poster_slack", "scripts/poster_slack.py")
 
-    def test_digest_ops_stripe_contains_cost(self) -> None:
+    def test_academic_floor_breach_flagged_with_empty_insights(self) -> None:
+        today = {"date": "2026-05-27", "academic_fail_pct": 8.2}
+        out = self.ps.build_digest_poster_input(today, {})
+        self.assertTrue(out["kill_switch_breach"])
+
+    def test_acc_fail_pct_alias_also_works(self) -> None:
+        today = {"date": "2026-05-27", "acc_fail_pct": 7.5}
+        out = self.ps.build_digest_poster_input(today, {})
+        self.assertTrue(out["kill_switch_breach"])
+
+    def test_downvote_floor_breach_flagged_with_empty_insights(self) -> None:
+        today = {"date": "2026-05-27", "downvote_rate_pct": 1.4}
+        out = self.ps.build_digest_poster_input(today, {})
+        self.assertTrue(out["kill_switch_breach"])
+
+    def test_no_breach_under_floors(self) -> None:
         today = {
-            "cost_latency_answer_by_model": {
-                "gpt-4.1": {
-                    "request_count": 1200,
-                    "cost_usd": 12.34,
-                    "student_ttft_ms": {"p50": 4200, "p90": 5900, "p95": 7100},
-                },
-                "gemini": {
-                    "request_count": 800,
-                    "cost_usd": 5.66,
-                    "student_ttft_ms": {"p50": 3900, "p90": 5300, "p95": 6800},
-                },
-            },
-            "cost_latency_classifier": {"cost_usd": 2.00},
-            "langfuse_errors_total": 12,
-            "total_traces_24h": 1000,
-            # Error rate denominator is observations, not traces (one trace
-            # fans out into many observation spans). 12 / 1000 observations
-            # = 1.2%; yesterday 8 / 1000 = 0.8% so the arrow points up.
-            "total_observations_24h": 1000,
+            "date": "2026-05-27",
+            "academic_fail_pct": 4.2,
+            "downvote_rate_pct": 0.3,
         }
-        yest = {
-            "langfuse_errors_total": 8,
-            "total_traces_24h": 1000,
-            "total_observations_24h": 1000,
-        }
-        text = self.digest._build_digest_ops_stripe_text(today, yest, None)
-        self.assertIn("$20.00 spent", text)
-        # Dominant traffic is gpt-4.1, student p90 = 5.90s
-        self.assertIn("student TTFT p90 5.90s", text)
-        self.assertIn("(gpt-4.1)", text)
-        # Errors today 1.2%, yesterday 0.8%, so triangle up
-        self.assertIn("errors 1.2%", text)
-        self.assertIn("▲", text)
+        out = self.ps.build_digest_poster_input(today, {})
+        self.assertFalse(out["kill_switch_breach"])
 
-    def test_digest_safety_stripe_contains_downvote_rate(self) -> None:
-        today = {"downvote_rate_pct": 0.4523}
-        rows = [{
-            "n_requests": 10000, "n_success": 9856,
-        }]
-        text = self.digest._build_digest_safety_stripe_text(today, rows)
-        self.assertIn("Downvote rate 0.45%", text)
-        self.assertIn("VCP success 98.6%", text)
+    def test_ignores_llm_payload_breach_signal(self) -> None:
+        # The LLM payload may claim a breach; we now ignore that and
+        # only trust the snapshot. The renderer's source of truth is
+        # the deterministic floor, not the prose payload.
+        today = {"date": "2026-05-27", "academic_fail_pct": 1.0}
+        insights = {"kill_switch_breach": True, "insights": []}
+        out = self.ps.build_digest_poster_input(today, insights)
+        # F7 still honors a defensive fallthrough on the snapshot key, so
+        # an LLM-only breach signal does NOT promote into the poster.
+        self.assertFalse(out["kill_switch_breach"])
 
-    def test_digest_safety_stripe_handles_missing(self) -> None:
-        text = self.digest._build_digest_safety_stripe_text({}, None)
-        self.assertIn("Downvote rate n/a", text)
-        self.assertIn("VCP success n/a", text)
 
-    def test_scoreboard_ops_stripe_contains_run_cost(self) -> None:
-        snap = {
-            "run_cost_usd": 0.4567,
-            "n_judged": 989, "n_judgable": 989,
-            "acc_fail_pct": 4.2,
-        }
-        text = self.eval_mod._build_scoreboard_ops_stripe_text(snap)
-        self.assertIn("$0.46 run cost", text)
-        self.assertIn("989 traces judged", text)
-        self.assertIn("Wilson CI ±", text)
-        self.assertIn("pp on academic", text)
+class TestDigestEyebrowNotSeededByBuilder(unittest.TestCase):
+    """F9 (PR #30): the builder no longer seeds digest_eyebrow_right.
+    The caller (daily_digest.main) is the single source of truth."""
 
-    def test_scoreboard_safety_stripe_contains_academic_with_floor(self) -> None:
-        snap = {"acc_fail_pct": 5.1, "exp_fail_pct": 12.4}
-        text = self.eval_mod._build_scoreboard_safety_stripe_text(snap)
-        self.assertIn("Academic FAIL 5.1%", text)
-        self.assertIn("(floor 6%)", text)
-        self.assertIn("Experience FAIL 12.4%", text)
+    def setUp(self) -> None:
+        self.ps = _import("scripts.poster_slack", "scripts/poster_slack.py")
+
+    def test_builder_does_not_set_digest_eyebrow_right(self) -> None:
+        today = {"date": "2026-05-27", "academic_fail_pct": 8.0}
+        out = self.ps.build_digest_poster_input(today, {})
+        self.assertNotIn("digest_eyebrow_right", out)
 
 
 class TestKillSwitchRoundTrip(unittest.TestCase):

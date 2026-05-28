@@ -909,36 +909,12 @@ def finalize_eval_run(
     return block
 
 
-def _build_scoreboard_ops_stripe_text(snapshot: dict) -> str:
-    """Scoreboard Ops stripe one-line body. Shape:
-       `$X.XX run cost · N traces judged · Wilson CI +-X.Xpp on academic`
-
-    Sourced entirely from the eval snapshot (no slack-block re-parsing).
-    """
-    from judge_runner import wilson_ci_pp
-    snap = snapshot or {}
-    cost = float(snap.get("run_cost_usd") or 0.0)
-    n_judged = int(snap.get("n_judged") or 0)
-    n_judgable = int(snap.get("n_judgable") or n_judged)
-    acc_fail = float(snap.get("acc_fail_pct") or 0.0)
-    ci_pp = wilson_ci_pp(acc_fail, n_judgable) if n_judgable else 0.0
-    return (
-        f"   ${cost:.2f} run cost · {n_judged:,} traces judged · "
-        f"Wilson CI ±{ci_pp:.1f}pp on academic"
-    )
-
-
-def _build_scoreboard_safety_stripe_text(snapshot: dict, floor_pct: float = 6.0) -> str:
-    """Scoreboard Safety floor stripe one-line body. Shape:
-       `Academic FAIL X.X% (floor 6%) · Experience FAIL X.X%`
-    """
-    snap = snapshot or {}
-    acc_fail = float(snap.get("acc_fail_pct") or 0.0)
-    exp_fail = float(snap.get("exp_fail_pct") or 0.0)
-    return (
-        f"   Academic FAIL {acc_fail:.1f}% (floor {floor_pct:.0f}%) · "
-        f"Experience FAIL {exp_fail:.1f}%"
-    )
+# F1 (PR #30): _build_scoreboard_ops_stripe_text and
+# _build_scoreboard_safety_stripe_text were removed. The Ops/Safety stripe
+# preambles that used to render below the poster image duplicated numbers
+# already baked into the rendered poster PNG (Variant D); the slim text
+# companion from follow_up_generator now carries any signal Slack still
+# needs in text form.
 
 
 def write_minimal_eval_snapshot(path: str, *, yesterday_str: str, reason: str) -> None:
@@ -1105,9 +1081,18 @@ def main() -> int:
         label=args.label,
     )
 
-    print("\n" + "=" * 60)
-    print(block)
-    print("=" * 60)
+    # F10 (PR #30): the legacy text block dump used to print on EVERY run,
+    # which left operators searching grep for the wrong path on green days.
+    # Only dump the block when we're going down the degraded text path
+    # (POSTER_DISABLE set) or in dry-run; the happy poster path prints a
+    # dedicated `[poster] [info] scoreboard published ...` line instead.
+    _poster_disabled_for_legacy_block = (
+        os.environ.get("POSTER_DISABLE", "").strip() == "1"
+    )
+    if args.dry_run or _poster_disabled_for_legacy_block:
+        print("\n" + "=" * 60)
+        print(block)
+        print("=" * 60)
 
     # 5. Slack post
     if args.dry_run:
@@ -1295,26 +1280,17 @@ def main() -> int:
                     )
                 else:
                     alt_text = poster_slack._alt_text_for(poster_input, "scoreboard")
-                    ops_stripe = _build_scoreboard_ops_stripe_text(today_snap)
-                    safety_stripe = _build_scoreboard_safety_stripe_text(today_snap)
-                    # Phase 4: single-message Block Kit. No thread reply.
-                    # follow_up was generated above before the render so the
-                    # InsightPayload's callouts could be baked into the PNG;
-                    # here we just use its slim text companion.
+                    # F1 (PR #30): Ops/Safety stripe preambles are gone. The
+                    # numbers live inside the rendered poster image; the slim
+                    # text companion carries the verdict + breach @-mention
+                    # + deep-dive link. Phase 4 single-message Block Kit
+                    # remains in force (no thread reply).
                     blocks: list = [
                         poster_slack.make_image_block(image_url, alt_text),
                     ]
                     if follow_up is not None and follow_up.degraded:
                         from scripts.slack_publisher import make_degradation_section
                         blocks.append(make_degradation_section())
-                    blocks.extend([
-                        poster_slack.make_section(
-                            f"*Ops, yesterday:* {ops_stripe}"
-                        ),
-                        poster_slack.make_section(
-                            f"*Safety floor:* {safety_stripe}"
-                        ),
-                    ])
                     if follow_up is not None and follow_up.text:
                         blocks.append(follow_up.as_block_kit_section())
                     blocks.append(
@@ -1336,6 +1312,17 @@ def main() -> int:
                         poster_error = poster_error or f"cause=publish reason={exc!r}"
                     if not posted and poster_error is None:
                         poster_error = "cause=post reason=post_blocks_to_slack returned False"
+                    # F10 (PR #30): positive observability marker on the
+                    # happy path so a `grep '[poster] [info]'` over the
+                    # workflow log proves the poster pipeline (not the
+                    # legacy text fallback) is what posted.
+                    if posted:
+                        print(
+                            f"[poster] [info] scoreboard published "
+                            f"surface=scoreboard date={date_str} "
+                            f"image_url={image_url}",
+                            flush=True,
+                        )
             except _POSTER_RECOVERABLE as exc:
                 poster_error = poster_error or f"cause=render reason={exc!r}"
                 print(f"[poster] [warn] pipeline failed: {exc!r}", file=sys.stderr)

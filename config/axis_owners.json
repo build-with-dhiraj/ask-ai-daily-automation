@@ -1,0 +1,15 @@
+{
+  "academic":   ["U03P01CHELQ", "U091F0LPG7Q"],
+  "experience": ["U03P01CHELQ", "U091F0LPG7Q"],
+  "downvote":   ["U03P01CHELQ", "U091F0LPG7Q"],
+  "multiturn":  ["U03P01CHELQ", "U091F0LPG7Q"],
+  "rephrase":   ["U03P01CHELQ", "U091F0LPG7Q"],
+  "vcp":        ["U05D4FS3HB2"],
+  "cost":       ["U05D4FS3HB2"],
+  "latency":    ["U05D4FS3HB2"],
+  "langfuse":   ["U05D4FS3HB2"],
+  "ui_bug":     ["U085FBH4Q8Y", "U03NCBHSUAZ", "U039CQ75QGY"],
+  "app_bug":    ["U085FBH4Q8Y", "U03NCBHSUAZ", "U039CQ75QGY"],
+  "test":       ["U05G8P8CGTH"],
+  "wildcard":   []
+}

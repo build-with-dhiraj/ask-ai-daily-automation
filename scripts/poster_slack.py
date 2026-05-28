@@ -549,7 +549,38 @@ def build_digest_poster_input(
     except Exception:
         date_human = date_iso
 
-    breach = bool(insights.get("kill_switch_breach"))
+    # F7: derive breach from the snapshot, NOT from the LLM-returned payload.
+    # Reading `insights["kill_switch_breach"]` made breach detection silently
+    # depend on a downstream consumer's payload shape; when that consumer
+    # changed (or when we dropped the upstream fmt_top_insights call), the
+    # poster image went green on a real-breach day. Mirror the academic-floor
+    # pattern used by build_scoreboard_poster_input (acc_fail > 6.0).
+    # Thresholds match daily_digest._KILL_SWITCH_* constants.
+    _ACADEMIC_FLOOR = 6.0
+    _DOWNVOTE_FLOOR = 1.0
+
+    def _snap_breach(snap: dict) -> bool:
+        # Accept either `academic_fail_pct` (digest snapshot convention) or
+        # `acc_fail_pct` (eval snapshot convention) for the academic floor;
+        # both flow through this builder during cross-surface dogfooding.
+        for key, floor in (
+            ("academic_fail_pct", _ACADEMIC_FLOOR),
+            ("acc_fail_pct", _ACADEMIC_FLOOR),
+            ("downvote_rate_pct", _DOWNVOTE_FLOOR),
+        ):
+            v = snap.get(key)
+            if v is None or isinstance(v, bool):
+                continue
+            try:
+                if float(v) > floor:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        # Defensive fallthrough: if a future caller pre-computed the breach
+        # signal and dropped it on the snapshot directly, honor that too.
+        return bool(snap.get("kill_switch_breach"))
+
+    breach = _snap_breach(today)
     insight_list = list(insights.get("insights") or [])
     if breach and not insight_list:
         # D2: never let downstream consumers see a breach + empty insights
@@ -630,15 +661,11 @@ def build_digest_poster_input(
         "total_cost_usd": digest_series("total_cost_usd"),
     }
 
-    # Eyebrow on the right of the masthead: count of insight cards on a
-    # breach / loud day, or "QUIET DAY" on a calm day. The caller can
-    # overwrite this after the InsightPayload is generated to reflect the
-    # final card count from the LLM path.
-    if breach or insight_list:
-        eyebrow_count = max(len(insight_list), 1)
-        digest_eyebrow_right = f"{date_human.upper()} {chr(0x00B7)} {eyebrow_count} INSIGHTS"
-    else:
-        digest_eyebrow_right = f"{date_human.upper()} {chr(0x00B7)} QUIET DAY"
+    # F9: the builder no longer seeds `digest_eyebrow_right`. The caller is
+    # the single source of truth: it sets the eyebrow AFTER the InsightPayload
+    # exists so the rendered card count matches the LLM result. Builder-side
+    # seeding caused the count chip to drift from the actual card count when
+    # the deterministic fallback and the LLM disagreed on insight count.
 
     return {
         "date_human": date_human,
@@ -651,7 +678,6 @@ def build_digest_poster_input(
         # generated. Empty list on import-time render so the template falls
         # back to the quiet-day path.
         "digest_cards": [],
-        "digest_eyebrow_right": digest_eyebrow_right,
         "spark_series_by_metric": spark_series_by_metric,
         # Legacy retained for follow-up text generator + alt_text consumers.
         "headline": verdict,
@@ -848,34 +874,77 @@ def _deep_dive_url(surface: str, date_iso: str) -> str:
     return f"{base}/posters/{surface}/{date_iso}/"
 
 
-def scoreboard_footer_links(date_iso: Optional[str] = None) -> str:
-    """3 links on one line: deep-dive (GH Pages) + Langfuse + Stream logs.
+def _langfuse_link_url() -> Optional[str]:
+    """Resolve the Langfuse link URL or return None.
 
-    The deep-dive page on GitHub Pages replaces the previous one-pager +
-    Metabase question link pair; per the locked decision the per-day
-    deep-dive page carries the per-stratum table + axial breakdown.
+    Order:
+      1. LANGFUSE_URL env (explicit override).
+      2. LANGFUSE_PROJECT_ID env -> hosted Langfuse project URL.
+      3. None (the caller must omit the link rather than ship a dead one).
+    """
+    explicit = os.environ.get("LANGFUSE_URL", "").strip()
+    if explicit:
+        return explicit
+    project_id = os.environ.get("LANGFUSE_PROJECT_ID", "").strip()
+    if project_id:
+        return f"https://cloud.langfuse.com/project/{project_id}"
+    return None
+
+
+def _stream_logs_link_url() -> Optional[str]:
+    """Resolve the Stream logs link URL or return None.
+
+    Order:
+      1. STREAM_LOGS_URL env (explicit override).
+      2. METABASE_URL + METABASE_STREAM_LOGS_CARD_ID -> question card URL.
+      3. None (caller must omit the link).
+    """
+    explicit = os.environ.get("STREAM_LOGS_URL", "").strip()
+    if explicit:
+        return explicit
+    base = os.environ.get("METABASE_URL", "").strip().rstrip("/")
+    card_id = (
+        os.environ.get("METABASE_STREAM_LOGS_CARD_ID", "").strip()
+        or os.environ.get("METABASE_QUESTION_ID", "").strip()
+    )
+    if base and card_id:
+        return f"{base}/question/{card_id}"
+    return None
+
+
+def _footer_links_common(date_iso: Optional[str], surface: str) -> str:
+    """Compose the footer links string for a surface.
+
+    Always emits the Deep dive link (it's surfaced in the slim text companion
+    too, but the footer is the durable reference). Langfuse + Stream logs
+    are appended only when their env-driven URLs resolve, so a misconfigured
+    deployment NEVER ships a dead `https://langfuse` link.
     """
     iso = date_iso or date.today().isoformat()
-    deep_dive = _deep_dive_url("scoreboard", iso)
-    langfuse = os.environ.get("LANGFUSE_URL", "https://langfuse")
-    stream = os.environ.get("STREAM_LOGS_URL", "https://metabase/stream-logs")
-    return (
-        f"<{deep_dive}|Deep dive>  ·  "
-        f"<{langfuse}|Langfuse>  ·  <{stream}|Stream logs>"
-    )
+    parts = []
+    langfuse = _langfuse_link_url()
+    if langfuse:
+        parts.append(f"<{langfuse}|Langfuse>")
+    stream = _stream_logs_link_url()
+    if stream:
+        parts.append(f"<{stream}|Stream logs>")
+    sep = "  " + chr(0x00B7) + "  "
+    return sep.join(parts)
+
+
+def scoreboard_footer_links(date_iso: Optional[str] = None) -> str:
+    """Scoreboard footer: Langfuse + Stream logs (when configured).
+
+    Deep dive moved to the slim text companion (F4). Langfuse + Stream logs
+    are omitted when their env URLs are unset, never shipped as placeholders.
+    """
+    return _footer_links_common(date_iso, "scoreboard")
 
 
 def digest_footer_links(date_iso: Optional[str] = None) -> str:
-    """3 links on one line: deep-dive (GH Pages) + Langfuse + Stream logs.
+    """Digest footer: Langfuse + Stream logs (when configured).
 
-    Confluence dropped per the locked decision; freed for future
-    human-authored narrative pages.
+    Deep dive moved to the slim text companion (F4). Confluence was dropped
+    earlier. Langfuse + Stream logs omitted when env URLs are unset.
     """
-    iso = date_iso or date.today().isoformat()
-    deep_dive = _deep_dive_url("digest", iso)
-    langfuse = os.environ.get("LANGFUSE_URL", "https://langfuse")
-    stream = os.environ.get("STREAM_LOGS_URL", "https://metabase/stream-logs")
-    return (
-        f"<{deep_dive}|Deep dive>  ·  "
-        f"<{langfuse}|Langfuse>  ·  <{stream}|Stream logs>"
-    )
+    return _footer_links_common(date_iso, "digest")

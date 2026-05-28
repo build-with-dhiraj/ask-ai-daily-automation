@@ -200,11 +200,14 @@ class TestGenerateFollowUpHappyPath(unittest.TestCase):
             self.assertTrue(callout.label)
             self.assertTrue(callout.body)
         # text_companion is 3 lines: verdict, @-mention, deep-dive link.
+        # F4 (PR #30): the deep-dive line uses Slack mrkdwn `<url|label>`
+        # syntax now so readers see a clickable "Deep dive" label, not the
+        # raw URL.
         lines = result.text_companion.split("\n")
         self.assertEqual(len(lines), 3)
         self.assertTrue(lines[0].startswith("Top risk:"))
         self.assertIn("<@U03P01CHELQ>", lines[1])  # Naresh (academic owner)
-        self.assertTrue(lines[2].startswith("Deep dive: https://"))
+        self.assertEqual(lines[2], "<https://example.com/deep|Deep dive>")
 
     def test_digest_llm_success_returns_four_cards(self) -> None:
         with mock.patch(
@@ -315,7 +318,8 @@ class TestSlimTextCompanionShape(unittest.TestCase):
         self.assertEqual(len(lines), 3)
         self.assertIsNotNone(VERDICT_OPENING_RE.match(lines[0]))
         self.assertIn("<@", lines[1])
-        self.assertTrue(lines[2].startswith("Deep dive: "))
+        # F4 (PR #30): Slack mrkdwn link syntax `<url|Deep dive>`.
+        self.assertEqual(lines[2], "<https://example.com/deep|Deep dive>")
 
     def test_quiet_digest_text_companion_has_blank_mention_line(self) -> None:
         with mock.patch(
@@ -358,6 +362,77 @@ class TestFollowUpShape(unittest.TestCase):
 
     def test_followup_alias_resolves_to_insight_payload(self) -> None:
         self.assertIs(FollowUp, InsightPayload)
+
+
+# ---------------------------------------------------------------------------
+# F6 (PR #30): _AXIS_OWNERS loaded from config/axis_owners.json with schema
+# validation at import time. Misconfiguration must raise loud, not silently
+# page the wrong human on first breach.
+# ---------------------------------------------------------------------------
+
+class TestAxisOwnersConfigSchema(unittest.TestCase):
+    def setUp(self) -> None:
+        from scripts.follow_up_generator import _load_axis_owners
+        self.load = _load_axis_owners
+
+    def _write(self, tmpdir: str, payload) -> str:
+        path = os.path.join(tmpdir, "axis_owners.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        return path
+
+    def test_valid_config_loads(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, {"academic": ["U03P01CHELQ"], "wildcard": []})
+            out = self.load(path)
+        self.assertEqual(out["academic"], ["U03P01CHELQ"])
+        self.assertEqual(out["wildcard"], [])
+
+    def test_top_level_not_dict_raises(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, ["U03P01CHELQ"])
+            with self.assertRaisesRegex(ValueError, "must be a JSON object"):
+                self.load(path)
+
+    def test_value_not_list_raises(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, {"academic": "U03P01CHELQ"})
+            with self.assertRaisesRegex(ValueError, "must be a list"):
+                self.load(path)
+
+    def test_entry_not_string_raises(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, {"academic": [123]})
+            with self.assertRaisesRegex(ValueError, "must be str"):
+                self.load(path)
+
+    def test_entry_missing_u_prefix_raises(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, {"academic": ["03P01CHELQ"]})
+            with self.assertRaisesRegex(ValueError, "Slack user ID"):
+                self.load(path)
+
+    def test_entry_lowercase_raises(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            path = self._write(td, {"academic": ["u03p01chelq"]})
+            with self.assertRaisesRegex(ValueError, "Slack user ID"):
+                self.load(path)
+
+    def test_shipped_config_is_valid(self) -> None:
+        # The actual config/axis_owners.json shipped with the repo must
+        # load cleanly. Any drift in that file fails CI loud.
+        out = self.load()
+        self.assertIn("academic", out)
+        self.assertIn("wildcard", out)
+        for axis, ids in out.items():
+            for uid in ids:
+                self.assertRegex(uid, r"^U[A-Z0-9]{8,}$")
 
 
 if __name__ == "__main__":
