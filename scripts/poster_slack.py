@@ -721,12 +721,30 @@ def render_and_publish(
     from scripts.poster_publisher import (  # type: ignore
         PosterPublishUnreachableError,
         _verify_url_reachable,
+        publish_deep_dive,
         publish_poster,
     )
     # Narrowed: PosterPublishError (and PosterPublishUnreachableError below)
     # propagate so the caller's _POSTER_RECOVERABLE catch can read the type
     # and log cause=publish (not cause=render). Previously bare-excepted.
     url = publish_poster(png, surface, date_str)  # type: ignore[arg-type]
+
+    # Publish the deep-dive HTML page alongside the PNG. The footer link
+    # in the Slack message points here. Best-effort: a deep-dive publish
+    # failure does NOT roll back the main poster publish; we log and
+    # continue so the Slack message still has the image.
+    try:
+        publish_deep_dive(
+            surface,  # type: ignore[arg-type]
+            date_str,
+            poster_input=poster_input,
+        )
+    except Exception as exc:  # noqa: BLE001 - deep dive is best-effort
+        print(
+            f"[poster] [warn] deep-dive publish failed for "
+            f"{surface}/{date_str}: {exc!r}",
+            file=sys.stderr,
+        )
 
     # gh-pages takes 5-30s+ to propagate a freshly-pushed file to the CDN.
     # If Slack server-side fetches the image_url before propagation it caches
